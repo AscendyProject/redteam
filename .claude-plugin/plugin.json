@@ -1,0 +1,9 @@
+{
+  "name": "redteam",
+  "description": "Adversarial agent-pair harness: one model writes code through a TDD pipeline, a second reviews it, gated at human checkpoints.",
+  "version": "0.1.0",
+  "author": { "name": "AscendyProject" },
+  "homepage": "https://github.com/AscendyProject/redteam",
+  "repository": "https://github.com/AscendyProject/redteam",
+  "license": "AGPL-3.0-or-later"
+}

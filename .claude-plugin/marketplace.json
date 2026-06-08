@@ -1,0 +1,13 @@
+{
+  "name": "ascendy-redteam",
+  "owner": { "name": "AscendyProject" },
+  "description": "Marketplace hosting the redteam agent-pair harness plugin.",
+  "plugins": [
+    {
+      "name": "redteam",
+      "source": ".",
+      "description": "Adversarial agent-pair harness (TDD pipeline + adversarial review, human-gated).",
+      "agents": ["./.claude/agents"]
+    }
+  ]
+}
