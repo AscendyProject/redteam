@@ -62,6 +62,25 @@ are re-vendored on each run (`--overwrite` to refresh). Project-owned files
 (`config.toml`, `docs/*`, `verify.sh`, your `batches/`) are seeded once and
 never overwritten.
 
+### …or install as a Claude Code plugin
+
+This repo doubles as a single-plugin marketplace, so you can skip the manual
+clone. Add it and install once:
+
+```text
+/plugin marketplace add AscendyProject/redteam
+/plugin install redteam@ascendy-redteam
+```
+
+That registers the six sub-agents and a `/redteam:redteam-install` command. Run
+the command (or the `redteam-install` tool it puts on PATH) from your project
+root to vendor the harness in — it just wraps the same installer, so the
+vendored-copy model above is unchanged:
+
+```text
+/redteam:redteam-install        # vendors .redteam/ into the current repo
+```
+
 ### Requirements
 
 - Python 3.11+ (stdlib only — zero runtime pip dependencies).

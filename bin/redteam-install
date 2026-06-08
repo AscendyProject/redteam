@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# redteam plugin install wrapper.
+#
+# Vendors the harness into a target project via the bundled installer. This
+# script self-locates the plugin root (it lives at <plugin-root>/bin/) so it
+# works wherever Claude Code installs the plugin. We resolve from $0 rather than
+# ${CLAUDE_PLUGIN_ROOT} because that variable is only guaranteed inside hook and
+# MCP configs, not inside the slash-command body that invokes this tool.
+#
+# Usage (same args as the installer):
+#   redteam-install <target-dir> [--overwrite] [--dry-run]
+set -euo pipefail
+
+# Resolve this script's real directory, following symlinks, then go up to root.
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+bin_dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+plugin_root="$(cd -P "$bin_dir/.." >/dev/null 2>&1 && pwd)"
+
+exec python3 "$plugin_root/.redteam/scripts/install.py" "$@"
