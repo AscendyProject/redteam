@@ -642,8 +642,15 @@ def process_task(task_dir: Path) -> TaskOutcome:
                     state["next_phase"] = "plan_outcome"
                     save_state(task_dir, state)
                     continue
-            if phase == "review_code" and _mode(state) == "agent-pair":
-                state["review_items"] = _close_phase_review_items(state, phase)
+            if phase == "review_code":
+                # An approved review goes straight to create_pr in BOTH modes,
+                # explicitly skipping the conditionally-entered `rescue` phase
+                # that sits between review_code and create_pr in the order.
+                # Without this, TDD mode would fall through `_next_phase` into
+                # rescue and stall (#7.5 finding F-E). rescue is only ever
+                # entered via the explicit `next_phase = "rescue"` branches.
+                if _mode(state) == "agent-pair":
+                    state["review_items"] = _close_phase_review_items(state, phase)
                 state["next_phase"] = "create_pr"
             else:
                 state["next_phase"] = _next_phase(state, phase)
