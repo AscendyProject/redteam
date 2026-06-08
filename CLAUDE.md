@@ -1,0 +1,127 @@
+# redteam — agent-pair harness (standalone OSS)
+
+This is the standalone home of the **redteam** harness: an adversarial agent-pair
+workflow where one model writes code through a test-first pipeline and a second
+model reviews it, gated at human checkpoints. It was extracted from the private
+`ascendy-backend` monorepo's `.redteam/` and now lives as its own project
+(`AscendyProject/redteam`, private, AGPLv3). The extraction *history* stays in
+ascendy-backend (`docs/ideation/harness/agentic-pair/`); this repo owns the
+project going **forward**.
+
+## What this repo is
+
+- **Engine** (`.redteam/workflows/`): `orchestrator.py` + `phase_runners/` +
+  `adapters/` + `config.py`. Stdlib-only, zero runtime deps.
+- **Prompts** (`.redteam/prompts/codex/`), **agent skeletons** (`.claude/agents/`,
+  6 generic sub-agents), **templates** (`.redteam/templates/`).
+- **Project-owned, dogfood config** (`.redteam/config.toml`, `.redteam/docs/*`,
+  `.redteam/scripts/verify.sh`): these describe THIS repo — redteam dogfoods its
+  own harness. `examples/ascendy-like/` is a real, richer (Python) example.
+- **Installer** (`.redteam/scripts/install.py`): vendors the harness into a
+  consumer repo (copy model, not pip — the engine resolves repo root from its own
+  file location, so it must live inside the consumer's `.redteam/`).
+- **Packaging**: `LICENSE` (AGPLv3 verbatim), `CLA.md`, `README.md`, `pyproject.toml`.
+
+## Commands
+
+```bash
+# Verify (this repo's own gate — ruff + pytest over .redteam/):
+bash .redteam/scripts/verify.sh
+# or directly:
+ruff check .redteam/ && pytest .redteam/tests -q
+
+# Dogfood the harness on itself (drive a real task through the pipeline):
+python3 .redteam/workflows/orchestrator.py start  .redteam/batches/<batch>
+python3 .redteam/workflows/orchestrator.py resume .redteam/batches/<batch>
+python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
+
+# Validate the installer into a throwaway target:
+python3 .redteam/scripts/install.py /tmp/some-repo --dry-run
+```
+
+A Python venv with `ruff` + `pytest` is required for the tests. (The backend
+repo's venv works; a local `venv/` is auto-activated by `verify.sh` if present.)
+
+## How to develop this repo
+
+Two modes, pick by size:
+
+- **Direct edit** for trivial fixes (typos, a one-liner, a doc tweak). Edit,
+  `bash .redteam/scripts/verify.sh`, commit.
+- **Dogfood** for real features: write a task `input.md` under
+  `.redteam/batches/<batch>/tasks/<task-id>/`, run the orchestrator, and let the
+  harness drive itself (Claude implementer + Codex reviewer) through the pipeline.
+  This is the truest ongoing validation — the harness developing the harness.
+
+Either way, **security-boundary or multi-file changes go through Codex review**
+before merge (mirrors the agent-pair discipline this project embodies). The
+verification allowlist, the installer's file-class split (harness-owned vs
+project-owned), the snapshot/fail-closed logic, and the adapter trust model are
+all security boundaries — never loosen them inline; plan_review first.
+
+## Hard rules
+
+- **Engine stays project-agnostic.** No ascendy/Python fingerprints in
+  `.redteam/workflows/` or non-example tests. Project specifics live in
+  `.redteam/config.toml` + `.redteam/docs/*` (project-owned) or in
+  `examples/ascendy-like/`. `test_agents_generic_prompts.py` guards agent bodies;
+  keep it green.
+- **Zero runtime dependencies.** The engine imports only the stdlib. Adding a pip
+  dependency is a deliberate, reviewed decision (it breaks the "vendor + run"
+  promise).
+- **Installer must never delete consumer-owned files.** Harness-owned trees live
+  entirely under `.redteam/` (safe to replace); agent skeletons are copied
+  file-by-file (a consumer's own `.claude/agents/*` must survive `--overwrite`);
+  project-owned files (`config.toml`, `docs/*`, `verify.sh`, `batches/`) are
+  seeded once and never overwritten. Regression-tested in `test_install.py` —
+  keep those invariants.
+- **LICENSE is AGPLv3; contributions are under `CLA.md`.** Don't change the
+  license or weaken the CLA without the operator's explicit decision.
+- **No force-push to `main`; no committing secrets.** Standard.
+
+## Cross-repo coordination (this session owns it)
+
+redteam is now a first-class sibling alongside `ascendy-backend`,
+`ascendy-frontend`, `ascendy-infra` (top-level), `ascendy-blog`. When the harness
+needs another team to act (e.g. cross-stack validation, #7.5), THIS session writes
+the handoff — backend no longer coordinates on redteam's behalf.
+
+```text
+# Outgoing — write into the recipient repo's intake, then cmux-notify:
+ascendy-frontend/docs/requests/from-redteam/<YYYY-MM-DD>-<topic>.md
+ascendy-backend/docs/requests/from-redteam/<YYYY-MM-DD>-<topic>.md
+# (infra: ~/Documents/ascendy/docs/agent-os/requests/from-redteam/... )
+
+# Incoming replies land here:
+docs/requests/from-frontend/<YYYY-MM-DD>-<topic>.md
+docs/requests/from-backend/<YYYY-MM-DD>-<topic>.md
+```
+
+Staged drafts awaiting dispatch live under `docs/requests/to-<sibling>/`.
+There is a staged frontend #7.5 handoff at
+`docs/requests/to-frontend/2026-06-09-cross-stack-validation.md` — dispatching it
+is this session's first coordination task. cmux safety: place text in the target
+surface with `cmux send`, then STOP before any Enter unless the operator confirms.
+
+## Project status / next steps
+
+Extraction milestones #1–#7 done; F-1 (config-driven verification allowlist) fixed
+post-extraction. **Open:**
+
+- **#7.5 cross-stack validation** — dispatch the staged frontend handoff; collect
+  findings; fix any residual coupling in the engine here. Infra is deferred (the
+  TDD pipeline is a poor fit for a non-test Helm/yaml stack — a separate
+  "non-TDD stack support" question, not a #7.5 blocker).
+- **#8 Claude Code plugin packaging** — after #7.5 passes; then flip the repo
+  public.
+- **Drift decision**: `ascendy-backend/.redteam/` is the extraction origin and now
+  diverges from this repo (F-1 landed here only). Decide whether backend
+  re-installs from this standalone (single source) or keeps its vendored copy.
+  Record the decision when made.
+
+See `docs/cross-stack-findings.md` for the #7.5 smoke results and F-1.
+
+## AGENTS.md
+
+`AGENTS.md` is Codex's guide for reviewing/working in this repo (the adversarial
+half of the pair). Keep the two in sync when conventions change.
