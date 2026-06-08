@@ -1,0 +1,36 @@
+name: CI
+
+# Runs this repo's own gate (the harness dogfoods itself): ruff + pytest over
+# .redteam/, via the project verify command. Same check as
+# `bash .redteam/scripts/verify.sh` locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The engine is zero-runtime-dep (stdlib only); ruff + pytest are the only
+      # dev tools (pyproject [project.optional-dependencies] dev). No buildable
+      # package here, so install the two tools directly rather than `pip install .`.
+      - name: Install dev tools (ruff + pytest)
+        run: pip install ruff pytest
+
+      - name: Verify (ruff + pytest over .redteam/)
+        run: bash .redteam/scripts/verify.sh
