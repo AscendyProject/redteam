@@ -105,15 +105,21 @@ surface with `cmux send`, then STOP before any Enter unless the operator confirm
 
 ## Project status / next steps
 
-Extraction milestones #1–#7 done; F-1 (config-driven verification allowlist) fixed
-post-extraction. **Open:**
+Extraction #1–#7 done; F-1 fixed. **#7.5 and #8 are DONE; `v0.1.0` is tagged.**
 
-- **#7.5 cross-stack validation** — dispatch the staged frontend handoff; collect
-  findings; fix any residual coupling in the engine here. Infra is deferred (the
-  TDD pipeline is a poor fit for a non-test Helm/yaml stack — a separate
-  "non-TDD stack support" question, not a #7.5 blocker).
-- **#8 Claude Code plugin packaging** — after #7.5 passes; then flip the repo
-  public.
+- **#7.5 cross-stack validation — DONE (2026-06-09).** Frontend (Nuxt/Vue/TS) ran a
+  real task end-to-end; the engine is generic on JS/TS with no Python coupling at
+  runtime. All five findings fixed: F-E (HIGH — TDD-mode approved review wrongly
+  routed to rescue; PR #5), F-A (MEDIUM — auto-seed state.json + drop stale "SKILL"
+  ref + default mode → agent-pair; PR #6), F-B/C/D (LOW — fail-loud empty seed
+  config, `examples/nuxt-like/`, README mode note; PR #7). Infra stays deferred
+  (TDD-poor Helm/yaml stack — separate "non-TDD support" question).
+- **#8 Claude Code plugin packaging — DONE.** Repo doubles as a single-plugin
+  marketplace (`.claude-plugin/{plugin,marketplace}.json` + `bin/redteam-install`
+  + `commands/redteam-install.md`), Option A (vendored-copy unchanged; PR #3). Live
+  `claude --plugin-dir .` load + `claude plugin validate .` pass. Pre-tag/release
+  checklist: re-run `claude plugin validate .` (not in CI — no `claude` there).
+- **Next: flip the repo public**, then the backend re-install PR (below).
 - **Drift decision (DECIDED 2026-06-09): this repo is the single source of
   truth; backend re-installs as a consumer, deferred until this repo is
   release-tagged.** `ascendy-backend/.redteam/` is the extraction origin (last
