@@ -796,14 +796,16 @@ def _seed_state(task_dir: Path) -> None:
 def process_batch(batch_dir: Path) -> dict[str, str]:
     results: dict[str, str] = {}
     for task_dir in list_tasks(batch_dir):
-        if not (task_dir / "state.json").is_file():
-            # Auto-seed from the template on first run when a brief exists; a task
-            # dir with neither state.json nor input.md is not initializable.
-            if not (task_dir / "input.md").is_file():
-                results[task_dir.name] = "no_input_md"
-                continue
-            _seed_state(task_dir)
+        # A task dir with neither state.json nor input.md is not initializable.
+        if not (task_dir / "state.json").is_file() and not (task_dir / "input.md").is_file():
+            results[task_dir.name] = "no_input_md"
+            continue
         try:
+            # Auto-seed from the template on first run when a brief exists. Kept
+            # inside the try so a corrupt template fails this task only, not the
+            # whole batch.
+            if not (task_dir / "state.json").is_file():
+                _seed_state(task_dir)
             results[task_dir.name] = process_task(task_dir)
         except Exception as e:  # surfaced to user via status report
             results[task_dir.name] = f"error: {e!r}"
