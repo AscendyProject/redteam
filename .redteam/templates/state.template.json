@@ -1,6 +1,6 @@
 {
   "task_id": "",
-  "mode": "tdd",
+  "mode": "agent-pair",
   "phase": "created",
   "phases_completed": [],
   "next_phase": "plan_outcome",
