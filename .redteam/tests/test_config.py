@@ -121,6 +121,32 @@ def test_checked_in_config_toml_loads_and_validates() -> None:
     assert cfg.models == ModelsConfig()
 
 
+def test_seed_template_fails_loud_until_configured(tmp_path: Path) -> None:
+    """#7.5 F-B: the shipped seed config.toml must NOT silently run with a wrong
+    stack's defaults. Its stack-specific fields ship empty, so loading it as-is
+    raises — forcing the operator to configure for their stack."""
+    repo_root = Path(__file__).resolve().parents[2]
+    template = (repo_root / ".redteam" / "templates" / "config.toml").read_text(encoding="utf-8")
+    (tmp_path / ".redteam").mkdir()
+    (tmp_path / ".redteam" / "config.toml").write_text(template, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize("example", ["ascendy-like", "nuxt-like"])
+def test_example_config_loads_and_validates(tmp_path: Path, example: str) -> None:
+    """Shipped examples must be valid, filled-in configs — the counterpart to the
+    deliberately-empty seed template (#7.5 F-C). Guards them from drift."""
+    repo_root = Path(__file__).resolve().parents[2]
+    src = repo_root / "examples" / example / ".redteam" / "config.toml"
+    (tmp_path / ".redteam").mkdir()
+    (tmp_path / ".redteam" / "config.toml").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.project.name  # non-empty, validated
+    assert cfg.project.source_dirs  # non-empty
+    assert cfg.project.verification_allowlist  # non-empty
+
+
 def test_unknown_key_raises(tmp_path: Path) -> None:
     """A typo'd key must error, not silently keep the default verifier."""
     (tmp_path / ".redteam").mkdir()
