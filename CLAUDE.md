@@ -114,10 +114,20 @@ post-extraction. **Open:**
   "non-TDD stack support" question, not a #7.5 blocker).
 - **#8 Claude Code plugin packaging** — after #7.5 passes; then flip the repo
   public.
-- **Drift decision**: `ascendy-backend/.redteam/` is the extraction origin and now
-  diverges from this repo (F-1 landed here only). Decide whether backend
-  re-installs from this standalone (single source) or keeps its vendored copy.
-  Record the decision when made.
+- **Drift decision (DECIDED 2026-06-09): this repo is the single source of
+  truth; backend re-installs as a consumer, deferred until this repo is
+  release-tagged.** `ascendy-backend/.redteam/` is the extraction origin (last
+  touched at backend #170 = this repo's b1a8ce4 baseline; no divergent backend
+  work) and now lags by F-1 + generic defaults + packaging — all behaviorally
+  inert for backend (it overrides via its real config.toml and is a Python
+  stack). So the drift is harmless until then. When this repo cuts `v0.1.0`
+  (after #7.5 + #8), backend opens a PR: `install.py <backend> --overwrite` from
+  the tag (refreshes the engine; backend's ascendy config.toml/docs/verify.sh/
+  batches are project-owned and preserved), `git rm` the three dead scripts
+  (doctor.py, install-claude.sh, redteam_status.py — stale pre-`workflows/`
+  scaffolding), and add `verification_allowlist` to backend's config.toml. That
+  PR doubles as install.py `--overwrite` validation on a real Python consumer.
+  Do NOT re-install before the tag (chasing `main` defeats reproducibility).
 
 See `docs/cross-stack-findings.md` for the #7.5 smoke results and F-1.
 
