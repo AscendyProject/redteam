@@ -56,16 +56,18 @@ def test_marketplace_lists_this_repo_as_the_plugin():
     assert entry["source"] == "."  # the plugin is this same repo root
 
 
-def test_marketplace_agents_override_points_at_the_vendored_agents():
-    """The agents override must resolve to the real dir holding the six skeletons
-    install.py vendors — guards drift between packaging and the installer."""
+def test_marketplace_agents_override_lists_the_vendored_agents():
+    """The agents override is a list of individual .md file paths (the marketplace
+    schema rejects a bare directory). Each must exist and the set must cover the
+    six skeletons install.py vendors — guards drift between packaging + installer."""
     data = json.loads(_MARKETPLACE_JSON.read_text())
     agents_paths = data["plugins"][0]["agents"]
     assert isinstance(agents_paths, list) and agents_paths
-    resolved = (_ROOT / agents_paths[0]).resolve()
-    assert resolved.is_dir(), f"agents override path missing: {resolved}"
-    on_disk = {p.stem for p in resolved.glob("*.md")}
-    assert _EXPECTED_AGENTS <= on_disk, f"missing agents: {_EXPECTED_AGENTS - on_disk}"
+    resolved = [(_ROOT / a).resolve() for a in agents_paths]
+    for r in resolved:
+        assert r.is_file() and r.suffix == ".md", f"agents entry not a .md file: {r}"
+    stems = {r.stem for r in resolved}
+    assert _EXPECTED_AGENTS <= stems, f"missing agents: {_EXPECTED_AGENTS - stems}"
 
 
 def test_install_wrapper_is_executable_and_self_locating():
