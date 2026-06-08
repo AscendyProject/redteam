@@ -22,6 +22,12 @@ plan_outcome → plan_review → [human gate] → implement → review_code
               → create_pr → [human gate] → done
 ```
 
+That is the default **agent-pair** flow (a separate reviewer model reviews the
+implementer). The alternative single-model **TDD** mode (`mode = "tdd"` in a
+task's `state.json`) replaces `plan_review` with a `write_test → verify_test`
+pair before `implement`; the gates and the `review_code → … → create_pr` tail
+are the same.
+
 Each phase is run by a focused sub-agent with its own prompt and tool scope
 (`.claude/agents/*.md`): an outcome-planner, test-author/verifier, implementer,
 code-security-reviewer, and pr-author. The reviewer is a *fresh* agent that only
@@ -97,8 +103,9 @@ read:
 - `.redteam/docs/security-checklist.md` — the reviewer's hard lines
 - `.redteam/docs/test-conventions.md` — how your test suite is wired
 
-`examples/ascendy-like/` is a complete, real example (FastAPI + Celery +
-Postgres + Milvus) to copy from.
+Two complete examples to copy the shape from: `examples/ascendy-like/` (Python —
+FastAPI + Celery + Postgres + Milvus) and `examples/nuxt-like/` (JS/TS — Nuxt 3 +
+Vue + Vitest).
 
 ## Run
 

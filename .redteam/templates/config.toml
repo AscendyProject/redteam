@@ -3,23 +3,28 @@
 # This is the externalization seam: every project-specific value the engine
 # needs lives here, so the same engine drives any repo. The loader fails loud on
 # unknown keys/sections and bad types. See
-# `examples/ascendy-like/.redteam/config.toml` for a real, filled-in example.
+# `examples/ascendy-like/.redteam/config.toml` (Python) or
+# `examples/nuxt-like/.redteam/config.toml` (JS/TS) for real, filled-in examples.
+#
+# The three stack-specific fields below ship EMPTY on purpose: the loader rejects
+# empty source_dirs / test_file_glob / verification_allowlist, so the harness
+# fails loud here rather than silently running with the wrong stack's defaults.
 
 [project]
 name = "my-project"
 context_file = ".redteam/docs/project-context.md"
 security_checklist = ".redteam/docs/security-checklist.md"
 test_conventions_file = ".redteam/docs/test-conventions.md"
-source_dirs = ["src/"]                          # where your code lives
-test_dir = "tests/"                             # where tests live
-test_file_glob = "test_*.py"                    # how a new test file is recognized
+source_dirs = []                                # REQUIRED: where your code lives, e.g. ["src/"] or ["components/", "pages/"]
+test_dir = "tests/"                             # where tests live (adjust, e.g. "test/" or "e2e/")
+test_file_glob = ""                             # REQUIRED: how a new test file is recognized, e.g. "test_*.py" or "*.spec.ts"
 verify_command = "bash .redteam/scripts/verify.sh"  # your lint/type/test gate
 # Bare tools an LLM may name in a verification hook (the verify_command above is
-# always trusted). Security boundary — keep it minimal. JS example below.
+# always trusted). Security boundary — keep it minimal. REQUIRED (ships empty).
 # A Python stack: ["pytest", "ruff", "mypy"]; a JS stack: ["vitest", "eslint", "tsc"].
 # (npm/npx grant broad execution — any args are allowed after an allowed tool —
 #  so only add them as a deliberate, broad project choice.)
-verification_allowlist = ["pytest", "ruff", "mypy"]
+verification_allowlist = []
 branch_prefix = "redteam"                       # per-task branch prefix: <prefix>/<task-id>
 base_branch = "main"                            # PR base + review diff base
 

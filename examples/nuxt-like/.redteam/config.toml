@@ -1,0 +1,30 @@
+# redteam harness config — nuxt-like (generic Nuxt 3 + Vue 3 + TypeScript).
+#
+# The JS/TS counterpart to examples/ascendy-like (Python). A real, filled-in
+# config showing what a non-Python stack puts here. Copy the shape, not the
+# specifics — your dirs, globs, and gate will differ.
+
+[project]
+name = "nuxt-like"
+context_file = ".redteam/docs/project-context.md"
+security_checklist = ".redteam/docs/security-checklist.md"
+test_conventions_file = ".redteam/docs/test-conventions.md"
+# Nuxt keeps source at the repo root (no src/): components, pages, composables,
+# stores, server routes, etc.
+source_dirs = ["components/", "pages/", "composables/", "stores/", "server/", "i18n/"]
+test_dir = "tests/"
+test_file_glob = "*.spec.ts"
+verify_command = "bash .redteam/scripts/verify.sh"
+# JS stack tools an LLM-authored outcome.md may name in a verification hook.
+# The verify_command above is always trusted; these bound everything else.
+# Security boundary — note npm/npx are deliberately NOT here (they grant broad
+# execution: any args run after an allowed tool), so name the tools directly.
+verification_allowlist = ["vitest", "eslint", "tsc", "nuxi"]
+branch_prefix = "fe"
+base_branch = "main"
+
+[models]
+planner = "claude-opus-4-7"
+implementer = "claude-sonnet-4-6"
+reviewer = "codex"
+rescue = "codex"
