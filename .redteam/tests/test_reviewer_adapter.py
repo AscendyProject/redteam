@@ -375,7 +375,7 @@ def test_orchestrator_skips_sentinel_with_headless_reviewer(monkeypatch, tmp_pat
         "escape": {"ask_user": False, "reason": None, "return_phase": None},
     }
     task_dir = _seed_task(tmp_path, state)
-    monkeypatch.setattr(orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix: f"proj/{task_id}")
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"proj/{task_id}")
     monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
     ran = {"plan_review": False}
 
@@ -406,7 +406,7 @@ def test_orchestrator_blocks_without_adapter(monkeypatch, tmp_path) -> None:
         "escape": {"ask_user": False, "reason": None, "return_phase": None},
     }
     task_dir = _seed_task(tmp_path, state)
-    monkeypatch.setattr(orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix: f"proj/{task_id}")
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"proj/{task_id}")
     monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
 
     outcome = orch.process_task(task_dir)

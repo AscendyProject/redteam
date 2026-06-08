@@ -39,16 +39,31 @@ from pathlib import Path
 # (.redteam/scripts/install.py → parents[2]).
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
-# Directory subtrees re-vendored on install (harness-owned).
+# Directory subtrees re-vendored on install (harness-owned). These live entirely
+# under .redteam/ which the harness owns, so replacing the whole subtree on
+# --overwrite is safe.
 HARNESS_TREES = (
     ".redteam/workflows",
     ".redteam/prompts",
     ".redteam/templates",
-    ".claude/agents",
 )
 
-# Single harness-owned files copied alongside the trees.
-HARNESS_FILES = (".redteam/scripts/install.py",)
+# Individual harness-owned files copied by name. The agent skeletons are copied
+# file-by-file (NOT as a .claude/agents tree) because a consumer repo may keep
+# its own unrelated Claude agents in that directory — re-vendoring must never
+# delete them.
+HARNESS_AGENTS = (
+    "code-security-reviewer",
+    "implementer",
+    "outcome-planner",
+    "pr-author",
+    "test-author",
+    "test-verifier",
+)
+HARNESS_FILES = (
+    ".redteam/scripts/install.py",
+    *(f".claude/agents/{name}.md" for name in HARNESS_AGENTS),
+)
 
 # Project-owned files seeded once. (dest relpath, source relpath-or-None).
 # None source → create an empty file/dir. config.toml seeds from the template.

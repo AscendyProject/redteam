@@ -420,12 +420,14 @@ TaskOutcome = Literal[
 ]
 
 
-def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam") -> str:
+def _ensure_task_branch(
+    task_id: str, repo: Path, branch_prefix: str = "redteam", base_branch: str = "main"
+) -> str:
     """Ensure we're on the per-task branch `<branch_prefix>/<task_id>` before phases run.
 
     Steps:
       1. Stash local tracked/untracked changes so branch checkout is not blocked
-      2. Checkout main (clean slate per task)
+      2. Checkout `base_branch` (clean slate per task)
       3. Pull --ff-only (best effort; OK if no remote)
       4. Create or switch to <branch_prefix>/<task_id>
       5. Pop the stash back onto the selected task branch
@@ -455,13 +457,13 @@ def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam"
 
     try:
         subprocess.run(
-            ["git", "checkout", "main"],
+            ["git", "checkout", base_branch],
             cwd=str(repo),
             check=True,
         )
 
         subprocess.run(
-            ["git", "pull", "--ff-only", "origin", "main"],
+            ["git", "pull", "--ff-only", "origin", base_branch],
             cwd=str(repo),
             check=False,
             capture_output=True,
@@ -515,7 +517,9 @@ def process_task(task_dir: Path) -> TaskOutcome:
     if next_phase_check not in ("done", "deferred"):
         cfg = load_config(repo_root())
         try:
-            branch = _ensure_task_branch(task_dir.name, repo_root(), cfg.project.branch_prefix)
+            branch = _ensure_task_branch(
+                task_dir.name, repo_root(), cfg.project.branch_prefix, cfg.project.base_branch
+            )
             state["branch"] = branch
             save_state(task_dir, state)
         except (subprocess.CalledProcessError, RuntimeError) as e:

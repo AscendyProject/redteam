@@ -11,15 +11,15 @@ project, You agree to the terms below. If You are contributing on behalf of an
 entity, You represent that You are authorized to bind that entity.
 
 > **Note:** This is a template CLA provided for completeness. Before relying on
-> it, the project maintainer should have it reviewed by counsel and fill in the
-> project owner's legal name where marked `<PROJECT OWNER>`.
+> it, the project maintainer should have it reviewed by counsel and replace
+> "AscendyProject" with the project owner's full legal name/entity.
 
 ## 1. Definitions
 
 - **"You"** / **"Your"** — the individual or legal entity making a Contribution.
 - **"Contribution"** — any original work of authorship, including modifications
   or additions to existing work, that You intentionally submit to the project.
-- **"Project Owner"** — `<PROJECT OWNER>`, the steward of this project.
+- **"Project Owner"** — AscendyProject, the steward of this project.
 
 ## 2. Copyright license
 
