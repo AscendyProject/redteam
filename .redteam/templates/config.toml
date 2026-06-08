@@ -1,0 +1,26 @@
+# redteam harness config — FILL THIS IN for your project.
+#
+# This is the externalization seam: every project-specific value the engine
+# needs lives here, so the same engine drives any repo. The loader fails loud on
+# unknown keys/sections and bad types. See
+# `examples/ascendy-like/.redteam/config.toml` for a real, filled-in example.
+
+[project]
+name = "my-project"
+context_file = ".redteam/docs/project-context.md"
+security_checklist = ".redteam/docs/security-checklist.md"
+test_conventions_file = ".redteam/docs/test-conventions.md"
+source_dirs = ["src/"]                          # where your code lives
+test_dir = "tests/"                             # where tests live
+test_file_glob = "test_*.py"                    # how a new test file is recognized
+verify_command = "bash .redteam/scripts/verify.sh"  # your lint/type/test gate
+branch_prefix = "redteam"                       # per-task branch prefix: <prefix>/<task-id>
+base_branch = "main"                            # PR base + review diff base
+
+[models]
+# Role → model/provider. reviewer/rescue (and the worker side) are provider
+# identifiers resolved to adapters: "codex" → CodexAdapter, "claude" → ClaudeAdapter.
+planner = "claude-opus-4-7"
+implementer = "claude-sonnet-4-6"
+reviewer = "codex"
+rescue = "codex"

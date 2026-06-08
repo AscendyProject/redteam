@@ -1,0 +1,34 @@
+[project]
+name = "redteam-harness"
+version = "0.1.0"
+description = "Adversarial agent-pair harness: one model writes code through a TDD pipeline, a second model reviews it, gated at human checkpoints."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "AscendyProject" }]
+keywords = ["llm", "agents", "code-review", "tdd", "claude", "codex", "ai-pair"]
+# Zero runtime Python dependencies: the engine uses only the stdlib (tomllib,
+# subprocess, pathlib). The model CLIs it drives (`claude`, `codex`) are
+# external tools the user installs separately — see README.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[project.urls]
+Homepage = "https://github.com/AscendyProject/redteam"
+Source = "https://github.com/AscendyProject/redteam"
+
+# The harness is *vendored* into a consumer repo (`.redteam/` lives in the
+# project tree, so the engine can resolve the repo root from its own location)
+# and invoked as `python3 .redteam/workflows/orchestrator.py <cmd> <batch>`.
+# It is not run from site-packages, so no console_script is exposed here. This
+# pyproject mainly carries metadata + tooling config for the harness repo itself.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["examples", ".redteam/batches"]
+
+[tool.pytest.ini_options]
+testpaths = [".redteam/tests"]

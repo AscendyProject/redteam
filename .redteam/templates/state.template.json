@@ -1,0 +1,41 @@
+{
+  "task_id": "",
+  "mode": "tdd",
+  "phase": "created",
+  "phases_completed": [],
+  "next_phase": "plan_outcome",
+  "decision": "pending",
+  "owner": "claude",
+  "reviewer": "codex",
+  "next_action": null,
+  "review_items": [],
+  "verification": {
+    "commands": [],
+    "last_exit_code": null,
+    "last_output_path": null,
+    "last_run_at": null,
+    "last_diff_sha256": null
+  },
+  "models": {
+    "planner": "claude-opus-4-7",
+    "implementer": "claude-sonnet-4-6",
+    "reviewer": "codex",
+    "rescue": "codex"
+  },
+  "escape": {
+    "ask_user": false,
+    "reason": null,
+    "return_phase": null
+  },
+  "implement_round_count": 0,
+  "retries": {},
+  "max_retries_per_phase": 2,
+  "last_failure_reason": null,
+  "last_failure_log": null,
+  "last_failure_diff": null,
+  "deferred_requirements": [],
+  "branch": "",
+  "pr_url": null,
+  "created_at": "",
+  "updated_at": ""
+}

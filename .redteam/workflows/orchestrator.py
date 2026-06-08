@@ -1,0 +1,1031 @@
+#!/usr/bin/env python3
+"""redteam orchestrator.
+
+Usage:
+    python3 .redteam/workflows/orchestrator.py start  <batch-dir>
+    python3 .redteam/workflows/orchestrator.py resume <batch-dir>
+    python3 .redteam/workflows/orchestrator.py status <batch-dir>
+
+Walks each task in <batch-dir>/tasks/ through the 8-phase pipeline,
+persists state.json after every phase, blocks at human gates (sentinel files),
+retries on CHANGES_REQUESTED up to `max_retries_per_phase`, and defers tasks
+that stall (same log + same diff repeatedly).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Literal
+
+# Make `phase_runners.*` importable when this file is invoked as a script
+# (`python3 .redteam/workflows/orchestrator.py ...`) rather than via `python -m`.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
+    create_pr,
+    implement,
+    plan_outcome,
+    plan_review,
+    rescue,
+    review_code,
+    verify_test,
+    write_test,
+)
+from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E402
+    PhaseResult,
+    extract_verification_commands,
+    repo_root,
+    validate_verification_commands,
+)
+from adapters import get_reviewer_adapter  # type: ignore[import-not-found]  # noqa: E402
+from config import load_config  # type: ignore[import-not-found]  # noqa: E402
+
+
+# ---------- phase order & runner registry ----------
+
+TDD_PHASE_ORDER: list[str] = [
+    "plan_outcome",
+    "human_gate_outcome",
+    "write_test",
+    "verify_test",
+    "implement",
+    "review_code",
+    "rescue",
+    "human_gate_rescue",
+    "create_pr",
+    "human_gate_pr",
+    "done",
+]
+
+AGENT_PAIR_PHASE_ORDER: list[str] = [
+    "plan_outcome",
+    "plan_review",
+    "human_gate_outcome",
+    "implement",
+    "review_code",
+    # rescue + its human gate must be in the order so that a rescue
+    # (entered conditionally via next_phase="rescue") advances to
+    # human_gate_rescue rather than falling through to "done". The normal
+    # path skips them: review_code-approved sets next_phase="create_pr"
+    # explicitly, so _next_phase is never consulted for review_code.
+    "rescue",
+    "human_gate_rescue",
+    "create_pr",
+    "human_gate_pr",
+    "done",
+]
+
+
+PhaseRunner = Callable[[Path, dict[str, Any]], PhaseResult]
+
+
+PHASE_RUNNERS: dict[str, PhaseRunner] = {
+    "plan_outcome": plan_outcome.run,
+    "plan_review": plan_review.run,
+    "write_test": write_test.run,
+    "verify_test": verify_test.run,
+    "implement": implement.run,
+    "review_code": review_code.run,
+    "rescue": rescue.run,
+    "create_pr": create_pr.run,
+}
+
+
+# Reviewer phase → worker phase to re-invoke when REVIEW_DECISION is CHANGES_REQUESTED.
+# A rejected review means the worker's output was inadequate, so we go back to the worker
+# (carrying the reviewer's feedback as input), not retry the reviewer with the same input.
+REVIEWER_BACKTRACK: dict[str, str] = {
+    "plan_review": "plan_outcome",
+    "verify_test": "write_test",
+    "review_code": "implement",
+}
+
+
+GATE_SENTINELS: dict[str, str] = {
+    "human_gate_outcome": "outcome.approved",
+    "ask_user": "ask_user.resolved",
+    "human_gate_rescue": "rescue.reviewed",
+    "human_gate_pr": "pr.reviewed",
+}
+
+
+MANUAL_PHASE_SENTINELS: dict[str, str] = {
+    "plan_review": "plan_review.done",
+    "review_code": "code_review.done",
+    "rescue": "rescue.done",
+}
+
+# Read-only reviewer phases that a headless reviewer adapter can produce
+# synchronously (skipping the manual sentinel). rescue is excluded — it is a
+# mutating flow, not a read-only review.
+REVIEWER_PHASES: frozenset[str] = frozenset({"plan_review", "review_code"})
+
+
+# ---------- state I/O ----------
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_state(task_dir: Path) -> dict[str, Any]:
+    state_path = task_dir / "state.json"
+    if not state_path.exists():
+        raise FileNotFoundError(f"state.json not found in {task_dir} — was this task initialized via the SKILL?")
+    text = state_path.read_text(encoding="utf-8")
+    obj = json.loads(text)
+    if not isinstance(obj, dict):
+        raise ValueError(f"state.json in {task_dir} is not a JSON object")
+    return obj
+
+
+def save_state(task_dir: Path, state: dict[str, Any]) -> None:
+    state["updated_at"] = utc_now()
+    payload = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
+    tmp = task_dir / "state.json.tmp"
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(task_dir / "state.json")
+
+
+# ---------- phase progression ----------
+
+
+def _mode(state: dict[str, Any]) -> str:
+    return str(state.get("mode") or "tdd")
+
+
+def _phase_order(state: dict[str, Any]) -> list[str]:
+    if _mode(state) == "agent-pair":
+        return AGENT_PAIR_PHASE_ORDER
+    return TDD_PHASE_ORDER
+
+
+def _next_phase(state: dict[str, Any], current: str) -> str:
+    phase_order = _phase_order(state)
+    if current not in phase_order:
+        return "done"
+    idx = phase_order.index(current)
+    if idx + 1 >= len(phase_order):
+        return "done"
+    return phase_order[idx + 1]
+
+
+def _is_gate(phase: str) -> bool:
+    return phase in GATE_SENTINELS
+
+
+def _gate_satisfied(task_dir: Path, phase: str) -> bool:
+    sentinel = GATE_SENTINELS.get(phase)
+    if not sentinel:
+        return False
+    return (task_dir / sentinel).exists()
+
+
+def _manual_phase_ready(task_dir: Path, phase: str) -> bool:
+    sentinel = MANUAL_PHASE_SENTINELS.get(phase)
+    if not sentinel:
+        return True
+    return (task_dir / sentinel).exists()
+
+
+def _set_next_action_for_manual_phase(task_dir: Path, state: dict[str, Any], phase: str) -> None:
+    prompt_map = {
+        "plan_review": ".redteam/prompts/codex/plan_review.md",
+        "review_code": ".redteam/prompts/codex/code_review.md",
+        "rescue": ".redteam/prompts/codex/rescue.md",
+    }
+    output_map = {
+        "plan_review": "plan_review.md",
+        "review_code": "code_review.md",
+        "rescue": "rescue_report.md",
+    }
+    sentinel = MANUAL_PHASE_SENTINELS[phase]
+    state["next_action"] = {
+        "who": "codex",
+        "what": f"Use {prompt_map[phase]} to produce {task_dir / output_map[phase]}, then touch {task_dir / sentinel}.",
+        "reads": ["input.md", "outcome.md", "state.json"],
+        "writes": [output_map[phase], sentinel],
+    }
+
+
+def _parse_user_decision(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        return None
+    last = lines[-1]
+    if not last.startswith("USER_DECISION:"):
+        return None
+    value = last.split(":", 1)[1].strip()
+    if value in {"APPROVE", "REVISE_PLAN", "REVISE_IMPLEMENTATION", "ABANDON"}:
+        return value
+    return None
+
+
+def _read_user_response_body(path: Path) -> str:
+    if not path.exists():
+        return ""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    body = [line for line in lines if not line.strip().startswith("USER_DECISION:")]
+    return "\n".join(body).strip()
+
+
+def _append_user_response_to_feedback(state: dict[str, Any], response: str) -> None:
+    if not response:
+        return
+    state["last_user_response"] = response
+    existing = state.get("last_failure_log") or ""
+    state["last_failure_log"] = existing + "\n\n## User response\n\n" + response
+
+
+def _close_phase_review_items(state: dict[str, Any], phase: str) -> list[dict[str, Any]]:
+    items = state.get("review_items")
+    if not isinstance(items, list):
+        return []
+    updated: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("phase") == phase and item.get("status") == "open":
+            item = dict(item)
+            item["status"] = "closed_at_phase_exit"
+            item["phase_resolved_at"] = phase
+        updated.append(item)
+    return updated
+
+
+def _clear_manual_sentinel(task_dir: Path, phase: str) -> None:
+    sentinel = MANUAL_PHASE_SENTINELS.get(phase)
+    if not sentinel:
+        return
+    path = task_dir / sentinel
+    if path.exists():
+        path.unlink()
+
+
+def _clear_manual_phase_artifacts(task_dir: Path, phase: str) -> None:
+    _clear_manual_sentinel(task_dir, phase)
+    review_files = {
+        "plan_review": "plan_review.md",
+        "review_code": "code_review.md",
+        "rescue": "rescue_report.md",
+    }
+    filename = review_files.get(phase)
+    if filename:
+        path = task_dir / filename
+        if path.exists():
+            previous = task_dir / f"{filename}.previous"
+            path.replace(previous)
+
+
+def _clear_ask_user_sentinel(task_dir: Path) -> None:
+    sentinel = task_dir / GATE_SENTINELS["ask_user"]
+    if sentinel.exists():
+        sentinel.unlink()
+
+
+def _archive_ask_user_response(task_dir: Path) -> None:
+    path = task_dir / "ask_user_response.md"
+    if path.exists():
+        path.replace(task_dir / "ask_user_response.md.previous")
+
+
+def _snapshot_verification_commands(task_dir: Path, state: dict[str, Any]) -> bool:
+    outcome_path = task_dir / "outcome.md"
+    try:
+        outcome_text = outcome_path.read_text(encoding="utf-8")
+        commands = extract_verification_commands(outcome_text)
+        # Pin the plan-time verify command so post-implementer re-validation
+        # cannot drift if the implementer edits config.toml mid-round (IR-001).
+        verify_command = load_config(repo_root()).project.verify_command
+        validate_verification_commands(commands, verify_command)
+    except (OSError, ValueError) as exc:
+        state["last_failure_reason"] = "invalid_verification_commands"
+        state["last_failure_log"] = str(exc)
+        return False
+    verification = state.setdefault("verification", {})
+    verification["commands"] = commands
+    verification["verify_command"] = verify_command
+    verification["last_exit_code"] = None
+    verification["last_output_path"] = "verification.log"
+    verification["last_run_at"] = None
+    return True
+
+
+REVIEW_ITEM_RE = re.compile(
+    r"^(?P<id>(?:PR|IR)-\d{3})\s+severity:(?P<severity>\w+)\s+status:(?P<status>\w+)\b",
+    re.IGNORECASE,
+)
+
+
+def _sync_review_items(state: dict[str, Any], phase: str, review_text: str) -> None:
+    existing = state.setdefault("review_items", [])
+    if not isinstance(existing, list):
+        existing = []
+        state["review_items"] = existing
+
+    by_id = {item.get("id"): item for item in existing if isinstance(item, dict) and item.get("id")}
+    for line in review_text.splitlines():
+        match = REVIEW_ITEM_RE.search(line)
+        if not match:
+            continue
+        item_id = match.group("id").upper()
+        severity = match.group("severity").lower()
+        status = match.group("status").lower()
+        prev = by_id.get(item_id)
+        if prev is None:
+            existing.append(
+                {
+                    "id": item_id,
+                    "phase": phase,
+                    "severity": severity,
+                    "status": status,
+                    "summary": line.strip(),
+                    "carry_over_count": 1 if status == "open" else 0,
+                }
+            )
+            continue
+        prev["phase"] = phase
+        prev["severity"] = severity
+        prev["summary"] = line.strip()
+        if status == "open" and prev.get("status") == "open":
+            prev["carry_over_count"] = int(prev.get("carry_over_count") or 1) + 1
+        elif status == "open":
+            prev["carry_over_count"] = 1
+        else:
+            prev["carry_over_count"] = 0
+        prev["status"] = status
+
+
+def _has_open_blocker_at_or_above(state: dict[str, Any], phase: str, count: int) -> bool:
+    items = state.get("review_items")
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if (
+            item.get("phase") == phase
+            and item.get("status") == "open"
+            and item.get("severity") == "blocker"
+            and int(item.get("carry_over_count") or 0) >= count
+        ):
+            return True
+    return False
+
+
+def _record_failure(state: dict[str, Any], result: PhaseResult) -> None:
+    state["last_failure_reason"] = result["status"]
+    state["last_failure_log"] = result["log"]
+    state["last_failure_diff"] = result["diff"]
+
+
+def _clear_failure(state: dict[str, Any]) -> None:
+    state["last_failure_reason"] = None
+    state["last_failure_log"] = None
+    state["last_failure_diff"] = None
+    state["last_user_response"] = None
+
+
+def _is_stalled(state: dict[str, Any], result: PhaseResult, retries: int) -> bool:
+    """Stall = previous attempt produced exactly the same log AND diff, twice or more.
+
+    A single rejection isn't a stall (the next attempt may move things forward).
+    Two consecutive rejections with identical artifacts is the signal that the
+    sub-agent can't make progress on its own.
+    """
+    if retries < 2:
+        return False
+    prev_log = state.get("last_failure_log") or ""
+    prev_diff = state.get("last_failure_diff") or ""
+    return result["log"] == prev_log and result["diff"] == prev_diff
+
+
+# ---------- per-task driver ----------
+
+TaskOutcome = Literal[
+    "done",
+    "blocked_on_human_gate",
+    "deferred",
+    "error",
+]
+
+
+def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam") -> str:
+    """Ensure we're on the per-task branch `<branch_prefix>/<task_id>` before phases run.
+
+    Steps:
+      1. Stash local tracked/untracked changes so branch checkout is not blocked
+      2. Checkout main (clean slate per task)
+      3. Pull --ff-only (best effort; OK if no remote)
+      4. Create or switch to <branch_prefix>/<task_id>
+      5. Pop the stash back onto the selected task branch
+
+    Returns the branch name. Raises CalledProcessError if checkout fails, or
+    RuntimeError if restoring the stash conflicts.
+    """
+    branch = f"{branch_prefix}/{task_id}"
+    stash_msg = f"orchestrator-multi-task-{task_id}"
+
+    stash_proc = subprocess.run(
+        ["git", "stash", "push", "-u", "-m", stash_msg],
+        cwd=str(repo),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if stash_proc.returncode != 0:
+        raise subprocess.CalledProcessError(
+            stash_proc.returncode,
+            ["git", "stash", "push", "-u", "-m", stash_msg],
+            output=stash_proc.stdout,
+            stderr=stash_proc.stderr,
+        )
+    stash_output = (stash_proc.stdout or "") + (stash_proc.stderr or "")
+    stashed = "No local changes to save" not in stash_output
+
+    try:
+        subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=str(repo),
+            check=True,
+        )
+
+        subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=str(repo),
+            check=False,
+            capture_output=True,
+        )
+
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "--verify", branch],
+            cwd=str(repo),
+            capture_output=True,
+            check=False,
+        )
+        if rev_parse.returncode != 0:
+            subprocess.run(
+                ["git", "checkout", "-b", branch],
+                cwd=str(repo),
+                check=True,
+            )
+        else:
+            subprocess.run(
+                ["git", "checkout", branch],
+                cwd=str(repo),
+                check=True,
+            )
+    finally:
+        if stashed:
+            pop_proc = subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=str(repo),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if pop_proc.returncode != 0:
+                raise RuntimeError(
+                    f"stash pop conflict during _ensure_task_branch for {task_id}. "
+                    "The stash remains in the stash list for manual recovery. "
+                    f"stderr: {(pop_proc.stderr or '')[:1000]}"
+                )
+
+    return branch
+
+
+def process_task(task_dir: Path) -> TaskOutcome:
+    """Drive a single task through PHASE_ORDER until it blocks, errors, or finishes."""
+    state = load_state(task_dir)
+    state["mode"] = _mode(state)
+
+    # Ensure correct branch before any phase runs.
+    # Skip if task is already done or deferred (no work to do).
+    next_phase_check = state.get("next_phase")
+    if next_phase_check not in ("done", "deferred"):
+        cfg = load_config(repo_root())
+        try:
+            branch = _ensure_task_branch(task_dir.name, repo_root(), cfg.project.branch_prefix)
+            state["branch"] = branch
+            save_state(task_dir, state)
+        except (subprocess.CalledProcessError, RuntimeError) as e:
+            state["last_failure_reason"] = "branch_setup_failed"
+            if isinstance(e, subprocess.CalledProcessError):
+                state["last_failure_log"] = (
+                    f"_ensure_task_branch failed for {task_dir.name}: "
+                    f"cmd={e.cmd!r} returncode={e.returncode} "
+                    f"stderr={(e.stderr if e.stderr else '')!r}"
+                )
+            else:
+                state["last_failure_log"] = f"_ensure_task_branch failed for {task_dir.name}: {e!r}"
+            state["next_phase"] = "deferred"
+            save_state(task_dir, state)
+            return "error"
+
+    while True:
+        phase = state.get("next_phase") or _phase_order(state)[0]
+
+        if phase == "done":
+            state["phase"] = "done"
+            save_state(task_dir, state)
+            return "done"
+
+        if phase == "deferred":
+            save_state(task_dir, state)
+            return "deferred"
+
+        # --- human gate: block until sentinel exists ---
+        if _is_gate(phase):
+            if not _gate_satisfied(task_dir, phase):
+                state["phase"] = phase
+                save_state(task_dir, state)
+                return "blocked_on_human_gate"
+            # gate cleared → advance
+            completed = state.setdefault("phases_completed", [])
+            if phase not in completed:
+                completed.append(phase)
+            if phase == "ask_user":
+                response_body = _read_user_response_body(task_dir / "ask_user_response.md")
+                user_decision = _parse_user_decision(task_dir / "ask_user_response.md")
+                _append_user_response_to_feedback(state, response_body)
+                return_phase = state.get("escape", {}).get("return_phase")
+                if user_decision == "APPROVE":
+                    state["next_phase"] = "implement"
+                elif user_decision == "REVISE_PLAN":
+                    if isinstance(return_phase, str):
+                        _clear_manual_phase_artifacts(task_dir, return_phase)
+                    state["next_phase"] = "plan_outcome"
+                elif user_decision == "REVISE_IMPLEMENTATION":
+                    if isinstance(return_phase, str):
+                        _clear_manual_phase_artifacts(task_dir, return_phase)
+                    state["next_phase"] = "implement"
+                elif user_decision == "ABANDON":
+                    state["next_phase"] = "deferred"
+                else:
+                    state["last_failure_reason"] = "missing_user_decision"
+                    state["last_failure_log"] = (
+                        "ask_user_response.md must end with one of: "
+                        "USER_DECISION: APPROVE, REVISE_PLAN, REVISE_IMPLEMENTATION, ABANDON"
+                    )
+                    save_state(task_dir, state)
+                    return "blocked_on_human_gate"
+                state.setdefault("escape", {})["ask_user"] = False
+                _clear_ask_user_sentinel(task_dir)
+                _archive_ask_user_response(task_dir)
+            else:
+                if phase == "human_gate_rescue":
+                    state["next_phase"] = "create_pr"
+                else:
+                    state["next_phase"] = _next_phase(state, phase)
+            state["phase"] = phase
+            save_state(task_dir, state)
+            continue
+
+        if _mode(state) == "agent-pair" and phase in MANUAL_PHASE_SENTINELS:
+            # A configured headless reviewer adapter produces the review
+            # synchronously inside the runner, so the manual sentinel wait is
+            # skipped for the reviewer phases. rescue is a mutating flow (not a
+            # read-only reviewer adapter) and stays manual.
+            headless_reviewer = phase in REVIEWER_PHASES and get_reviewer_adapter(state) is not None
+            if not headless_reviewer and not _manual_phase_ready(task_dir, phase):
+                state["phase"] = phase
+                _set_next_action_for_manual_phase(task_dir, state, phase)
+                save_state(task_dir, state)
+                return "blocked_on_human_gate"
+
+        # --- regular phase: run its sub-agent ---
+        runner = PHASE_RUNNERS.get(phase)
+        if runner is None:
+            state["last_failure_reason"] = "unknown_phase"
+            state["last_failure_log"] = f"unknown phase: {phase}"
+            state["next_phase"] = "deferred"
+            save_state(task_dir, state)
+            return "error"
+
+        state["phase"] = phase
+        save_state(task_dir, state)
+        result = runner(task_dir, state)
+        if _mode(state) == "agent-pair" and phase in {"plan_review", "review_code"}:
+            _sync_review_items(state, phase, result["log"])
+
+        retries_map: dict[str, int] = state.setdefault("retries", {})
+        max_retries = int(state.get("max_retries_per_phase", 3))
+
+        if result["status"] == "approved":
+            completed = state.setdefault("phases_completed", [])
+            if phase not in completed:
+                completed.append(phase)
+            if phase == "plan_review" and _mode(state) == "agent-pair":
+                state["review_items"] = _close_phase_review_items(state, phase)
+                if not _snapshot_verification_commands(task_dir, state):
+                    if phase in completed:
+                        completed.remove(phase)
+                    _clear_manual_phase_artifacts(task_dir, phase)
+                    state["next_phase"] = "plan_outcome"
+                    save_state(task_dir, state)
+                    continue
+            if phase == "review_code" and _mode(state) == "agent-pair":
+                state["review_items"] = _close_phase_review_items(state, phase)
+                state["next_phase"] = "create_pr"
+            else:
+                state["next_phase"] = _next_phase(state, phase)
+            _clear_failure(state)
+            save_state(task_dir, state)
+            continue
+
+        if result["status"] == "ask_user":
+            _record_failure(state, result)
+            escape = state.setdefault("escape", {})
+            escape["ask_user"] = True
+            escape["reason"] = result["feedback"][:1000]
+            escape["return_phase"] = phase
+            state["next_phase"] = "ask_user"
+            save_state(task_dir, state)
+            continue
+
+        if result["status"] == "rescue_required":
+            _record_failure(state, result)
+            deferred = state.setdefault("deferred_requirements", [])
+            deferred.append(
+                {
+                    "phase": phase,
+                    "reason": "rescue_required",
+                    "feedback": result["feedback"][:4000],
+                }
+            )
+            state["next_phase"] = "rescue"
+            save_state(task_dir, state)
+            continue
+
+        if (
+            _mode(state) == "agent-pair"
+            and phase == "plan_review"
+            and result["status"] == "changes_requested"
+            and _has_open_blocker_at_or_above(state, phase, 2)
+        ):
+            _record_failure(state, result)
+            escape = state.setdefault("escape", {})
+            escape["ask_user"] = True
+            escape["reason"] = "plan review blocker carried over twice"
+            escape["return_phase"] = phase
+            state["next_phase"] = "ask_user"
+            save_state(task_dir, state)
+            continue
+
+        if (
+            _mode(state) == "agent-pair"
+            and phase == "review_code"
+            and result["status"] == "changes_requested"
+            and _has_open_blocker_at_or_above(state, phase, 3)
+        ):
+            _record_failure(state, result)
+            state["next_phase"] = "rescue"
+            save_state(task_dir, state)
+            continue
+
+        if (
+            _mode(state) == "agent-pair"
+            and phase == "review_code"
+            and result["status"] == "changes_requested"
+            and int(retries_map.get("implement", 0)) >= 2
+        ):
+            _record_failure(state, result)
+            state["next_phase"] = "rescue"
+            save_state(task_dir, state)
+            continue
+
+        # CHANGES_REQUESTED or error path.
+        # Agent-pair rescue conditions are evaluated before generic retry/defer:
+        # 1. Reviewer emits RESCUE_REQUIRED.
+        # 2. review_code blocker carries over 3 or more times.
+        # 3. review_code still requests changes after 2 implement retries.
+        # 4. Otherwise retry the worker phase, then defer at the retry ceiling.
+        # If this is a reviewer phase that was rejected, we backtrack to its worker
+        # phase and pass the reviewer's feedback to the worker. The retry budget
+        # accumulates against the WORKER (where the actual fix happens), not the
+        # reviewer, so the worker has its full max_retries to converge.
+        worker_phase = REVIEWER_BACKTRACK.get(phase) if result["status"] == "changes_requested" else None
+        budget_phase = worker_phase or phase
+
+        retries_map[budget_phase] = retries_map.get(budget_phase, 0) + 1
+        attempts = retries_map[budget_phase]
+        stalled = _is_stalled(state, result, attempts)
+        exceeded = attempts > max_retries
+
+        if stalled or exceeded:
+            deferred: list[dict[str, Any]] = state.setdefault("deferred_requirements", [])
+            deferred.append(
+                {
+                    "phase": phase,
+                    "backtrack_to": worker_phase,
+                    "reason": "stalled" if stalled else "max_retries_exceeded",
+                    "attempts": attempts,
+                    "feedback": result["feedback"][:4000],
+                }
+            )
+            _record_failure(state, result)
+            state["next_phase"] = "deferred"
+            save_state(task_dir, state)
+            return "deferred"
+
+        _record_failure(state, result)
+        if worker_phase:
+            # Backtrack: clear the reviewer phase's "completed" status so it re-runs
+            # after the worker reproduces work.
+            completed = state.setdefault("phases_completed", [])
+            if phase in completed:
+                completed.remove(phase)
+            _clear_manual_phase_artifacts(task_dir, phase)
+            state["next_phase"] = worker_phase
+        # else: stay on current phase (worker retry path or error retry)
+        save_state(task_dir, state)
+        # loop continues — either the worker phase or the same phase re-attempts
+
+
+# ---------- batch driver ----------
+
+
+def list_tasks(batch_dir: Path) -> list[Path]:
+    tasks_root = batch_dir / "tasks"
+    if not tasks_root.is_dir():
+        return []
+    return sorted(p for p in tasks_root.iterdir() if p.is_dir())
+
+
+def process_batch(batch_dir: Path) -> dict[str, str]:
+    results: dict[str, str] = {}
+    for task_dir in list_tasks(batch_dir):
+        if not (task_dir / "state.json").is_file():
+            results[task_dir.name] = "no_state_json"
+            continue
+        try:
+            results[task_dir.name] = process_task(task_dir)
+        except Exception as e:  # surfaced to user via status report
+            results[task_dir.name] = f"error: {e!r}"
+    return results
+
+
+# ---------- CLI ----------
+
+
+def _print_results(results: dict[str, str]) -> None:
+    if not results:
+        print("(no tasks found)")
+        return
+    for name, status in results.items():
+        print(f"  {name}: {status}")
+
+
+def _summary_lines(state: dict[str, Any]) -> str:
+    completed = len(state.get("phases_completed", []))
+    next_phase = state.get("next_phase", "?")
+    deferred = len(state.get("deferred_requirements", []))
+    suffix = ""
+    if deferred:
+        suffix = f" [DEFERRED x{deferred}]"
+    elif next_phase == "done":
+        suffix = " [done]"
+    elif next_phase in GATE_SENTINELS:
+        suffix = f" [GATE: touch {GATE_SENTINELS[next_phase]}]"
+    elif next_phase in MANUAL_PHASE_SENTINELS:
+        suffix = f" [CODEX: write review, then touch {MANUAL_PHASE_SENTINELS[next_phase]}]"
+    reason = state.get("last_failure_reason")
+    if reason:
+        suffix += f" [last_failure={reason}]"
+    return f"completed={completed} next={next_phase}{suffix}"
+
+
+def cmd_start(batch_dir: Path) -> int:
+    return _run_pipeline(batch_dir, label="start")
+
+
+def cmd_resume(batch_dir: Path) -> int:
+    return _run_pipeline(batch_dir, label="resume")
+
+
+def _run_pipeline(batch_dir: Path, *, label: str) -> int:
+    if not batch_dir.is_dir():
+        print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
+        return 2
+    print(f"orchestrator {label}: {batch_dir}")
+    results = process_batch(batch_dir)
+    _print_results(results)
+    blocked = [n for n, s in results.items() if s == "blocked_on_human_gate"]
+    deferred = [n for n, s in results.items() if s == "deferred"]
+    if blocked:
+        print()
+        print(
+            f"⏸  {len(blocked)} task(s) blocked at human gates. Touch the sentinel and re-run with `resume`.",
+            file=sys.stderr,
+        )
+    if deferred:
+        print()
+        print(
+            f"⚠  {len(deferred)} task(s) moved to deferred_requirements. Inspect their state.json and decide manually.",
+            file=sys.stderr,
+        )
+    return 0 if not blocked else 1
+
+
+# ---------- gate-2 polling (wait-and-resume) ----------
+
+POLL_INTERVAL_SEC = 30
+MAX_POLL_DURATION_SEC = 4 * 60 * 60  # 4 hours total before bailing out
+
+
+def _pr_state_via_gh(pr_url: str) -> dict[str, Any] | None:
+    """Query GitHub for the PR's state via the `gh` CLI. Returns the parsed
+    JSON object or None if the call failed.
+    """
+    proc = subprocess.run(
+        ["gh", "pr", "view", pr_url, "--json", "state,isDraft,reviewDecision"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        obj = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _gate_satisfied_by_pr_state(state_data: dict[str, Any] | None) -> tuple[bool, str]:
+    """Decide whether `human_gate_pr` should be considered satisfied based
+    on the PR's GitHub state. Returns (satisfied, reason).
+
+    Conservative policy: only `MERGED` or `CLOSED` (without merge) flip the
+    gate. `OPEN` PRs — even when ready+approved — keep waiting because the
+    user might still tweak before merging. The user can also `touch
+    pr.reviewed` manually if they want to override this.
+    """
+    if state_data is None:
+        return False, "could not query PR via gh"
+    state = str(state_data.get("state") or "").upper()
+    if state == "MERGED":
+        return True, "merged"
+    if state == "CLOSED":
+        return True, "closed (without merge)"
+    review = state_data.get("reviewDecision")
+    is_draft = state_data.get("isDraft")
+    return False, f"open (draft={is_draft}, review={review})"
+
+
+def cmd_wait_and_resume(batch_dir: Path) -> int:
+    """Poll GitHub for PR resolution on every gate-#2-blocked task and auto-
+    advance once a PR is merged or closed. Equivalent to a human-driven
+    `touch pr.reviewed` loop, just driven by `gh pr view` instead.
+    """
+    if not batch_dir.is_dir():
+        print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
+        return 2
+
+    pending: list[tuple[Path, str]] = []
+    for task_dir in list_tasks(batch_dir):
+        state_path = task_dir / "state.json"
+        if not state_path.is_file():
+            continue
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(state, dict):
+            continue
+        if state.get("next_phase") != "human_gate_pr":
+            continue
+        pr_url = state.get("pr_url")
+        if not pr_url:
+            url_path = task_dir / "pr_url.txt"
+            if url_path.is_file():
+                pr_url = url_path.read_text(encoding="utf-8").strip()
+        if not isinstance(pr_url, str) or not pr_url.startswith("https://"):
+            print(
+                f"  {task_dir.name}: blocked at human_gate_pr but no valid pr_url",
+                file=sys.stderr,
+            )
+            continue
+        pending.append((task_dir, pr_url))
+
+    if not pending:
+        print("no tasks blocked at human_gate_pr — running normal resume")
+        return _run_pipeline(batch_dir, label="resume")
+
+    print(
+        f"polling {len(pending)} task(s) for PR resolution every {POLL_INTERVAL_SEC}s "
+        f"(timeout {MAX_POLL_DURATION_SEC // 60}min). Ctrl-C to stop."
+    )
+    deadline = time.monotonic() + MAX_POLL_DURATION_SEC
+
+    while pending and time.monotonic() < deadline:
+        next_pending: list[tuple[Path, str]] = []
+        for task_dir, pr_url in pending:
+            state_data = _pr_state_via_gh(pr_url)
+            satisfied, reason = _gate_satisfied_by_pr_state(state_data)
+            if satisfied:
+                sentinel = task_dir / GATE_SENTINELS["human_gate_pr"]
+                sentinel.touch()
+                print(f"  {task_dir.name}: {reason} → sentinel touched")
+            else:
+                next_pending.append((task_dir, pr_url))
+        pending = next_pending
+        if pending:
+            ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            print(f"  [{ts}] still waiting on {len(pending)} task(s)…", file=sys.stderr)
+            time.sleep(POLL_INTERVAL_SEC)
+
+    if pending:
+        print(
+            f"⚠  {len(pending)} task(s) still blocked after {MAX_POLL_DURATION_SEC // 60}min — giving up. "
+            "Re-run `wait-and-resume` to continue polling.",
+            file=sys.stderr,
+        )
+
+    print()
+    print("running resume to advance unblocked tasks…")
+    return _run_pipeline(batch_dir, label="resume")
+
+
+# ---------- status ----------
+
+
+def cmd_status(batch_dir: Path) -> int:
+    if not batch_dir.is_dir():
+        print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
+        return 2
+    tasks = list_tasks(batch_dir)
+    if not tasks:
+        print(f"no tasks under {batch_dir}/tasks/")
+        return 0
+    for task_dir in tasks:
+        state_path = task_dir / "state.json"
+        if not state_path.is_file():
+            print(f"  {task_dir.name}: no state.json")
+            continue
+        try:
+            obj = json.loads(state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"  {task_dir.name}: corrupt state.json — {e}")
+            continue
+        if not isinstance(obj, dict):
+            print(f"  {task_dir.name}: state.json is not an object")
+            continue
+        print(f"  {task_dir.name}: {_summary_lines(obj)}")
+        # STATIC recovery guidance only — never echo last_failure_log here. A
+        # phase's raw stderr (worker/branch setup) is stored there and may carry
+        # credentials (IR-004); printing it would re-introduce the leak IR-002
+        # closed. The full log stays in state.json for manual inspection.
+        if obj.get("last_failure_reason") or obj.get("deferred_requirements"):
+            print(
+                "      → fix, then `orchestrator resume`. If a codex review gate failed, run "
+                '`codex login status` (re-login if expired) or set reviewer="human". '
+                "Full log: state.json.last_failure_log"
+            )
+    return 0
+
+
+USAGE = (
+    "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
+    "  start            — process every task from its current next_phase\n"
+    "  resume           — same as start; convenient name to re-enter after a human gate\n"
+    "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
+    "                     and auto-touch the `pr.reviewed` sentinel once the PR is merged\n"
+    "                     or closed; then run resume\n"
+    "  status           — print per-task summary without running anything"
+)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 3:
+        print(USAGE, file=sys.stderr)
+        return 2
+
+    command = argv[1]
+    batch_dir = Path(argv[2]).resolve()
+
+    if command == "start":
+        return cmd_start(batch_dir)
+    if command == "resume":
+        return cmd_resume(batch_dir)
+    if command == "wait-and-resume":
+        return cmd_wait_and_resume(batch_dir)
+    if command == "status":
+        return cmd_status(batch_dir)
+
+    print(f"error: unknown command: {command!r}\n\n{USAGE}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

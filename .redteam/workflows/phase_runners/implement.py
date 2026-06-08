@@ -1,0 +1,262 @@
+"""Phase 5 — invoke the implementer, then independently run verify.sh."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from adapters import get_worker_adapter
+
+from ._base import (
+    PhaseResult,
+    build_prompt_with_feedback,
+    compute_branch_diff,
+    compute_repo_diff,
+    project_config,
+    validate_verification_commands,
+    repo_root,
+)
+
+
+AGENT_NAME = "implementer"
+
+
+def _run_verify_sh(cwd: Path, argv: list[str]) -> tuple[int, str]:
+    # `argv` is the pre-validated verify command, snapshotted BEFORE the
+    # implementer runs (IR-001) so a same-round edit to config.toml cannot
+    # neuter the gate. Run shell-free.
+    proc = subprocess.run(
+        argv,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+    return proc.returncode, combined
+
+
+def _run_verification_commands(
+    cwd: Path, commands: list[str], project_verify_command: str | None = None
+) -> tuple[int, str]:
+    if not commands:
+        return 2, "No verification commands were snapshotted in state.verification.commands.\n"
+
+    chunks: list[str] = []
+    try:
+        validated = validate_verification_commands(commands, project_verify_command)
+    except ValueError as exc:
+        return 2, f"{exc}\n"
+
+    for argv in validated:
+        chunks.append(f"$ {' '.join(argv)}\n")
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+        chunks.append(output)
+        chunks.append(f"\n[exit {proc.returncode}]\n\n")
+        if proc.returncode != 0:
+            return proc.returncode, "".join(chunks)
+    return 0, "".join(chunks)
+
+
+def _write_current_diff(task_dir: Path, cwd: Path) -> tuple[str, str]:
+    diff = compute_branch_diff(cwd=cwd)
+    patch_path = task_dir / "impl_diff.patch"
+    patch_path.write_text(diff, encoding="utf-8")
+    digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    return diff, digest
+
+
+DIFF_GIT_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$")
+
+
+def _paths_from_patch(diff: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in diff.splitlines():
+        match = DIFF_GIT_RE.match(line)
+        if match is None:
+            continue
+        for path in match.groups():
+            if path == "/dev/null" or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, diff: str) -> None:
+    """Commit only the files present in impl_diff.patch, then refresh the patch.
+
+    The pre-commit patch is the source of truth for the file list. After the WIP
+    commit lands, impl_diff.patch is regenerated so it still represents the
+    branch diff against main, while the working tree itself can be clean.
+    """
+    state["implement_round_count"] = int(state.get("implement_round_count") or 0) + 1
+    round_n = int(state["implement_round_count"])
+    paths = _paths_from_patch(diff)
+    if not paths:
+        return
+
+    subprocess.run(
+        ["git", "add", "--", *paths],
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    diff_check = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if diff_check.returncode == 0:
+        return
+
+    task_id = str(state.get("task_id") or task_dir.name)
+    subprocess.run(
+        ["git", "commit", "-m", f"wip({task_id}): implement round {round_n}"],
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    _write_current_diff(task_dir, cwd)
+
+
+def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+    proj = project_config()
+    base = (
+        f"Implement the approved plan for the task at: {task_dir}\n"
+        f"Inputs: {task_dir}/input.md, {task_dir}/outcome.md, "
+        f"{task_dir}/plan_review.md, and any previous {task_dir}/code_review.md.\n"
+        f"Respect the project hard rules in {proj.context_file}. Source dirs: "
+        f"{', '.join(proj.source_dirs)}; test dir: {proj.test_dir}.\n"
+        "Stay within the approved plan. If the work needs new scope, stop and update outcome.md instead. "
+        "Do not create a PR. After editing, stop; the orchestrator will run verification."
+    )
+    prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
+
+    rr = repo_root()
+    result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+    diff, diff_sha = _write_current_diff(task_dir, rr)
+
+    verification = state.setdefault("verification", {})
+    verification["last_diff_sha256"] = diff_sha
+    verification["last_output_path"] = "verification.log"
+
+    if result["returncode"] != 0:
+        feedback = (
+            f"implementer agent exited non-zero.\n"
+            f"returncode={result['returncode']}\n"
+            f"stderr (truncated):\n{result['stderr'][:2000]}"
+        )
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+
+    commands = state.get("verification", {}).get("commands") or []
+    if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
+        commands = []
+    # Validate against the PLAN-TIME verify command snapshotted before the
+    # implementer ran, not the current (possibly mutated) config (IR-001).
+    project_verify_command = state.get("verification", {}).get("verify_command")
+    rc, verify_output = _run_verification_commands(rr, commands, project_verify_command)
+
+    verification["commands"] = commands
+    verification["last_exit_code"] = rc
+    verification["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    (task_dir / "verification.log").write_text(verify_output, encoding="utf-8")
+    _commit_agent_pair_diff(task_dir, state, rr, diff)
+    diff, diff_sha = _write_current_diff(task_dir, rr)
+    verification["last_diff_sha256"] = diff_sha
+
+    if rc == 0:
+        return PhaseResult(
+            status="approved",
+            feedback="",
+            log=result["stdout"] + "\n--- verification ---\n" + verify_output,
+            diff=diff,
+        )
+
+    feedback = f"verification failed (exit {rc}). Address the failures below and try again.\n\n{verify_output[-4000:]}"
+    return PhaseResult(status="changes_requested", feedback=feedback, log=feedback, diff=diff)
+
+
+def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+    if state.get("mode") == "agent-pair":
+        return _run_agent_pair(task_dir, state)
+
+    proj = project_config()
+    base = (
+        "Implement the minimum code to make the new test file (the canonical path "
+        "declared in outcome.md's Affected files) pass.\n"
+        f"Inputs: {task_dir}/outcome.md, the new test file under `{proj.test_dir}`, "
+        f"{task_dir}/test_review.md. Respect the project hard rules in {proj.context_file}; "
+        f"source dirs: {', '.join(proj.source_dirs)}.\n"
+        "Stay strictly within the Affected files listed in outcome.md. Do NOT modify "
+        "the test file the test-author created. After implementing, save your full "
+        f"diff to {task_dir}/impl_diff.patch via "
+        f"`git diff > {task_dir}/impl_diff.patch`. Follow your agent definition exactly."
+    )
+    prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
+
+    rr = repo_root()
+    # Snapshot + validate the verify command BEFORE the implementer runs, so a
+    # same-round edit to config.toml's verify_command cannot self-neuter the
+    # gate (IR-001). The agent-pair path snapshots at plan time for the same
+    # reason; this keeps the legacy/TDD path consistent.
+    from config import load_config
+
+    try:
+        verify_argv = validate_verification_commands([load_config(rr).project.verify_command])[0]
+    except ValueError as exc:
+        msg = f"invalid project.verify_command in config: {exc}"
+        return PhaseResult(status="error", feedback=msg, log=msg, diff="")
+
+    result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+    diff = compute_repo_diff(cwd=rr)
+
+    if result["returncode"] != 0:
+        feedback = (
+            f"implementer agent exited non-zero.\n"
+            f"returncode={result['returncode']}\n"
+            f"stderr (truncated):\n{result['stderr'][:2000]}"
+        )
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+
+    patch_path = task_dir / "impl_diff.patch"
+    if not patch_path.exists():
+        feedback = (
+            f"impl_diff.patch missing — implementer didn't save the diff.\n"
+            "Re-run after instructing the agent to write `git diff > "
+            f"{task_dir}/impl_diff.patch` before exiting."
+        )
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+
+    rc, verify_output = _run_verify_sh(rr, verify_argv)
+    if rc == 0:
+        return PhaseResult(
+            status="approved",
+            feedback="",
+            log=result["stdout"] + "\n--- verify.sh ---\n" + verify_output,
+            diff=diff,
+        )
+
+    feedback = f"verify.sh failed (exit {rc}). Address the failures below and try again.\n\n{verify_output[-4000:]}"
+    return PhaseResult(
+        status="changes_requested",
+        feedback=feedback,
+        log=feedback,
+        diff=diff,
+    )

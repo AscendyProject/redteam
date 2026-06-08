@@ -1,0 +1,31 @@
+# redteam harness config.
+#
+# This file is the externalization seam: every project-specific value the
+# engine needs lives here, so the same engine drives any repo. The values below
+# describe THIS repo (redteam dogfoods its own harness). When you install the
+# harness into your project, replace these with your stack — see
+# `examples/ascendy-like/.redteam/config.toml` for a richer, real example.
+#
+# The loader fails loud on unknown keys/sections and bad types: a typo like
+# `verfy_command` errors instead of silently masking your real setting.
+
+[project]
+name = "redteam"
+context_file = ".redteam/docs/project-context.md"
+security_checklist = ".redteam/docs/security-checklist.md"
+test_conventions_file = ".redteam/docs/test-conventions.md"
+source_dirs = [".redteam/workflows/"]
+test_dir = ".redteam/tests/"
+test_file_glob = "test_*.py"
+verify_command = "bash .redteam/scripts/verify.sh"
+branch_prefix = "redteam"
+base_branch = "main"
+
+[models]
+# Role → model. The reviewer/rescue keys are provider identifiers resolved to
+# adapters ("codex" → CodexReviewerAdapter, "claude" → ClaudeReviewerAdapter).
+# The worker side ("planner"/"implementer") resolves the same way.
+planner = "claude-opus-4-7"
+implementer = "claude-sonnet-4-6"
+reviewer = "codex"
+rescue = "codex"
