@@ -14,6 +14,12 @@ source_dirs = ["src/"]                          # where your code lives
 test_dir = "tests/"                             # where tests live
 test_file_glob = "test_*.py"                    # how a new test file is recognized
 verify_command = "bash .redteam/scripts/verify.sh"  # your lint/type/test gate
+# Bare tools an LLM may name in a verification hook (the verify_command above is
+# always trusted). Security boundary — keep it minimal. JS example below.
+# A Python stack: ["pytest", "ruff", "mypy"]; a JS stack: ["vitest", "eslint", "tsc"].
+# (npm/npx grant broad execution — any args are allowed after an allowed tool —
+#  so only add them as a deliberate, broad project choice.)
+verification_allowlist = ["pytest", "ruff", "mypy"]
 branch_prefix = "redteam"                       # per-task branch prefix: <prefix>/<task-id>
 base_branch = "main"                            # PR base + review diff base
 

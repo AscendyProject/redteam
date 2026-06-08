@@ -17,6 +17,7 @@ source_dirs = ["app/"]
 test_dir = "tests/"
 test_file_glob = "test_*.py"
 verify_command = "bash .redteam/scripts/verify.sh"
+verification_allowlist = ["pytest", "ruff", "mypy"]
 branch_prefix = "ascendy"
 base_branch = "main"
 

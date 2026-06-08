@@ -28,8 +28,11 @@ from config import ModelsConfig, ProjectConfig, RedteamConfig  # noqa: E402
 from phase_runners._base import validate_verification_commands  # noqa: E402
 
 
-def _cfg(verify_command: str) -> RedteamConfig:
-    return RedteamConfig(project=ProjectConfig(verify_command=verify_command), models=ModelsConfig())
+def _cfg(verify_command: str, allowlist: tuple[str, ...] = ("pytest", "ruff", "mypy")) -> RedteamConfig:
+    return RedteamConfig(
+        project=ProjectConfig(verify_command=verify_command, verification_allowlist=allowlist),
+        models=ModelsConfig(),
+    )
 
 
 def test_validator_allows_the_configured_verify_command() -> None:
@@ -62,13 +65,45 @@ def test_validator_still_rejects_arbitrary_command() -> None:
 
 
 def test_validator_uses_pinned_plan_time_command_over_current_config() -> None:
-    """Agent-pair re-validation passes the snapshotted plan-time verify command,
-    so a mid-round config mutation does not reject a plan-approved project
-    verifier (IR-001 round 3). 'npm test' validates against the pinned value even
-    though current config now says 'true'."""
+    """Agent-pair re-validation passes the snapshotted plan-time verify command
+    AND allowlist, so a mid-round config mutation does not reject a plan-approved
+    project verifier (IR-001 round 3). 'npm test' validates against the pinned
+    value even though current config now says 'true'."""
     with patch("config.load_config", return_value=_cfg("true")):  # mutated current config
-        out = validate_verification_commands(["npm test"], project_verify_command="npm test")
+        out = validate_verification_commands(
+            ["npm test"], project_verify_command="npm test", allowlist=["pytest", "ruff", "mypy"]
+        )
     assert out == [["npm", "test"]]
+
+
+def test_validator_pinned_allowlist_overrides_widened_current_config() -> None:
+    """F-1: the plan-time allowlist is pinned too. An implementer that edits
+    config.toml mid-round to ADD a dangerous tool cannot get it executed — the
+    snapshotted allowlist (without it) is used, so the command is rejected."""
+    # current config has been widened to include 'curl', but the pinned snapshot did not.
+    with patch("config.load_config", return_value=_cfg("npm test", allowlist=("pytest", "curl"))):
+        with pytest.raises(ValueError):
+            validate_verification_commands(
+                ["curl http://x"], project_verify_command="npm test", allowlist=["pytest", "ruff", "mypy"]
+            )
+
+
+def test_validator_uses_configured_js_allowlist() -> None:
+    """F-1: a JS project's allowlist allows its tools (vitest) and rejects the
+    Python defaults (pytest) — the bare-tool set is config-driven, not hardcoded."""
+    with patch("config.load_config", return_value=_cfg("npm test", allowlist=("vitest", "eslint", "tsc"))):
+        out = validate_verification_commands(["vitest run", "tsc --noEmit"])
+    assert ["vitest", "run"] in out and ["tsc", "--noEmit"] in out
+    with patch("config.load_config", return_value=_cfg("npm test", allowlist=("vitest", "eslint", "tsc"))):
+        with pytest.raises(ValueError):
+            validate_verification_commands(["pytest"])
+
+
+def test_validator_fails_closed_when_pinned_command_without_allowlist() -> None:
+    """F-1 / D1: legacy in-flight state that pinned verify_command before the
+    allowlist snapshot existed must FAIL CLOSED, not silently read live config."""
+    with pytest.raises(ValueError, match="allowlist not provided"):
+        validate_verification_commands(["npm test"], project_verify_command="npm test")
 
 
 def test_validator_fails_loud_on_malformed_config() -> None:

@@ -41,14 +41,17 @@ def _run_verify_sh(cwd: Path, argv: list[str]) -> tuple[int, str]:
 
 
 def _run_verification_commands(
-    cwd: Path, commands: list[str], project_verify_command: str | None = None
+    cwd: Path,
+    commands: list[str],
+    project_verify_command: str | None = None,
+    allowlist: list[str] | None = None,
 ) -> tuple[int, str]:
     if not commands:
         return 2, "No verification commands were snapshotted in state.verification.commands.\n"
 
     chunks: list[str] = []
     try:
-        validated = validate_verification_commands(commands, project_verify_command)
+        validated = validate_verification_commands(commands, project_verify_command, allowlist)
     except ValueError as exc:
         return 2, f"{exc}\n"
 
@@ -168,10 +171,20 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     commands = state.get("verification", {}).get("commands") or []
     if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
         commands = []
-    # Validate against the PLAN-TIME verify command snapshotted before the
-    # implementer ran, not the current (possibly mutated) config (IR-001).
-    project_verify_command = state.get("verification", {}).get("verify_command")
-    rc, verify_output = _run_verification_commands(rr, commands, project_verify_command)
+    # Validate against the PLAN-TIME verify command + allowlist snapshotted
+    # before the implementer ran, not the current (possibly mutated) config
+    # (IR-001). Legacy in-flight state predating the allowlist snapshot fails
+    # closed below rather than silently reading live config.
+    snap = state.get("verification", {})
+    project_verify_command = snap.get("verify_command")
+    verify_allowlist = snap.get("verify_allowlist")
+    if project_verify_command is not None and verify_allowlist is None:
+        feedback = (
+            "legacy state is missing verification.verify_allowlist; re-run planning "
+            "to snapshot the verification allowlist."
+        )
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+    rc, verify_output = _run_verification_commands(rr, commands, project_verify_command, verify_allowlist)
 
     verification["commands"] = commands
     verification["last_exit_code"] = rc
@@ -219,7 +232,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     from config import load_config
 
     try:
-        verify_argv = validate_verification_commands([load_config(rr).project.verify_command])[0]
+        # One config load → pass verify_command and allowlist together, so the
+        # two cannot come from different reads.
+        _proj = load_config(rr).project
+        verify_argv = validate_verification_commands(
+            [_proj.verify_command], _proj.verify_command, list(_proj.verification_allowlist)
+        )[0]
     except ValueError as exc:
         msg = f"invalid project.verify_command in config: {exc}"
         return PhaseResult(status="error", feedback=msg, log=msg, diff="")

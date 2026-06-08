@@ -334,35 +334,52 @@ def extract_verification_commands(outcome_text: str) -> list[str]:
     return commands
 
 
-def validate_verification_commands(commands: list[str], project_verify_command: str | None = None) -> list[list[str]]:
+def validate_verification_commands(
+    commands: list[str],
+    project_verify_command: str | None = None,
+    allowlist: tuple[str, ...] | list[str] | None = None,
+) -> list[list[str]]:
     """Return argv commands after enforcing a small verification-only allowlist.
 
     The project's configured `verify_command` (`.redteam/config.toml [project]`)
     is project-authored — trusted as much as the repo's own scripts — so its
     EXACT argv is allowed even if it names a non-allowlisted executable or a
     path (e.g. `bash .redteam/scripts/verify.sh`, or `npm test` for a JS repo).
-    Any other command still falls through the restrictive allowlist
-    (pytest/ruff/mypy), so an LLM-authored outcome.md cannot smuggle an
-    arbitrary command — only the bare tools or the one project-declared command.
+    Any other command must name a tool from the project's configured
+    `verification_allowlist` (or `python -m <tool>`), so an LLM-authored
+    outcome.md cannot smuggle an arbitrary command — only the project-declared
+    bare tools or the one project-declared verify_command.
 
-    `project_verify_command` lets the caller pin the PLAN-TIME verify command so
-    re-validation after the implementer ran does not depend on the (possibly
-    mutated) current config — the agent-pair path passes the snapshotted value.
-    When None, the current config is read (fail-loud on a malformed config.toml).
+    `project_verify_command` and `allowlist` let the caller pin the PLAN-TIME
+    values so re-validation after the implementer ran does not depend on the
+    (possibly mutated) current config — the agent-pair path passes the
+    snapshotted values. When BOTH are None the current config is read once
+    (fail-loud on a malformed config.toml). Pass them together (from one config
+    load) so the verify_command and allowlist cannot come from different reads.
     """
-    # Keep this allowlist in sync with AGENTS.md "Allowed verification command families".
-    allowed_tools = {"pytest", "ruff", "mypy"}
-    allowed_python_modules = {"pytest", "ruff", "mypy"}
-    shell_metachars = {";", "|", "&&", "||", ">", "<", "`", "$("}
-    if project_verify_command is None:
+    if project_verify_command is None and allowlist is None:
         from config import load_config  # lazy, mirrors default_model_for_role
 
         # Let load_config() fail loud on a malformed config.toml (unknown key /
         # bad type / empty) — every caller already handles the ValueError, so a
         # broken config surfaces as a verification failure rather than being
         # silently treated as "no configured verifier" (masking the error).
-        project_verify_command = load_config(repo_root()).project.verify_command
-    project_verify_argv = shlex.split(project_verify_command)
+        proj = load_config(repo_root()).project
+        project_verify_command = proj.verify_command
+        allowlist = proj.verification_allowlist
+    elif allowlist is None:
+        # A caller pinned verify_command but not the allowlist. Do NOT fall back
+        # to live config (that reintroduces the drift this snapshotting fixes);
+        # the caller is responsible for passing the pinned allowlist too.
+        raise ValueError(
+            "verification allowlist not provided alongside a pinned verify_command "
+            "(legacy/partial state) — re-run planning to snapshot it."
+        )
+
+    allowed_tools = set(allowlist)
+    allowed_python_modules = set(allowlist)
+    shell_metachars = {";", "|", "&&", "||", ">", "<", "`", "$("}
+    project_verify_argv = shlex.split(project_verify_command) if project_verify_command else []
     validated: list[list[str]] = []
 
     for command in commands:
@@ -379,7 +396,7 @@ def validate_verification_commands(commands: list[str], project_verify_command: 
 
         if "/" in argv[0] or argv[0].startswith("."):
             raise ValueError(
-                "Verification executables must be bare names (pytest, ruff, mypy) "
+                f"Verification executables must be bare names ({', '.join(sorted(allowed_tools))}) "
                 "or the project-configured verify_command. "
                 f"Got: {argv[0]!r}"
             )
@@ -398,9 +415,10 @@ def validate_verification_commands(commands: list[str], project_verify_command: 
             validated.append(argv)
             continue
 
+        tools = ", ".join(sorted(allowed_tools))
         raise ValueError(
-            "Unsafe or unsupported verification command. Allowed: pytest, ruff, mypy, "
-            "python -m pytest|ruff|mypy, or the project-configured verify_command. "
+            f"Unsafe or unsupported verification command. Allowed: {tools}, "
+            f"python -m <{tools}>, or the project-configured verify_command. "
             f"Got: {command!r}"
         )
 

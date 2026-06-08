@@ -37,6 +37,12 @@ class ProjectConfig:
     test_dir: str = "tests/"
     test_file_glob: str = "test_*.py"  # how the engine recognizes a new test file under test_dir
     verify_command: str = "bash .redteam/scripts/verify.sh"
+    # Bare-tool allowlist for verification commands an LLM-authored outcome.md may
+    # propose. The configured verify_command is always exact-argv-trusted; any
+    # OTHER command must name one of these tools (or `python -m <tool>`). Default
+    # is a Python stack; a JS project sets e.g. ("vitest", "eslint", "tsc"). This
+    # is a security boundary — it bounds what the planner can get executed.
+    verification_allowlist: tuple[str, ...] = ("pytest", "ruff", "mypy")
     branch_prefix: str = "redteam"
     base_branch: str = "main"  # PR base / review diff base
 
@@ -99,6 +105,15 @@ def _validate(cfg: RedteamConfig) -> None:
         or not all(isinstance(d, str) and d for d in p.source_dirs)
     ):
         raise ValueError(f"project.source_dirs must be a non-empty list of non-empty strings, got {p.source_dirs!r}.")
+    if (
+        not isinstance(p.verification_allowlist, tuple)
+        or not p.verification_allowlist
+        or not all(isinstance(t, str) and t for t in p.verification_allowlist)
+    ):
+        raise ValueError(
+            f"project.verification_allowlist must be a non-empty list of non-empty strings, "
+            f"got {p.verification_allowlist!r}."
+        )
     m = cfg.models
     for name in ("planner", "implementer", "reviewer", "rescue"):
         _require_nonempty_str("models", name, getattr(m, name))

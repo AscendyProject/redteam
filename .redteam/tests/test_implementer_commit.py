@@ -52,7 +52,9 @@ def test_agent_pair_implement_commits_patch_file_paths(monkeypatch, tmp_path):
         lambda state: SimpleNamespace(invoke=lambda **kwargs: {"returncode": 0, "stdout": "done", "stderr": ""}),
     )
     monkeypatch.setattr(
-        implement, "_run_verification_commands", lambda cwd, commands, project_verify_command=None: (0, "ok\n")
+        implement,
+        "_run_verification_commands",
+        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
     )
     monkeypatch.setattr(implement, "compute_branch_diff", lambda cwd: diff)
 

@@ -304,10 +304,13 @@ def _snapshot_verification_commands(task_dir: Path, state: dict[str, Any]) -> bo
     try:
         outcome_text = outcome_path.read_text(encoding="utf-8")
         commands = extract_verification_commands(outcome_text)
-        # Pin the plan-time verify command so post-implementer re-validation
-        # cannot drift if the implementer edits config.toml mid-round (IR-001).
-        verify_command = load_config(repo_root()).project.verify_command
-        validate_verification_commands(commands, verify_command)
+        # Pin the plan-time verify command AND allowlist so post-implementer
+        # re-validation cannot drift if the implementer edits config.toml
+        # mid-round (IR-001). Both come from one config load.
+        proj = load_config(repo_root()).project
+        verify_command = proj.verify_command
+        verify_allowlist = list(proj.verification_allowlist)
+        validate_verification_commands(commands, verify_command, verify_allowlist)
     except (OSError, ValueError) as exc:
         state["last_failure_reason"] = "invalid_verification_commands"
         state["last_failure_log"] = str(exc)
@@ -315,6 +318,7 @@ def _snapshot_verification_commands(task_dir: Path, state: dict[str, Any]) -> bo
     verification = state.setdefault("verification", {})
     verification["commands"] = commands
     verification["verify_command"] = verify_command
+    verification["verify_allowlist"] = verify_allowlist
     verification["last_exit_code"] = None
     verification["last_output_path"] = "verification.log"
     verification["last_run_at"] = None

@@ -18,6 +18,9 @@ source_dirs = [".redteam/workflows/"]
 test_dir = ".redteam/tests/"
 test_file_glob = "test_*.py"
 verify_command = "bash .redteam/scripts/verify.sh"
+# Bare tools an LLM-authored outcome.md may name in a verification hook (beyond
+# the always-trusted verify_command). Security boundary — keep it tight.
+verification_allowlist = ["pytest", "ruff", "mypy"]
 branch_prefix = "redteam"
 base_branch = "main"
 

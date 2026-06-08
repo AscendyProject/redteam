@@ -48,11 +48,16 @@ Make the bare-tool allowlist config-driven:
 - `validate_verification_commands` reads it (plus the still-trusted exact
   `verify_command`); the `python -m <module>` convenience branch gates its
   module on the same configured set.
-- A JS project sets e.g. `verification_allowlist = ["vitest", "eslint", "tsc", "npm", "npx"]`.
+- A JS project sets e.g. `verification_allowlist = ["vitest", "eslint", "tsc"]`.
+  (`npm`/`npx` grant broad execution — the validator allows any args after an
+  allowed bare tool — so add them only as a deliberate, broad project choice,
+  not as a default JS example.)
 - Keep: exact-argv trust for `verify_command`, the shell-metachar reject, the
   path/`./`-executable reject. The trust model is unchanged; only the
   *project-declared* bare-tool set becomes configurable instead of hardcoded.
 
-Tracked as the gating item before the frontend live handoff (a sibling would hit
-F-1 immediately otherwise). Sync `AGENTS.md` "Allowed verification command
-families" wording with whatever ships.
+**Status: FIXED.** Shipped `ProjectConfig.verification_allowlist` (default
+`("pytest","ruff","mypy")`, back-compat); the allowlist is snapshotted at
+plan-time beside `verify_command` (an implementer cannot widen it mid-round),
+and legacy in-flight state without the snapshot fails closed rather than reading
+live config. This was the gating item before the frontend live handoff.
