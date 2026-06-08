@@ -139,7 +139,11 @@ def utc_now() -> str:
 def load_state(task_dir: Path) -> dict[str, Any]:
     state_path = task_dir / "state.json"
     if not state_path.exists():
-        raise FileNotFoundError(f"state.json not found in {task_dir} — was this task initialized via the SKILL?")
+        raise FileNotFoundError(
+            f"state.json not found in {task_dir}. Add an input.md to the task "
+            f"directory and run `orchestrator.py start <batch>` — it seeds state.json "
+            f"from .redteam/templates/state.template.json automatically."
+        )
     text = state_path.read_text(encoding="utf-8")
     obj = json.loads(text)
     if not isinstance(obj, dict):
@@ -159,7 +163,7 @@ def save_state(task_dir: Path, state: dict[str, Any]) -> None:
 
 
 def _mode(state: dict[str, Any]) -> str:
-    return str(state.get("mode") or "tdd")
+    return str(state.get("mode") or "agent-pair")
 
 
 def _phase_order(state: dict[str, Any]) -> list[str]:
@@ -777,12 +781,28 @@ def list_tasks(batch_dir: Path) -> list[Path]:
     return sorted(p for p in tasks_root.iterdir() if p.is_dir())
 
 
+def _seed_state(task_dir: Path) -> None:
+    """Initialize state.json for a task that has an input.md but no state yet,
+    from .redteam/templates/state.template.json. Fills task_id + created_at so the
+    README's "drop in an input.md and run start" flow needs no manual seeding.
+    """
+    template_path = repo_root() / ".redteam" / "templates" / "state.template.json"
+    state = json.loads(template_path.read_text(encoding="utf-8"))
+    state["task_id"] = task_dir.name
+    state["created_at"] = utc_now()
+    save_state(task_dir, state)
+
+
 def process_batch(batch_dir: Path) -> dict[str, str]:
     results: dict[str, str] = {}
     for task_dir in list_tasks(batch_dir):
         if not (task_dir / "state.json").is_file():
-            results[task_dir.name] = "no_state_json"
-            continue
+            # Auto-seed from the template on first run when a brief exists; a task
+            # dir with neither state.json nor input.md is not initializable.
+            if not (task_dir / "input.md").is_file():
+                results[task_dir.name] = "no_input_md"
+                continue
+            _seed_state(task_dir)
         try:
             results[task_dir.name] = process_task(task_dir)
         except Exception as e:  # surfaced to user via status report
