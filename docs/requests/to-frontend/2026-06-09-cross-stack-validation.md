@@ -1,11 +1,11 @@
-# [STAGED] Handoff to ascendy-frontend — redteam cross-stack validation (#7.5)
+# [DISPATCHED 2026-06-09] Handoff to ascendy-frontend — redteam cross-stack validation (#7.5)
 
-> **Status: staged, NOT yet dispatched.** This is the redteam session's first
-> coordination act. When the redteam session runs, copy the body below into
+> **Status: dispatched 2026-06-09.** Body copied to
 > `ascendy-frontend/docs/requests/from-redteam/2026-06-09-cross-stack-validation.md`
-> and cmux-notify the frontend surface (workspace:3 surface:16). Reply path is
-> `redteam`'s own `docs/requests/from-frontend/` (not backend). Drafted from the
-> backend session during redteam graduation; ownership now belongs to redteam.
+> and frontend surface (workspace:3 surface:16) cmux-notified (buffer placed;
+> operator confirms Enter). Reply path is `redteam`'s own
+> `docs/requests/from-frontend/`. Drafted from the backend session during redteam
+> graduation; ownership now belongs to redteam. Retained here as the dispatch record.
 
 ---
 
