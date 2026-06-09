@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # The engine has zero runtime pip dependencies, so the only thing worth
+  # watching is the GitHub Actions versions used by CI. Grouped into one PR/week
+  # to keep the noise low for a small project.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]

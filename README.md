@@ -1,5 +1,10 @@
 # redteam
 
+[![CI](https://github.com/AscendyProject/redteam/actions/workflows/ci.yml/badge.svg)](https://github.com/AscendyProject/redteam/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![Runtime deps: 0](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)
+
 An adversarial **agent-pair** harness for shipping code with AI. One model
 drives a task through a test-first pipeline (plan → test → implement); a
 **different** model reviews the work adversarially; humans gate the
@@ -118,6 +123,15 @@ python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
 A batch is a directory of `tasks/<task-id>/input.md` briefs. The orchestrator
 creates a per-task branch (`<branch_prefix>/<task-id>`), runs the pipeline, and
 stops at each human gate until you touch the sentinel file it names.
+
+## Contributing
+
+Issues and PRs welcome. See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the
+dev setup and the gate (`bash .redteam/scripts/verify.sh`), and the
+[Code of Conduct](.github/CODE_OF_CONDUCT.md). The engine stays
+project-agnostic and stdlib-only — those two invariants drive most review
+feedback. To report a vulnerability, see [SECURITY.md](.github/SECURITY.md)
+(don't open a public issue).
 
 ## License
 
