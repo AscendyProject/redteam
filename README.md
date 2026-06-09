@@ -14,6 +14,15 @@ point — automatic self-agreement is what it exists to prevent.
 > Status: early. Extracted from a private monorepo where it has driven real,
 > merged pull requests. APIs and layout may still move.
 
+**Quick install (Claude Code) — two commands:**
+
+```text
+/plugin marketplace add AscendyProject/redteam
+/plugin install redteam@ascendy-redteam
+```
+
+Not on Claude Code? Vendor it into any repo — see [Install](#install).
+
 ## What it does
 
 Given a batch of tasks (each a short `input.md` brief), the orchestrator walks
@@ -55,6 +64,28 @@ code-security-reviewer, and pr-author. The reviewer is a *fresh* agent that only
 sees the diff and the project's security checklist — it never sees the
 implementer's reasoning.
 
+## How it's different
+
+A plain "two-model" setup stops at *a second model takes a second look*. redteam
+makes that separation structural and then acts on it:
+
+- **Findings are tiered, not pass/fail.** The reviewer emits findings with a
+  severity (`blocker` / `major` / `minor`), and the orchestrator tracks each one
+  *across review rounds* (a carry-over count) — a review is not a single thumbs
+  up/down.
+- **Persistent problems escalate on a ladder.** A blocker that survives multiple
+  rounds climbs: retry the worker → a heavier `rescue` pass → hand to a human
+  (`ask_user`). So one rejection doesn't kill a run, and a stubborn real bug
+  doesn't get rubber-stamped after a single retry.
+- **The reviewer is blind to the writer.** It's a fresh agent — and a
+  configurably *different* model — that sees only the diff and the security
+  checklist, never the implementer's reasoning, so self-justification can't
+  cross the boundary.
+- **Humans gate the irreversible steps** (plan approval, PR creation). It never
+  autonomously merges.
+- **Either model on either side, zero runtime deps.** See
+  [Model freedom](#model-freedom) and [Install](#install).
+
 ## Model freedom
 
 Roles bind to providers through a small adapter registry, not hardcoded calls.
@@ -70,11 +101,26 @@ isn't an adapter (e.g. `"human"`) falls back to the manual flow (you paste the
 review and touch the sentinel). Adding another provider is one adapter file plus
 one registry line.
 
-## Install (vendoring)
+## Install
 
-The harness ships *inside* your project tree (`.redteam/`), because the engine
-resolves your repo root from its own file location. Install copies the engine in
-and seeds the files you fill out:
+### As a Claude Code plugin (recommended)
+
+This repo doubles as a single-plugin marketplace, so two commands install it:
+
+```text
+/plugin marketplace add AscendyProject/redteam
+/plugin install redteam@ascendy-redteam
+```
+
+That registers the six sub-agents and a `/redteam:redteam-install` command. Run
+that command (or the `redteam-install` tool it puts on PATH) from your project
+root to vendor the harness in:
+
+```text
+/redteam:redteam-install        # vendors .redteam/ into the current repo
+```
+
+### Or vendor directly (any stack, no Claude Code needed)
 
 ```bash
 # from a clone of this repo:
@@ -84,9 +130,11 @@ python3 .redteam/scripts/install.py /path/to/your/project
 python3 .redteam/scripts/install.py /path/to/your/project --dry-run
 ```
 
-Harness-owned files (`workflows/`, `prompts/`, `templates/`, agent skeletons)
-are re-vendored on each run (`--overwrite` to refresh). Project-owned files
-(`config.toml`, `docs/*`, `verify.sh`, your `batches/`) are seeded once and
+Either way it's the same vendoring model: the harness ships *inside* your project
+tree (`.redteam/`) because the engine resolves your repo root from its own file
+location. Harness-owned files (`workflows/`, `prompts/`, `templates/`, agent
+skeletons) are re-vendored on each run (`--overwrite` to refresh); project-owned
+files (`config.toml`, `docs/*`, `verify.sh`, your `batches/`) are seeded once and
 never overwritten.
 
 The installer does **not** vendor the harness's own unit tests, so a consumer
@@ -94,25 +142,6 @@ never runs (or maintains) them — your `verify.sh` runs *your* tests, not the
 engine's. The vendored `.redteam/` engine follows the harness's own style, so
 **exclude `.redteam/` from your project's linter/formatter** (e.g. ruff's
 `extend-exclude`, an eslint ignore) to avoid it flagging code you don't own.
-
-### …or install as a Claude Code plugin
-
-This repo doubles as a single-plugin marketplace, so you can skip the manual
-clone. Add it and install once:
-
-```text
-/plugin marketplace add AscendyProject/redteam
-/plugin install redteam@ascendy-redteam
-```
-
-That registers the six sub-agents and a `/redteam:redteam-install` command. Run
-the command (or the `redteam-install` tool it puts on PATH) from your project
-root to vendor the harness in — it just wraps the same installer, so the
-vendored-copy model above is unchanged:
-
-```text
-/redteam:redteam-install        # vendors .redteam/ into the current repo
-```
 
 ### Requirements
 
