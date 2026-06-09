@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/AscendyProject/redteam/security/advisories/new
+    about: Report security issues privately here, not as a public issue.
+  - name: Question / discussion
+    url: https://github.com/AscendyProject/redteam/discussions
+    about: For usage questions and open-ended discussion (if Discussions is enabled).

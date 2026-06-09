@@ -1,0 +1,49 @@
+name: Bug report
+description: Something in the harness misbehaves
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For **security vulnerabilities**, do not file here —
+        see SECURITY.md.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected vs what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) run and the full output/error. A minimal task or config that triggers it helps a lot.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: A release tag (e.g. v0.1.0) or `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: From the task's state.json (or config).
+      options:
+        - agent-pair (default)
+        - tdd
+        - not sure
+    validations:
+      required: false
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS + Python version + which model CLIs (claude / codex) and versions.
+    validations:
+      required: false
