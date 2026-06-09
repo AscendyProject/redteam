@@ -101,6 +101,35 @@ isn't an adapter (e.g. `"human"`) falls back to the manual flow (you paste the
 review and touch the sentinel). Adding another provider is one adapter file plus
 one registry line.
 
+## When to use it
+
+Not every change earns an adversarial agent pair. redteam is the **heavyweight
+path** — a second independent model, human gates, a test-first loop — worth it
+when a wrong call is expensive, overkill for a typo. The intended mental model is
+to **scale the response to the risk of the change**:
+
+| change | response |
+|---|---|
+| trivial / non-behavior-changing (rename, comment, formatting) | just do it — single agent, no harness |
+| routine / small, local, reversible | single-agent loop; independent review optional |
+| **guarded** — behavior change with real blast radius (auth, storage, concurrency, public API, migrations) | **this harness**: agent-pair + security review + gates |
+| **strategic** — architectural or irreversible | the harness + heavier review (more reviewers, a human design gate) |
+
+Two levers match effort to risk without forking the pipeline:
+
+- **Model per role** (`config.toml [models]`) — a cheaper implementer for routine
+  work, a frontier reviewer for guarded work; either provider on either side.
+  Spend the expensive model where the risk is.
+- **The escalation ladder** — findings carry a severity, and a blocker that
+  survives rounds climbs retry → `rescue` → human. Effort concentrates where a
+  problem actually persists.
+
+Today you pick the tier yourself, by choosing which changes go into a batch.
+**Automatic, tier-aware routing** — the harness classifying a task and scaling
+its own phases and models — is
+[on the roadmap](https://github.com/AscendyProject/redteam/issues/13), not in
+this release.
+
 ## Install
 
 ### As a Claude Code plugin (recommended)
