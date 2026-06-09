@@ -8,7 +8,7 @@
 <outcome.md's Done-when checklist, copied verbatim>
 
 ## Verification
-- Tests: <comma-separated list of test functions added in the new tests/api/test_<feature>.py file>
+- Tests: <comma-separated list of test functions/cases added in the new test file>
 - Verify script: `bash .redteam/scripts/verify.sh` ✅
 
 ## Code review summary

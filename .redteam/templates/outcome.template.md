@@ -11,8 +11,8 @@
 - <Explicit exclusion — things a reasonable reader might assume but you are NOT doing>
 
 ## Affected files
-- `path/to/file.py` — <one-line reason>
-- `(new) tests/<area>/test_<feature>.py` — <one-line reason — canonical pytest location, NOT under `<task_dir>/tests/`>
+- `path/to/source-file` — <one-line reason>
+- `(new) <test_dir>/<new test file matching your test_file_glob>` — <one-line reason — the canonical test location for your stack (per config.toml), NOT under `<task_dir>/`>
 
 ## Verification
 
