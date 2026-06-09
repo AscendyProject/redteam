@@ -42,7 +42,7 @@ These are where a regression is expensive — review them hardest:
    (`--sandbox read-only` / `--permission-mode plan`); worker runs
    workspace-write. A reviewer adapter gaining write capability, or stderr leaking
    raw credentials, is a HIT.
-4. **Project-agnosticism**: no ascendy/Python fingerprints leaking into engine
+4. **Project-agnosticism**: no project- or stack-specific fingerprints leaking into engine
    code or non-example tests. The config seam (`config.py` + `.redteam/config.toml`)
    must remain the single place project specifics live.
 5. **Zero runtime deps**: a new non-stdlib import in the engine is a HIT unless
