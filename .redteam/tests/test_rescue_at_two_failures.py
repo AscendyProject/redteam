@@ -34,7 +34,9 @@ def test_review_code_changes_requested_routes_to_rescue_after_two_implement_retr
     }
     (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
-    monkeypatch.setattr(orchestrator, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"proj/{task_id}")
+    monkeypatch.setattr(
+        orchestrator, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"proj/{task_id}"
+    )
     monkeypatch.setattr(orchestrator, "repo_root", lambda: tmp_path)
     monkeypatch.setitem(
         orchestrator.PHASE_RUNNERS,

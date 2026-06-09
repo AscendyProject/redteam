@@ -89,6 +89,12 @@ are re-vendored on each run (`--overwrite` to refresh). Project-owned files
 (`config.toml`, `docs/*`, `verify.sh`, your `batches/`) are seeded once and
 never overwritten.
 
+The installer does **not** vendor the harness's own unit tests, so a consumer
+never runs (or maintains) them — your `verify.sh` runs *your* tests, not the
+engine's. The vendored `.redteam/` engine follows the harness's own style, so
+**exclude `.redteam/` from your project's linter/formatter** (e.g. ruff's
+`extend-exclude`, an eslint ignore) to avoid it flagging code you don't own.
+
 ### …or install as a Claude Code plugin
 
 This repo doubles as a single-plugin marketplace, so you can skip the manual
