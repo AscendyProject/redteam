@@ -191,8 +191,8 @@ read:
 - `.redteam/docs/security-checklist.md` — the reviewer's hard lines
 - `.redteam/docs/test-conventions.md` — how your test suite is wired
 
-Two complete examples to copy the shape from: `examples/ascendy-like/` (Python —
-FastAPI + Celery + Postgres + Milvus) and `examples/nuxt-like/` (JS/TS — Nuxt 3 +
+Two complete examples to copy the shape from: `examples/fastapi-like/` (Python —
+FastAPI + Celery + Postgres + a vector DB) and `examples/nuxt-like/` (JS/TS — Nuxt 3 +
 Vue + Vitest).
 
 ## Run

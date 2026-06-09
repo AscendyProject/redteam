@@ -4,7 +4,7 @@
 > (path from `config.toml [project] context_file`). Fill it with your project's
 > stack, entry points, and hard rules. Keep it short — it is mirrored into
 > every agent prompt, so verbosity costs tokens on every phase. For a richer,
-> real example see `examples/ascendy-like/.redteam/docs/project-context.md`.
+> real example see `examples/fastapi-like/.redteam/docs/project-context.md`.
 
 The authoritative source is your repo's own docs (e.g. `CLAUDE.md`/`AGENTS.md`);
 this file mirrors only what a sub-agent needs to make safe code decisions.

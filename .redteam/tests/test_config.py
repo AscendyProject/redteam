@@ -133,7 +133,7 @@ def test_seed_template_fails_loud_until_configured(tmp_path: Path) -> None:
         load_config(tmp_path)
 
 
-@pytest.mark.parametrize("example", ["ascendy-like", "nuxt-like"])
+@pytest.mark.parametrize("example", ["fastapi-like", "nuxt-like"])
 def test_example_config_loads_and_validates(tmp_path: Path, example: str) -> None:
     """Shipped examples must be valid, filled-in configs — the counterpart to the
     deliberately-empty seed template (#7.5 F-C). Guards them from drift."""

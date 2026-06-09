@@ -1,6 +1,6 @@
 # redteam harness config — nuxt-like (generic Nuxt 3 + Vue 3 + TypeScript).
 #
-# The JS/TS counterpart to examples/ascendy-like (Python). A real, filled-in
+# The JS/TS counterpart to examples/fastapi-like (Python). A real, filled-in
 # config showing what a non-Python stack puts here. Copy the shape, not the
 # specifics — your dirs, globs, and gate will differ.
 

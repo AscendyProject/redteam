@@ -5,7 +5,7 @@
 > your suite is actually wired — fixtures, stubs, DB, env. Fill it from your real
 > `conftest`/setup. Keep it accurate: if a sub-agent changes the test
 > infrastructure, refresh this file in the same PR. See
-> `examples/ascendy-like/.redteam/docs/test-conventions.md` for a real example.
+> `examples/fastapi-like/.redteam/docs/test-conventions.md` for a real example.
 
 ## Layout
 - Where tests live (`test_dir` in config) and the file/dir naming split

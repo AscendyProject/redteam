@@ -1,4 +1,4 @@
-# Security checklist — Ascendy backend
+# Security checklist — FastAPI-like backend
 
 The code-security-reviewer agent applies this list to every diff. Each item below is a
 **hard line** — a single confirmed HIT must escalate to `REVIEW_DECISION: CHANGES_REQUESTED`.
@@ -8,12 +8,12 @@ Don't relax the checklist for "small" changes; small diffs are where regressions
 - [ ] **SQL injection.** No raw SQL strings built with f-strings / `%` / `.format()`
       where any interpolated value originates from user input or any DB column the user
       can control. SQLAlchemy `text()` calls must use bound parameters, not concatenation.
-- [ ] **Milvus expression injection (Ascendy-specific).** Milvus `expr` strings must be
+- [ ] **Vector-DB expression injection.** Vector-database filter expressions must be
       built by deterministic Python from validated structured input — never by an LLM,
-      never by string-concatenating user input. If the diff lets free-form text reach an
-      `expr=`, that's a HIT regardless of how "harmless" the values look.
-- [ ] **Elasticsearch query injection.** No user input dropped into `query_string` or
-      `script_score` source. Use the Query DSL with parameterized values.
+      never by string-concatenating user input. If the diff lets free-form text reach a
+      filter expression, that's a HIT regardless of how "harmless" the values look.
+- [ ] **Search-index query injection.** No user input dropped into a raw query-string or
+      scripted-scoring source. Use the index's parameterized query DSL.
 - [ ] **Shell / subprocess injection.** Any `subprocess.run` / `os.system` with
       `shell=True` and user input is a HIT. Pass `args=[...]` lists and `shell=False`.
 
@@ -21,7 +21,7 @@ Don't relax the checklist for "small" changes; small diffs are where regressions
 - [ ] **Path traversal.** User-supplied filenames or keys must be normalized and
       checked to be inside the allowed prefix before being joined to a base path.
       Reject `..`, absolute paths, and NUL bytes.
-- [ ] **R2 / S3 keys.** Object keys are content-hash-based (SHA-256). Do not concatenate
+- [ ] **Object-store keys.** Object keys are content-hash-based (SHA-256). Do not concatenate
       user-controlled strings into keys; this both breaks dedup and creates a traversal
       surface across user prefixes.
 
@@ -38,17 +38,18 @@ Don't relax the checklist for "small" changes; small diffs are where regressions
 - [ ] **JWT / session validation.** Every protected route depends on the auth
       dependency — no route bypasses it via a custom decorator or in-route check.
 - [ ] **Per-user authorization on every read/write.** Routes that take an `id` param
-      (`media_id`, `album_id`, `pod_id`, …) must verify the resource belongs to the
-      caller (or to a pod the caller is a member of). "Authenticated" alone is not
+      (`media_id`, `album_id`, `group_id`, …) must verify the resource belongs to the
+      caller (or to a group the caller is a member of). "Authenticated" alone is not
       "authorized."
 - [ ] **No credential rotation bypass.** Don't introduce code paths that let
       `password_changed_at` be unset or backdated outside the verified flow.
 
 ## 5. URL signing & external surfaces
-- [ ] **S3 / R2 presigned URL TTL.** Default TTL must be short (≤ 15 min for upload,
+- [ ] **Object-store presigned URL TTL.** Default TTL must be short (≤ 15 min for upload,
       ≤ 1 hour for download). No 7-day URLs unless the diff has a written reason.
-- [ ] **Webhook / external callback signatures.** Inbound callbacks (RunPod, Stripe,
-      etc.) must verify the provider's signature — don't trust the body.
+- [ ] **Webhook / external callback signatures.** Inbound callbacks (payment providers,
+      GPU-service job completions, etc.) must verify the provider's signature — don't trust
+      the body.
 - [ ] **Open redirect.** Any `RedirectResponse(url=user_input)` must validate the
       target host against an allowlist.
 
@@ -63,24 +64,24 @@ Don't relax the checklist for "small" changes; small diffs are where regressions
       after — anything that flips this order is a HIT.
 
 ## 7. Architecture invariants
-- [ ] **No `BrokerProtocol` bypass.** Business logic must not import `redis` or
-      `aiokafka` directly. The only legal direct imports live in
+- [ ] **No `Broker` bypass.** Business logic must not import `redis` or another concrete
+      broker client directly. The only legal direct imports live in
       `app/services/infrastructure/message_broker.py` and the test conftest mocks.
 - [ ] **No infra calls from route handlers.** Routes call services; services call infra.
-      A route directly opening an S3 client or Milvus connection is a HIT.
+      A route directly opening an object-store client or vector-DB connection is a HIT.
 - [ ] **No new top-level dir under `app/` without CLAUDE.md update.** Architectural
       surface changes need to be documented.
 
 ## 8. AI model output trust boundary
-Treat every model response (Qwen3-VL captions, cognitive-extraction structured output,
-reranker scores, OCR text, anything coming back from Triton or vLLM) as **untrusted input**,
-on equal footing with raw user input. The fact that we generated the prompt does not make
-the response safe — uploaded images can carry adversarial text, and prompt injection has
-shipped in production at every shop that ignored this.
+Treat every model response (image captions, cognitive-extraction structured output,
+reranker scores, OCR text, anything coming back from the inference service) as **untrusted
+input**, on equal footing with raw user input. The fact that we generated the prompt does
+not make the response safe — uploaded images can carry adversarial text, and prompt
+injection has shipped in production at every shop that ignored this.
 
 - [ ] **Length cap before persistence.** Every model output written to PostgreSQL,
-      Milvus, or Elasticsearch must pass through an explicit length check (column-aligned
-      truncation or rejection). No "model said it, so it fits" assumptions.
+      the vector DB, or the search index must pass through an explicit length check
+      (column-aligned truncation or rejection). No "model said it, so it fits" assumptions.
 - [ ] **HTML / Markdown escape on render paths.** If a model output ever reaches a
       response body or templated string, it must be HTML-escaped (or rendered through a
       safe-mode markdown renderer with raw-HTML disabled). Don't store
@@ -91,9 +92,9 @@ shipped in production at every shop that ignored this.
       system-prompt leakage (`"You are now…"`, `"ignore previous instructions"`,
       role-tag fragments). Reject silently rather than trying to "fix" a hit.
 - [ ] **No model output flows back into another LLM call unfiltered.** A caption from
-      Qwen3-VL must not be concatenated into a downstream prompt without sanitization —
-      that's how injection chains across stages.
-- [ ] **No model output reaches Milvus `expr`, SQL, shell, or filesystem paths.**
+      the captioning model must not be concatenated into a downstream prompt without
+      sanitization — that's how injection chains across stages.
+- [ ] **No model output reaches a vector-DB filter expr, SQL, shell, or filesystem paths.**
       Same rule as user input (sections 1, 2): structured fields only, never string
       interpolation into a query/command/path.
 

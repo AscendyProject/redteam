@@ -15,7 +15,7 @@ open-source repo (`AscendyProject/redteam`, AGPLv3), which owns it going
   6 generic sub-agents), **templates** (`.redteam/templates/`).
 - **Project-owned, dogfood config** (`.redteam/config.toml`, `.redteam/docs/*`,
   `.redteam/scripts/verify.sh`): these describe THIS repo — redteam dogfoods its
-  own harness. `examples/ascendy-like/` is a real, richer (Python) example.
+  own harness. `examples/fastapi-like/` is a real, richer (Python) example.
 - **Installer** (`.redteam/scripts/install.py`): vendors the harness into a
   consumer repo (copy model, not pip — the engine resolves repo root from its own
   file location, so it must live inside the consumer's `.redteam/`).

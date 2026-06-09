@@ -1,0 +1,29 @@
+# redteam harness config — fastapi-like (generic FastAPI + Celery backend).
+#
+# The Python counterpart to examples/nuxt-like (JS/TS). A real, filled-in
+# config showing what a typical Python service stack puts here. Copy the
+# shape, not the specifics — your dirs, globs, and gate will differ.
+#
+# A different repo (e.g. a frontend) ships its own config.toml with its own
+# stack — that's how the harness stays project-agnostic.
+
+[project]
+name = "fastapi-like"
+context_file = ".redteam/docs/project-context.md"
+security_checklist = ".redteam/docs/security-checklist.md"
+test_conventions_file = ".redteam/docs/test-conventions.md"
+source_dirs = ["app/"]
+test_dir = "tests/"
+test_file_glob = "test_*.py"
+verify_command = "bash .redteam/scripts/verify.sh"
+# Python stack tools an LLM-authored outcome.md may name in a verification hook.
+# The verify_command above is always trusted; these bound everything else.
+verification_allowlist = ["pytest", "ruff", "mypy"]
+branch_prefix = "be"
+base_branch = "main"
+
+[models]
+planner = "claude-opus-4-7"
+implementer = "claude-sonnet-4-6"
+reviewer = "codex"
+rescue = "codex"

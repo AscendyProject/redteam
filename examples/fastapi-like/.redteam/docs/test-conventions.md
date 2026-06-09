@@ -1,4 +1,4 @@
-# Test conventions — Ascendy backend
+# Test conventions — FastAPI-like backend
 
 Facts pulled from `tests/conftest.py` and `tests/api/`. If a sub-agent updates the test
 infrastructure, refresh this file at the same time.
@@ -16,13 +16,13 @@ All swap-outs happen at **module import time** in `conftest.py`, before the Fast
 imported. Sub-agents writing new tests should not re-mock these — the autouse fixtures and
 `sys.modules` patches already cover them.
 
-- `tritonclient`, `tritonclient.http` → `MagicMock` via `sys.modules`
-- `neo4j`, `qrcode`, `pyotp` → `MagicMock` via `sys.modules`
+- The GPU inference-service client library → `MagicMock` via `sys.modules`
+- `qrcode`, `pyotp` → `MagicMock` via `sys.modules`
 - `redis`, `redis.asyncio` → `MagicMock` via `sys.modules`. The `mock_redis` fixture
   (`autouse=True`) additionally patches `app.redis_client.get_redis` to return a shared
   `mock_redis_obj`.
-- `pymilvus.client`, `pymilvus.client.grpc_handler` → `MagicMock` via `sys.modules`.
-  Milvus connection is never opened in tests.
+- The vector-DB client library → `MagicMock` via `sys.modules`.
+  The vector-DB connection is never opened in tests.
 - `celery`, `celery.app`, `celery.schedules`, `celery.result` → `MagicMock` via `sys.modules`.
   **There is no Celery eager mode** — tasks are not executed in tests, they are mocked
   callable shells. If you need to assert "task was enqueued", patch the task's `delay` /
@@ -46,8 +46,8 @@ imported. Sub-agents writing new tests should not re-mock these — the autouse 
 - `test_user`, `test_user_2` — pre-verified users (`is_email_verified=True`,
   `password_changed_at` backdated by 1 hour to bypass force-rotation logic).
 - `test_storage` — a `local`-provider Storage row owned by `test_user`.
-- `mock_s3` — patches `s3_client.delete_object`, `upload_fileobj`,
-  `generate_presigned_url` on `app.services.infrastructure.s3_service`.
+- `mock_object_store` — patches `delete_object`, `upload_fileobj`,
+  `generate_presigned_url` on `app.services.infrastructure.object_store_service`.
 - `mock_background_tasks` (autouse) — patches `fastapi.BackgroundTasks.add_task` so
   background work doesn't run during tests.
 
@@ -65,10 +65,10 @@ imported. Sub-agents writing new tests should not re-mock these — the autouse 
 individual tests unless the test explicitly needs to exercise misconfigured behavior.
 
 ## Gaps the sub-agent should NOT silently fill
-- No fixture for Milvus query results — patch `app.services.ai.vector_store_service`
+- No fixture for vector-DB query results — patch `app.services.ai.vector_store_service`
   callsites directly when you need a return shape.
-- No fixture for Elasticsearch — the relevant client is not yet stubbed centrally.
-- No fixture for Triton inference responses — see `app.services.ai.inference_client`.
+- No fixture for the search index — the relevant client is not yet stubbed centrally.
+- No fixture for inference responses — see `app.services.ai.inference_client`.
 - No coverage / mutation-testing config in `pyproject.toml`.
 
 If a needed fixture is missing, add it to `tests/conftest.py` and update this file in the
