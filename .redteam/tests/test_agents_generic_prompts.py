@@ -69,6 +69,22 @@ def test_agent_bodies_have_no_ascendy_or_stack_literals() -> None:
             assert token not in text, f"{name} still contains ascendy/stack literal {token!r}"
 
 
+# The markdown templates that GUIDE an agent's fill (vendored into every consumer)
+# must be stack-neutral too — a Python-flavored example here biases new projects.
+# (config.toml's template is excluded: it intentionally shows both Python and JS
+# allowlist examples in comments.)
+_TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+_FILL_TEMPLATES = ["outcome.template.md", "pr.template.md"]
+_FORBIDDEN_IN_TEMPLATES = ["pytest", "tests/api", ".py", "mypy", "Ascendy"]
+
+
+def test_fill_templates_have_no_stack_literals() -> None:
+    for name in _FILL_TEMPLATES:
+        text = (_TEMPLATES_DIR / name).read_text(encoding="utf-8")
+        for token in _FORBIDDEN_IN_TEMPLATES:
+            assert token not in text, f"{name} still contains a stack literal {token!r}"
+
+
 class _Recorder:
     def __init__(self) -> None:
         self.prompt = ""
