@@ -4,7 +4,7 @@
 # engine needs lives here, so the same engine drives any repo. The values below
 # describe THIS repo (redteam dogfoods its own harness). When you install the
 # harness into your project, replace these with your stack — see
-# `examples/ascendy-like/.redteam/config.toml` for a richer, real example.
+# `examples/fastapi-like/.redteam/config.toml` for a richer, real example.
 #
 # The loader fails loud on unknown keys/sections and bad types: a typo like
 # `verfy_command` errors instead of silently masking your real setting.

@@ -9,7 +9,7 @@ set -euo pipefail
 # over .redteam/). When you install the harness into your project, replace this
 # with your stack's checks — `npm test`, `cargo test`, `go test ./...`,
 # `ruff && mypy && pytest`, etc. See
-# examples/ascendy-like/.redteam/scripts/verify.sh for a real example.
+# examples/fastapi-like/.redteam/scripts/verify.sh for a real example.
 
 # Auto-activate a local venv if present, so the script works whether invoked
 # from an activated shell or directly by the orchestrator.

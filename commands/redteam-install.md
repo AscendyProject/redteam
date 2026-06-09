@@ -21,7 +21,7 @@ redteam-install .
 
 After installing, point the user at `.redteam/config.toml` and `.redteam/docs/*`
 to fill in for their stack (a complete example lives in
-`examples/ascendy-like/`), then drive a task:
+`examples/fastapi-like/`), then drive a task:
 
 ```bash
 python3 .redteam/workflows/orchestrator.py start .redteam/batches/<batch>

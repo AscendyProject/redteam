@@ -6,7 +6,7 @@
 > `REVIEW_DECISION: CHANGES_REQUESTED`. Replace the items below with the rules
 > that actually matter for your stack — keep them concrete enough that a
 > reviewer can mark HIT/clean without guessing. For a fleshed-out, real example
-> see `examples/ascendy-like/.redteam/docs/security-checklist.md`.
+> see `examples/fastapi-like/.redteam/docs/security-checklist.md`.
 
 Don't relax the checklist for "small" changes; small diffs are where regressions hide.
 

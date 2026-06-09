@@ -3,7 +3,7 @@
 # This is the externalization seam: every project-specific value the engine
 # needs lives here, so the same engine drives any repo. The loader fails loud on
 # unknown keys/sections and bad types. See
-# `examples/ascendy-like/.redteam/config.toml` (Python) or
+# `examples/fastapi-like/.redteam/config.toml` (Python) or
 # `examples/nuxt-like/.redteam/config.toml` (JS/TS) for real, filled-in examples.
 #
 # The three stack-specific fields below ship EMPTY on purpose: the loader rejects

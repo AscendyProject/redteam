@@ -9,9 +9,6 @@ Report privately via GitHub's **"Report a vulnerability"** button on this repo's
 [Security advisories page](https://github.com/AscendyProject/redteam/security/advisories/new)
 (Security tab → Advisories). This opens a private channel with the maintainer.
 
-If that is unavailable, email **zoljak.com@gmail.com** with "[security]" in the
-subject.
-
 Please include: what you found, how to reproduce it, and the impact you expect.
 You'll get an acknowledgement as soon as possible, and we'll keep you updated on
 the fix and disclosure timeline.
