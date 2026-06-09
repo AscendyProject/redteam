@@ -9,3 +9,7 @@ venv/
 dist/
 build/
 .DS_Store
+
+# Internal cross-repo coordination — never part of the public project
+/docs/requests/
+/docs/cross-stack-findings.md

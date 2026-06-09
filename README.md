@@ -11,8 +11,11 @@ drives a task through a test-first pipeline (plan → test → implement); a
 irreversible steps. The collision of two independent model perspectives is the
 point — automatic self-agreement is what it exists to prevent.
 
-> Status: early. Extracted from a private monorepo where it has driven real,
-> merged pull requests. APIs and layout may still move.
+> Status: early. redteam was built as one project's internal harness and then
+> extracted into this standalone repo, which owns it going forward — it has
+> driven real, merged pull requests. (Its early git history reflects that origin,
+> including cross-repo coordination from the parent project.) APIs and layout may
+> still move.
 
 **Quick install (Claude Code) — two commands:**
 
