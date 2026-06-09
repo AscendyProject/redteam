@@ -428,9 +428,7 @@ TaskOutcome = Literal[
 ]
 
 
-def _ensure_task_branch(
-    task_id: str, repo: Path, branch_prefix: str = "redteam", base_branch: str = "main"
-) -> str:
+def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam", base_branch: str = "main") -> str:
     """Ensure we're on the per-task branch `<branch_prefix>/<task_id>` before phases run.
 
     Steps:
@@ -525,9 +523,7 @@ def process_task(task_dir: Path) -> TaskOutcome:
     if next_phase_check not in ("done", "deferred"):
         cfg = load_config(repo_root())
         try:
-            branch = _ensure_task_branch(
-                task_dir.name, repo_root(), cfg.project.branch_prefix, cfg.project.base_branch
-            )
+            branch = _ensure_task_branch(task_dir.name, repo_root(), cfg.project.branch_prefix, cfg.project.base_branch)
             state["branch"] = branch
             save_state(task_dir, state)
         except (subprocess.CalledProcessError, RuntimeError) as e:

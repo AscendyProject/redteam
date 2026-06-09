@@ -56,7 +56,8 @@ def test_tdd_mode_approved_review_routes_to_create_pr_not_rescue(monkeypatch, tm
     (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
     monkeypatch.setattr(
-        orchestrator, "_ensure_task_branch",
+        orchestrator,
+        "_ensure_task_branch",
         lambda task_id, repo, branch_prefix, base_branch: f"proj/{task_id}",
     )
     monkeypatch.setattr(orchestrator, "repo_root", lambda: tmp_path)
@@ -66,6 +67,7 @@ def test_tdd_mode_approved_review_routes_to_create_pr_not_rescue(monkeypatch, tm
     # than invoking a real worker adapter. If the bug is present, the loop would
     # instead run the (unmocked) rescue phase.
     monkeypatch.setitem(orchestrator.PHASE_RUNNERS, "create_pr", lambda task_dir, state: approved)
+
     # Guard: if routing regresses to rescue, fail loudly here rather than
     # executing the real rescue runner.
     def _fail_rescue(task_dir, state):

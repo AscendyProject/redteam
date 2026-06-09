@@ -152,8 +152,9 @@ def install(target: Path, overwrite: bool, dry: bool) -> None:
         sys.exit(f"ERROR: target is not a directory: {target}")
     print(f"Installing redteam harness into {target}")
     print(f"  source: {SOURCE_ROOT}")
-    print(f"  mode:   {'overwrite' if overwrite else 'safe (keep existing harness files)'}"
-          f"{' [dry-run]' if dry else ''}")
+    print(
+        f"  mode:   {'overwrite' if overwrite else 'safe (keep existing harness files)'}{' [dry-run]' if dry else ''}"
+    )
     print()
     for rel in HARNESS_TREES:
         _copy_tree(rel, target, overwrite, dry)
@@ -174,8 +175,11 @@ def install(target: Path, overwrite: bool, dry: bool) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Install the redteam harness into a project (vendoring).")
     ap.add_argument("target", help="Path to the target project root.")
-    ap.add_argument("--overwrite", action="store_true",
-                    help="Refresh harness-owned files even if they exist (project-owned files are never overwritten).")
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Refresh harness-owned files even if they exist (project-owned files are never overwritten).",
+    )
     ap.add_argument("--dry-run", action="store_true", help="Show what would change without writing.")
     args = ap.parse_args()
     install(Path(args.target), overwrite=args.overwrite, dry=args.dry_run)

@@ -21,6 +21,9 @@ fi
 echo "=== ruff check ==="
 ruff check .redteam/
 
+echo "=== ruff format check ==="
+ruff format --check .redteam/
+
 echo "=== pytest ==="
 pytest .redteam/tests -x --tb=short
 
