@@ -21,11 +21,27 @@ every task through a fixed pipeline, persisting `state.json` after each phase so
 a run is fully resumable, retrying on `CHANGES_REQUESTED`, and **blocking at
 human gates** (sentinel files you touch to approve):
 
+```mermaid
+flowchart TD
+    PO[plan_outcome]:::worker --> PR[plan_review]:::rev
+    PR --> HG1{{🔒 human gate}}:::gate
+    HG1 --> IMPL[implement]:::worker
+    IMPL --> RC[review_code]:::rev
+    RC -->|APPROVED| CPR[create_pr]:::worker
+    RC -->|CHANGES_REQUESTED| IMPL
+    RC -. review fails twice .-> RES[rescue]:::rev
+    RES --> HG2{{🔒 human gate}}:::gate
+    HG2 --> CPR
+    CPR --> HG3{{🔒 human gate}}:::gate
+    HG3 --> DONE([done]):::done
+
+    classDef worker fill:#e3f2fd,stroke:#1976d2,color:#0d47a1;
+    classDef rev fill:#fce4ec,stroke:#c2185b,color:#880e4f;
+    classDef gate fill:#fff8e1,stroke:#f9a825,color:#000;
+    classDef done fill:#e8f5e9,stroke:#388e3c,color:#1b5e20;
 ```
-plan_outcome → plan_review → [human gate] → implement → review_code
-              → rescue (only if review fails twice) → [human gate]
-              → create_pr → [human gate] → done
-```
+
+<sub>Blue = **worker** model (writes) · pink = **reviewer** model (adversarial, fresh) · yellow = **human gate**.</sub>
 
 That is the default **agent-pair** flow (a separate reviewer model reviews the
 implementer). The alternative single-model **TDD** mode (`mode = "tdd"` in a
