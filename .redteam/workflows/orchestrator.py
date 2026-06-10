@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -46,7 +47,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     validate_verification_commands,
 )
 from adapters import get_reviewer_adapter  # type: ignore[import-not-found]  # noqa: E402
-from config import load_config  # type: ignore[import-not-found]  # noqa: E402
+from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
 
 
 # ---------- phase order & runner registry ----------
@@ -166,10 +167,49 @@ def _mode(state: dict[str, Any]) -> str:
     return str(state.get("mode") or "agent-pair")
 
 
+# Phase names a tier profile's `phases` may contain: every runnable phase, every
+# human gate, plus the terminal "done". A profile naming anything else is rejected
+# (fail-closed) at tier resolution.
+_VALID_PHASE_NAMES: frozenset[str] = frozenset(PHASE_RUNNERS) | frozenset(GATE_SENTINELS) | {"done"}
+
+
 def _phase_order(state: dict[str, Any]) -> list[str]:
+    # A resolved tier profile (issue #13) overrides the order for this task.
+    tier_phases = state.get("tier_phases")
+    if tier_phases:
+        return list(tier_phases)
     if _mode(state) == "agent-pair":
         return AGENT_PAIR_PHASE_ORDER
     return TDD_PHASE_ORDER
+
+
+def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | None]:
+    """Read an optional leading TOML front-matter block from input.md, fenced by
+    `+++` lines, and return its `tier` (int) and `paths` (list[str]) if present.
+
+    No input.md, no fence, or a malformed block → (None, None): the task is then
+    treated as unclassified and resolves to the safe default tier. TOML (stdlib
+    tomllib) keeps the zero-dependency promise.
+    """
+    path = task_dir / "input.md"
+    if not path.exists():
+        return None, None
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("+++"):
+        return None, None
+    end = text.find("\n+++", 3)
+    if end == -1:
+        return None, None
+    block = text[3:end].strip()
+    try:
+        fm = tomllib.loads(block)
+    except tomllib.TOMLDecodeError:
+        return None, None
+    tier = fm.get("tier")
+    paths = fm.get("paths")
+    tier = tier if isinstance(tier, int) and not isinstance(tier, bool) else None
+    paths = [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else None
+    return tier, paths
 
 
 def _next_phase(state: dict[str, Any], current: str) -> str:
@@ -539,6 +579,37 @@ def process_task(task_dir: Path) -> TaskOutcome:
             state["next_phase"] = "deferred"
             save_state(task_dir, state)
             return "error"
+
+        # Resolve the risk tier ONCE, at a fresh task's start (issue #13), only
+        # when tier routing is configured. Stored in state so resume is stable.
+        # cfg.tiers empty → skipped → behavior unchanged. Restricted to fresh
+        # tasks (no phases completed yet) so a profile's phase order drives from
+        # the start and an in-flight task is never re-routed mid-pipeline.
+        if cfg.tiers and "tier" not in state and not state.get("phases_completed"):
+            explicit, paths = _parse_input_frontmatter(task_dir)
+            try:
+                tier = resolve_tier(cfg, explicit, paths)
+            except ValueError as e:
+                state["last_failure_reason"] = "tier_resolution_failed"
+                state["last_failure_log"] = str(e)
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            profile = cfg.tiers[tier]
+            if profile.phases is not None:
+                unknown = [p for p in profile.phases if p not in _VALID_PHASE_NAMES]
+                if unknown:
+                    state["last_failure_reason"] = "tier_resolution_failed"
+                    state["last_failure_log"] = f"tier {tier} profile names unknown phase(s): {sorted(unknown)}"
+                    state["next_phase"] = "deferred"
+                    save_state(task_dir, state)
+                    return "error"
+                state["tier_phases"] = list(profile.phases)
+                state["next_phase"] = profile.phases[0]  # drive the tier order from its first phase
+            if profile.models:
+                state["models"] = {**(state.get("models") or {}), **profile.models}
+            state["tier"] = tier
+            save_state(task_dir, state)
 
     while True:
         phase = state.get("next_phase") or _phase_order(state)[0]
