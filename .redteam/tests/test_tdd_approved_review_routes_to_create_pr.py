@@ -63,9 +63,10 @@ def test_tdd_mode_approved_review_routes_to_create_pr_not_rescue(monkeypatch, tm
     monkeypatch.setattr(orchestrator, "repo_root", lambda: tmp_path)
     approved = {"status": "approved", "feedback": "", "log": "REVIEW_DECISION: APPROVED", "diff": ""}
     monkeypatch.setitem(orchestrator.PHASE_RUNNERS, "review_code", lambda task_dir, state: approved)
-    # Mock create_pr too, so the loop halts cleanly at the PR human gate rather
-    # than invoking a real worker adapter. If the bug is present, the loop would
-    # instead run the (unmocked) rescue phase.
+    # Mock create_pr too, so the loop finishes cleanly rather than invoking a real
+    # worker adapter. If the bug is present, the loop would instead run the
+    # (unmocked) rescue phase. The default order has no human_gate_pr (the draft
+    # PR is the human checkpoint), so an approved create_pr advances to done.
     monkeypatch.setitem(orchestrator.PHASE_RUNNERS, "create_pr", lambda task_dir, state: approved)
 
     # Guard: if routing regresses to rescue, fail loudly here rather than
@@ -78,8 +79,8 @@ def test_tdd_mode_approved_review_routes_to_create_pr_not_rescue(monkeypatch, tm
     outcome = orchestrator.process_task(task_dir)
     saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
 
-    assert outcome == "blocked_on_human_gate"
-    assert saved["next_phase"] == "human_gate_pr"
+    assert outcome == "done"
+    assert saved["next_phase"] == "done"
     assert "review_code" in saved["phases_completed"]
     assert "create_pr" in saved["phases_completed"]
     assert "rescue" not in saved["phases_completed"]

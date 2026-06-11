@@ -58,17 +58,29 @@ class ModelsConfig:
     rescue: str = "codex"
 
 
+GATE_NAMES = ("outcome", "pr", "rescue")  # the human gates a tier may opt into
+
+
 @dataclass(frozen=True)
 class TierProfile:
     """Execution posture for one risk tier (roadmap item B / issue #13).
 
-    `phases` overrides the phase order for a task at this tier (None → the
-    engine's default order). `models` overrides specific roles for this tier
-    (merged over `[models]`), so e.g. a Tier-0 trivial change can use a cheap
-    implementer. Empty/absent fields leave the engine default in place.
+    Declarative toggles, not a raw phase list — the engine builds the phase order
+    from these over a fixed canonical pipeline, so the order is always coherent
+    (no way to compose an order that skips the review/PR tail unsafely):
+
+    - `review`: include the adversarial pair (plan_review + review_code + the
+      rescue escalation). False → a single-agent path (plan → implement → PR).
+    - `gates`: which HUMAN gates to insert — subset of `outcome` / `pr` /
+      `rescue`. The thesis is to scale human intervention to risk, so the lean
+      default is no gates (the adversarial pair + verify are the trust); a
+      high-risk tier opts gates back in. (`rescue` requires `review`.)
+    - `models`: per-role model overrides for this tier (merged over `[models]`),
+      e.g. a cheap implementer for trivial work.
     """
 
-    phases: tuple[str, ...] | None = None
+    review: bool = True
+    gates: tuple[str, ...] = ()
     models: dict[str, str] = field(default_factory=dict)
 
 
@@ -143,9 +155,9 @@ _KNOWN_ROLES = frozenset(f.name for f in dataclasses.fields(ModelsConfig))
 
 
 def _parse_tiers(raw: dict) -> dict[int, TierProfile]:
-    """Parse `[tiers.<N>]` tables. Keys must be integers; each profile may set
-    `phases` (list of non-empty strings) and `models` (role → non-empty string,
-    role ∈ ModelsConfig fields). Fails loud on anything else."""
+    """Parse `[tiers.<N>]` tables (keys must be integers). Each profile may set
+    `review` (bool), `gates` (subset of GATE_NAMES), and `models` (role →
+    non-empty string, role ∈ ModelsConfig fields). Fails loud on anything else."""
     tiers: dict[int, TierProfile] = {}
     for key, prof in raw.items():
         try:
@@ -156,16 +168,22 @@ def _parse_tiers(raw: dict) -> dict[int, TierProfile]:
             raise ValueError(f"[tiers] keys must be non-negative, got {tier}.")
         if not isinstance(prof, dict):
             raise ValueError(f"[tiers.{tier}] must be a table, got {prof!r}.")
-        unknown = set(prof) - {"phases", "models"}
+        unknown = set(prof) - {"review", "gates", "models"}
         if unknown:
-            raise ValueError(f"[tiers.{tier}] unknown key(s): {sorted(unknown)}. Known: ['models', 'phases'].")
-        phases = prof.get("phases")
-        if phases is not None:
-            if not isinstance(phases, list) or not phases or not all(isinstance(p, str) and p for p in phases):
-                raise ValueError(
-                    f"[tiers.{tier}].phases must be a non-empty list of non-empty strings, got {phases!r}."
-                )
-            phases = tuple(phases)
+            raise ValueError(f"[tiers.{tier}] unknown key(s): {sorted(unknown)}. Known: ['gates', 'models', 'review'].")
+        review = prof.get("review", True)
+        if not isinstance(review, bool):
+            raise ValueError(f"[tiers.{tier}].review must be a boolean, got {review!r}.")
+        gates = prof.get("gates", [])
+        if not isinstance(gates, list) or not all(isinstance(g, str) for g in gates):
+            raise ValueError(f"[tiers.{tier}].gates must be a list of strings, got {gates!r}.")
+        bad_gates = set(gates) - set(GATE_NAMES)
+        if bad_gates:
+            raise ValueError(
+                f"[tiers.{tier}].gates has unknown gate(s): {sorted(bad_gates)}. Known: {list(GATE_NAMES)}."
+            )
+        if "rescue" in gates and not review:
+            raise ValueError(f"[tiers.{tier}] has gate 'rescue' but review=false — rescue only happens with review.")
         models = prof.get("models", {})
         if not isinstance(models, dict):
             raise ValueError(f"[tiers.{tier}].models must be a table, got {models!r}.")
@@ -177,7 +195,7 @@ def _parse_tiers(raw: dict) -> dict[int, TierProfile]:
         for role, model in models.items():
             if not isinstance(model, str) or not model:
                 raise ValueError(f"[tiers.{tier}].models.{role} must be a non-empty string, got {model!r}.")
-        tiers[tier] = TierProfile(phases=phases, models=dict(models))
+        tiers[tier] = TierProfile(review=review, gates=tuple(gates), models=dict(models))
     return tiers
 
 
