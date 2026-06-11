@@ -299,6 +299,38 @@ def compute_branch_diff(cwd: Path | None = None) -> str:
     return committed + unstaged + staged
 
 
+def compute_branch_changed_paths(cwd: Path | None = None) -> list[str]:
+    """Paths changed on the task branch vs the base (committed + unstaged + staged),
+    as ground truth — NOT parsed from patch headers.
+
+    Uses `git diff -z --name-only` (NUL-delimited) with `core.quotepath=false`, so
+    paths with spaces, non-ASCII, or other special characters are returned exactly,
+    never mangled or silently dropped. This matters for the tier downgrade guard
+    (a missed path would fail OPEN, letting a downgrade bypass slip through)."""
+    base = cwd or repo_root()
+    base_branch = project_config().base_branch
+    diff_args = (
+        ["diff", "-z", "--name-only", f"{base_branch}...HEAD"],
+        ["diff", "-z", "--name-only"],
+        ["diff", "-z", "--name-only", "--cached"],
+    )
+    seen: set[str] = set()
+    paths: list[str] = []
+    for args in diff_args:
+        out = subprocess.run(
+            ["git", "-c", "core.quotepath=false", *args],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        for p in out.split("\0"):
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+    return paths
+
+
 def extract_verification_commands(outcome_text: str) -> list[str]:
     """Extract command list from the fenced yaml block under `## Verification`."""
     lines = outcome_text.splitlines()

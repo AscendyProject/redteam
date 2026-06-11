@@ -42,7 +42,7 @@ from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
 )
 from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E402
     PhaseResult,
-    compute_branch_diff,
+    compute_branch_changed_paths,
     extract_verification_commands,
     repo_root,
     validate_verification_commands,
@@ -233,25 +233,12 @@ def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | No
     return tier, paths
 
 
-_DIFF_GIT_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$")
-
-
 def _changed_paths(cwd: Path) -> list[str]:
-    """Paths actually changed on the task branch (committed + working tree), from
-    the real git diff — the ground truth for the tier downgrade check (issue #19),
-    as opposed to the paths a task merely DECLARES in its front-matter."""
-    diff = compute_branch_diff(cwd=cwd)
-    paths: list[str] = []
-    seen: set[str] = set()
-    for line in diff.splitlines():
-        m = _DIFF_GIT_RE.match(line)
-        if m is None:
-            continue
-        for p in m.groups():
-            if p != "/dev/null" and p not in seen:
-                seen.add(p)
-                paths.append(p)
-    return paths
+    """Ground-truth changed paths on the task branch, for the tier downgrade check
+    (issue #19) — the REAL diff, not the paths a task DECLARES in its front-matter.
+    Delegates to the NUL-delimited name-only helper so special-char paths can't be
+    dropped (a missed path would fail open and let a downgrade slip through)."""
+    return compute_branch_changed_paths(cwd=cwd)
 
 
 def _next_phase(state: dict[str, Any], current: str) -> str:

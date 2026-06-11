@@ -265,3 +265,47 @@ def test_no_downgrade_when_diff_is_below_declared(monkeypatch, tmp_path):
 
     assert outcome == "done"
     assert "create_pr" in saved["phases_completed"]
+
+
+def test_changed_paths_handles_special_char_paths(tmp_path):
+    """The downgrade guard's ground truth must not drop paths with spaces or
+    non-ASCII chars (a dropped auth path would fail OPEN). compute_branch_changed_paths
+    uses `git diff -z --name-only`, so such paths come back intact — verified against
+    a real git repo."""
+    import subprocess
+    import sys
+
+    wf = str(Path(__file__).resolve().parents[1] / "workflows")
+    if wf not in sys.path:
+        sys.path.insert(0, wf)
+    from phase_runners._base import compute_branch_changed_paths  # type: ignore
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("config", "commit.gpgsign", "false")
+    (tmp_path / "seed").write_text("x")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    git("checkout", "-q", "-b", "task")
+    # a path with a SPACE and a non-ASCII char, under auth/ — the case the old regex mangled
+    authdir = tmp_path / "app" / "auth"
+    authdir.mkdir(parents=True)
+    (authdir / "log in é.py").write_text("secret")
+    git("add", ".")
+    git("commit", "-qm", "change")
+
+    # config.toml so base_branch resolves; default base is "main" but our base is the
+    # initial commit on a detached name — use main as base_branch and compare works via main...
+    (tmp_path / ".redteam").mkdir()
+    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbase_branch = "main"\n', encoding="utf-8")
+    # rename the initial branch to main so base_branch="main" resolves
+    git("branch", "-m", "main", "main_old") if False else None
+    # ensure a 'main' ref exists pointing at the base commit
+    git("branch", "-f", "main", "HEAD~1")
+
+    paths = compute_branch_changed_paths(cwd=tmp_path)
+    assert "app/auth/log in é.py" in paths  # intact: space + non-ASCII preserved, not dropped
