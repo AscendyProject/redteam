@@ -195,3 +195,73 @@ def test_default_pipeline_has_no_pr_gate(monkeypatch, tmp_path):
     orch = _load_orchestrator()
     assert "human_gate_pr" not in orch.AGENT_PAIR_PHASE_ORDER
     assert orch._next_phase({"mode": "agent-pair"}, "create_pr") == "done"
+
+
+# --- issue #19: tier downgrade guard (real diff re-check before create_pr) ---
+
+
+def _setup_at_create_pr(orch, monkeypatch, tmp_path, tier, changed_paths):
+    """A task already routed at `tier`, sitting at create_pr, with a mocked real diff."""
+    (tmp_path / ".redteam").mkdir()
+    (tmp_path / ".redteam" / "config.toml").write_text(_CFG_WITH_TIERS, encoding="utf-8")
+    task_dir = tmp_path / "batch" / "tasks" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "input.md").write_text("brief", encoding="utf-8")
+    state = {
+        "task_id": "task-001",
+        "mode": "agent-pair",
+        "tier": tier,
+        "tier_phases": ["plan_outcome", "implement", "create_pr", "done"]
+        if tier == 0
+        else ["plan_outcome", "plan_review", "implement", "review_code", "rescue", "create_pr", "done"],
+        "phase": "create_pr",
+        "phases_completed": ["plan_outcome", "implement"],
+        "next_phase": "create_pr",
+        "models": {},
+        "retries": {},
+        "max_retries_per_phase": 2,
+        "verification": {},
+        "escape": {"ask_user": False, "reason": None, "return_phase": None},
+    }
+    (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    _common_mocks(orch, monkeypatch, tmp_path)
+    monkeypatch.setattr(orch, "_changed_paths", lambda cwd: changed_paths)
+    monkeypatch.setitem(orch.PHASE_RUNNERS, "create_pr", _approve)
+    return task_dir
+
+
+def test_downgrade_detected_when_real_diff_floors_higher(monkeypatch, tmp_path):
+    """Ran at tier 0, but the real diff touches auth (→ tier 4): refuse to ship."""
+    orch = _load_orchestrator()
+    task_dir = _setup_at_create_pr(orch, monkeypatch, tmp_path, tier=0, changed_paths=["app/auth/login.py"])
+
+    outcome = orch.process_task(task_dir)
+    saved = json.loads((task_dir / "state.json").read_text())
+
+    assert outcome == "deferred"
+    assert saved["last_failure_reason"] == "tier_downgrade_detected"
+    assert "create_pr" not in saved["phases_completed"]  # PR never created under the light posture
+
+
+def test_no_downgrade_when_real_diff_matches_tier(monkeypatch, tmp_path):
+    """Ran at tier 4 and the diff touches auth (still tier 4): create_pr proceeds."""
+    orch = _load_orchestrator()
+    task_dir = _setup_at_create_pr(orch, monkeypatch, tmp_path, tier=4, changed_paths=["app/auth/login.py"])
+
+    outcome = orch.process_task(task_dir)
+    saved = json.loads((task_dir / "state.json").read_text())
+
+    assert outcome == "done"
+    assert "create_pr" in saved["phases_completed"]
+
+
+def test_no_downgrade_when_diff_is_below_declared(monkeypatch, tmp_path):
+    """Ran at tier 0, real diff is just a non-triggering file (→ default 0): proceeds."""
+    orch = _load_orchestrator()
+    task_dir = _setup_at_create_pr(orch, monkeypatch, tmp_path, tier=0, changed_paths=["app/util/helpers.py"])
+
+    outcome = orch.process_task(task_dir)
+    saved = json.loads((task_dir / "state.json").read_text())
+
+    assert outcome == "done"
+    assert "create_pr" in saved["phases_completed"]
