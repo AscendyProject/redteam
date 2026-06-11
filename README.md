@@ -1,7 +1,7 @@
 # redteam
 
 [![CI](https://github.com/AscendyProject/redteam/actions/workflows/ci.yml/badge.svg)](https://github.com/AscendyProject/redteam/actions/workflows/ci.yml)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Runtime deps: 0](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)
 
@@ -243,6 +243,6 @@ feedback. To report a vulnerability, see [SECURITY.md](.github/SECURITY.md)
 
 ## License
 
-GNU AGPLv3 (`LICENSE`). Contributions are accepted under the
-[Contributor License Agreement](CLA.md), which preserves the option of an
-alternative/commercial license.
+Apache License 2.0 (`LICENSE`). Contributions are accepted under the
+[Contributor License Agreement](CLA.md), which keeps provenance clean and
+preserves the option of offering the project under other terms.

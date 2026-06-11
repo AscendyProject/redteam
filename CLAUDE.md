@@ -4,7 +4,7 @@ This is the standalone home of the **redteam** harness: an adversarial agent-pai
 workflow where one model writes code through a test-first pipeline and a second
 model reviews it, gated at human checkpoints. It was extracted from a private
 monorepo — where it was built as that project's internal harness — into this
-open-source repo (`AscendyProject/redteam`, AGPLv3), which owns it going
+open-source repo (`AscendyProject/redteam`, Apache-2.0), which owns it going
 **forward**.
 
 ## What this repo is
@@ -19,7 +19,7 @@ open-source repo (`AscendyProject/redteam`, AGPLv3), which owns it going
 - **Installer** (`.redteam/scripts/install.py`): vendors the harness into a
   consumer repo (copy model, not pip — the engine resolves repo root from its own
   file location, so it must live inside the consumer's `.redteam/`).
-- **Packaging**: `LICENSE` (AGPLv3 verbatim), `CLA.md`, `README.md`, `pyproject.toml`.
+- **Packaging**: `LICENSE` (Apache-2.0 verbatim), `CLA.md`, `README.md`, `pyproject.toml`.
 
 ## Commands
 
@@ -73,7 +73,7 @@ all security boundaries — never loosen them inline; plan_review first.
   project-owned files (`config.toml`, `docs/*`, `verify.sh`, `batches/`) are
   seeded once and never overwritten. Regression-tested in `test_install.py` —
   keep those invariants.
-- **LICENSE is AGPLv3; contributions are under `CLA.md`.** Don't change the
+- **LICENSE is Apache-2.0; contributions are under `CLA.md`.** Don't change the
   license or weaken the CLA without the operator's explicit decision.
 - **No force-push to `main`; no committing secrets.** Standard.
 

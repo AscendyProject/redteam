@@ -17,8 +17,9 @@ developed with the same discipline it embodies, so a few conventions matter.
   the installer's file-class split (harness-owned vs project-owned), the
   snapshot/fail-closed logic, and the adapter trust model are trust boundaries.
   Changes there get extra review — explain the boundary in your PR.
-- **By contributing you agree to the [CLA](../CLA.md)** (it preserves an
-  alternative/commercial-license option). The project is licensed AGPLv3.
+- **By contributing you agree to the [CLA](../CLA.md)** (it keeps provenance
+  clean and preserves licensing flexibility). The project is licensed
+  Apache-2.0.
 
 ## Dev setup
 

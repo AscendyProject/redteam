@@ -1,10 +1,9 @@
 # Contributor License Agreement
 
-The redteam harness is licensed to the public under the GNU Affero General
-Public License v3.0 (AGPLv3). To keep the option of offering the project under
-other terms (e.g. a commercial dual license) and to be able to defend the
-project, contributions are accepted under this Contributor License Agreement
-("Agreement").
+The redteam harness is licensed to the public under the Apache License, Version
+2.0. To keep provenance clean, preserve the option of offering the project under
+other terms, and be able to defend the project, contributions are accepted under
+this Contributor License Agreement ("Agreement").
 
 By submitting a contribution (a pull request, patch, or any other work) to this
 project, You agree to the terms below. If You are contributing on behalf of an
@@ -29,8 +28,7 @@ copyright license to reproduce, prepare derivative works of, publicly display,
 publicly perform, sublicense, and distribute Your Contribution and such
 derivative works. This expressly includes the right of the Project Owner to
 license the Contribution — alone or as part of the project — under terms of the
-Project Owner's choosing, including the AGPLv3 and other licenses (dual
-licensing).
+Project Owner's choosing, including the Apache License 2.0 and other licenses.
 
 ## 3. Patent license
 

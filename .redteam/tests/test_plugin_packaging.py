@@ -41,7 +41,7 @@ def test_plugin_manifest_valid():
     assert data["name"] == "redteam"
     assert data["name"] == data["name"].lower().replace(" ", "")  # kebab/lower
     assert data["version"]  # non-empty
-    assert data["license"] == "AGPL-3.0-or-later"  # matches repo LICENSE
+    assert data["license"] == "Apache-2.0"  # matches repo LICENSE
 
 
 def test_marketplace_lists_this_repo_as_the_plugin():
