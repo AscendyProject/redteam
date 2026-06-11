@@ -145,3 +145,23 @@ def test_explicit_tier_without_profile_fails_loud(tmp_path):
     cfg = _write(tmp_path, _VALID)
     with pytest.raises(ValueError, match="no \\[tiers.3"):
         resolve_tier(cfg, explicit_tier=3, affected_paths=None)
+
+
+# --- glob matcher: recursive `**` (NOT fnmatch semantics) ---
+
+
+def test_double_star_matches_recursively_including_top_level(tmp_path):
+    """`**/auth/**` must match a top-level `auth/...` AND a nested one — the trap
+    that stdlib fnmatch silently failed (under-classifying top-level paths)."""
+    cfg = _write(tmp_path, _VALID)  # "**/auth/**" = 4, default = 2
+    assert resolve_tier(cfg, None, ["auth/login.py"]) == 4  # top-level: fnmatch would have missed this
+    assert resolve_tier(cfg, None, ["app/auth/login.py"]) == 4  # nested
+    assert resolve_tier(cfg, None, ["app/services/user.py"]) == 2  # no auth → default
+
+
+def test_single_star_does_not_cross_slash(tmp_path):
+    cfg = _write(
+        tmp_path, '[tiers.0]\nreview=false\n[tiers.3]\nreview=true\n[tier_triggers]\n"src/*.py" = 3\ndefault = 0\n'
+    )
+    assert resolve_tier(cfg, None, ["src/app.py"]) == 3  # single segment matches
+    assert resolve_tier(cfg, None, ["src/sub/app.py"]) == 0  # `*` must not span `/` → no match → default

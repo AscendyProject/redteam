@@ -16,9 +16,9 @@ for a standalone OSS package.
 from __future__ import annotations
 
 import dataclasses
+import re
 import tomllib
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
 from pathlib import Path
 
 _CONFIG_RELPATH = (".redteam", "config.toml")
@@ -235,6 +235,46 @@ def _validate_tiers(cfg: RedteamConfig) -> None:
         raise ValueError(f"tiers referenced by [tier_triggers] have no [tiers.<N>] profile: {missing}.")
 
 
+def _glob_to_regex(glob: str) -> re.Pattern[str]:
+    """Compile a git-pathspec-style glob to a regex with RECURSIVE `**`.
+
+    Unlike stdlib `fnmatch` (where `*` already spans `/` and `**` is meaningless),
+    here path separators are meaningful: `*` matches within a single segment
+    (no `/`), `**` matches across segments (including none), and `**/` also
+    matches zero leading directories so `**/auth/**` matches a top-level `auth/`.
+    `?` matches one non-`/` char. This is the matcher operators expect from
+    .gitignore-style patterns, so a security trigger like `"**/auth/**"` can't
+    silently under-classify a top-level path.
+    """
+    out: list[str] = []
+    i, n = 0, len(glob)
+    while i < n:
+        c = glob[i]
+        if c == "*":
+            if i + 1 < n and glob[i + 1] == "*":
+                # `**` — collapse an optional following slash so `**/x` matches `x`.
+                i += 2
+                if i < n and glob[i] == "/":
+                    out.append("(?:.*/)?")
+                    i += 1
+                else:
+                    out.append(".*")
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("(?s:" + "".join(out) + ")\\Z")
+
+
+def _path_matches(path: str, glob: str) -> bool:
+    return _glob_to_regex(glob).match(path) is not None
+
+
 def resolve_tier(cfg: RedteamConfig, explicit_tier: int | None, affected_paths: list[str] | None) -> int | None:
     """Resolve the binding tier for a task, or None if tier routing is OFF.
 
@@ -248,7 +288,7 @@ def resolve_tier(cfg: RedteamConfig, explicit_tier: int | None, affected_paths: 
     candidates: list[int] = [cfg.default_tier] if cfg.default_tier is not None else []
     for path in affected_paths or []:
         for glob, tier in cfg.tier_triggers.items():
-            if fnmatch(path, glob):
+            if _path_matches(path, glob):
                 candidates.append(tier)
     if explicit_tier is not None:
         if explicit_tier not in cfg.tiers:

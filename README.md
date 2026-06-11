@@ -149,9 +149,13 @@ Two levers also work on their own, without tiers:
 - **The escalation ladder** — a `blocker` finding that survives review rounds
   climbs retry → `rescue`, concentrating effort where a problem actually persists.
 
-> Scope note: v1 path triggers match the paths a task *declares*, and tier
-> profiles vary review/gates/models over the canonical pipeline (not arbitrary
-> phase orders). Re-checking the real diff and richer profiles are tracked on
+Trigger globs are git-pathspec-style: `*` matches within a path segment, `**`
+matches across directories (so `**/auth/**` matches `auth/x` at any depth).
+
+> Scope note: v1 path triggers match the paths a task *declares* in its
+> front-matter, and tier profiles vary review/gates/models over the canonical
+> pipeline (not arbitrary phase orders). Re-checking the real committed diff and
+> richer profiles are tracked on
 > [issue #13](https://github.com/AscendyProject/redteam/issues/13).
 
 ## Install
