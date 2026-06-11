@@ -1,10 +1,10 @@
 [project]
 name = "redteam-harness"
 version = "0.1.0"
-description = "Adversarial agent-pair harness: one model writes code through a TDD pipeline, a second model reviews it, gated at human checkpoints."
+description = "Adversarial agent-pair harness: one model writes code through a test-first pipeline, a second model reviews it, gated at human checkpoints."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "AGPL-3.0-or-later" }
+license = "Apache-2.0"
 authors = [{ name = "AscendyProject" }]
 keywords = ["llm", "agents", "code-review", "tdd", "claude", "codex", "ai-pair"]
 # Zero runtime Python dependencies: the engine uses only the stdlib (tomllib,
