@@ -42,6 +42,7 @@ from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
 )
 from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E402
     PhaseResult,
+    compute_branch_changed_paths,
     extract_verification_commands,
     repo_root,
     validate_verification_commands,
@@ -230,6 +231,14 @@ def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | No
     tier = tier if isinstance(tier, int) and not isinstance(tier, bool) else None
     paths = [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else None
     return tier, paths
+
+
+def _changed_paths(cwd: Path) -> list[str]:
+    """Ground-truth changed paths on the task branch, for the tier downgrade check
+    (issue #19) — the REAL diff, not the paths a task DECLARES in its front-matter.
+    Delegates to the NUL-delimited name-only helper so special-char paths can't be
+    dropped (a missed path would fail open and let a downgrade slip through)."""
+    return compute_branch_changed_paths(cwd=cwd)
 
 
 def _next_phase(state: dict[str, Any], current: str) -> str:
@@ -725,6 +734,35 @@ def process_task(task_dir: Path) -> TaskOutcome:
             state["next_phase"] = "deferred"
             save_state(task_dir, state)
             return "error"
+
+        # Tier downgrade guard (issue #19): the tier was resolved from the paths
+        # the task DECLARED. Now that the real diff exists, re-resolve against the
+        # actually-changed files just before shipping. If the real diff floors the
+        # task at a HIGHER tier than it ran under (e.g. declared tier 2 but the
+        # diff touches auth → tier 4), fail closed — refuse to create the PR under
+        # a too-light posture. The operator re-runs at the correct tier (the
+        # lighter review/gates already taken can't be retrofitted mid-run; that
+        # auto-escalation is a separate, deferred feature).
+        if phase == "create_pr" and "tier" in state:
+            cfg = load_config(repo_root())
+            try:
+                effective = resolve_tier(cfg, state["tier"], _changed_paths(repo_root()))
+            except ValueError as e:
+                state["last_failure_reason"] = "tier_resolution_failed"
+                state["last_failure_log"] = str(e)
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            if effective is not None and effective > state["tier"]:
+                state["last_failure_reason"] = "tier_downgrade_detected"
+                state["last_failure_log"] = (
+                    f"task ran at tier {state['tier']} but its actual diff resolves to tier {effective} "
+                    f"(a path trigger floors it higher than declared). Re-run this task declaring "
+                    f"tier {effective} (or higher) so it gets the heavier review/gates before a PR."
+                )
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "deferred"
 
         result = runner(task_dir, state)
         if _mode(state) == "agent-pair" and phase in {"plan_review", "review_code"}:
