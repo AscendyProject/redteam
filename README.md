@@ -30,36 +30,33 @@ Not on Claude Code? Vendor it into any repo — see [Install](#install).
 
 Given a batch of tasks (each a short `input.md` brief), the orchestrator walks
 every task through a fixed pipeline, persisting `state.json` after each phase so
-a run is fully resumable, retrying on `CHANGES_REQUESTED`, and **blocking at
-human gates** (sentinel files you touch to approve):
+a run is fully resumable and retrying on `CHANGES_REQUESTED`:
 
 ```mermaid
 flowchart TD
-    PO[plan_outcome]:::worker --> PR[plan_review]:::rev
-    PR --> HG1{{🔒 human gate}}:::gate
-    HG1 --> IMPL[implement]:::worker
+    PO[plan_outcome]:::worker --> PRV[plan_review]:::rev
+    PRV --> IMPL[implement]:::worker
     IMPL --> RC[review_code]:::rev
-    RC -->|APPROVED| CPR[create_pr]:::worker
+    RC -->|APPROVED| CPR[create_pr → draft PR]:::worker
     RC -->|CHANGES_REQUESTED| IMPL
-    RC -. review fails twice .-> RES[rescue]:::rev
-    RES --> HG2{{🔒 human gate}}:::gate
-    HG2 --> CPR
-    CPR --> HG3{{🔒 human gate}}:::gate
-    HG3 --> DONE([done]):::done
+    RC -. blocker persists .-> RES[rescue]:::rev
+    RES --> CPR
+    CPR --> DONE([done]):::done
 
     classDef worker fill:#e3f2fd,stroke:#1976d2,color:#0d47a1;
     classDef rev fill:#fce4ec,stroke:#c2185b,color:#880e4f;
-    classDef gate fill:#fff8e1,stroke:#f9a825,color:#000;
     classDef done fill:#e8f5e9,stroke:#388e3c,color:#1b5e20;
 ```
 
-<sub>Blue = **worker** model (writes) · pink = **reviewer** model (adversarial, fresh) · yellow = **human gate**.</sub>
+<sub>Blue = **worker** model (writes) · pink = **reviewer** model (adversarial, fresh).</sub>
 
-That is the default **agent-pair** flow (a separate reviewer model reviews the
-implementer). The alternative single-model **TDD** mode (`mode = "tdd"` in a
-task's `state.json`) replaces `plan_review` with a `write_test → verify_test`
-pair before `implement`; the gates and the `review_code → … → create_pr` tail
-are the same.
+This is the default **agent-pair** flow. By design it runs with **no human gates
+in the common path** — the adversarial pair plus verification *is* the trust, and
+the output is a **draft PR** (your existing human checkpoint before merge), not an
+auto-merge. Human gates are something you **add back for risky changes**, not the
+default tax on every change — see [When to use it](#when-to-use-it). (The
+alternative single-model **TDD** mode replaces `plan_review` with a
+`write_test → verify_test` pair before `implement`.)
 
 Each phase is run by a focused sub-agent with its own prompt and tool scope
 (`.claude/agents/*.md`): an outcome-planner, test-author/verifier, implementer,
@@ -106,32 +103,60 @@ one registry line.
 
 ## When to use it
 
-Not every change earns an adversarial agent pair. redteam is the **heavyweight
-path** — a second independent model, human gates, a test-first loop — worth it
-when a wrong call is expensive, overkill for a typo. The intended mental model is
-to **scale the response to the risk of the change**:
+The goal is **minimal human intervention, without losing trust** — the
+adversarial pair is the automated trust, so the common path has no human gates.
+But not every change needs the same weight: a typo shouldn't pay for a full
+agent-pair, and an auth change shouldn't ship with only the light path. So you
+**scale the response to the risk of the change**:
 
 | change | response |
 |---|---|
-| trivial / non-behavior-changing (rename, comment, formatting) | just do it — single agent, no harness |
-| routine / small, local, reversible | single-agent loop; independent review optional |
-| **guarded** — behavior change with real blast radius (auth, storage, concurrency, public API, migrations) | **this harness**: agent-pair + security review + gates |
-| **strategic** — architectural or irreversible | the harness + heavier review (more reviewers, a human design gate) |
+| trivial — non-behavior-changing (rename, comment, formatting) | single-agent, no review |
+| routine — small, local, reversible | single-agent loop; review optional |
+| **guarded** — behavior change with real blast radius (auth, storage, concurrency, public API, migrations) | the adversarial pair + verification (the default) |
+| **strategic / production-critical** — architectural, irreversible, or changes prod posture | the pair **plus human gates** (and a rollback plan you require) |
 
-Two levers match effort to risk without forking the pipeline:
+**Tier-aware routing** lets the harness apply this automatically (opt-in via
+`config.toml`). You define tier profiles as declarative toggles, and a
+deterministic classifier picks each task's tier:
 
-- **Model per role** (`config.toml [models]`) — a cheaper implementer for routine
-  work, a frontier reviewer for guarded work; either provider on either side.
-  Spend the expensive model where the risk is.
-- **The escalation ladder** — findings carry a severity, and a blocker that
-  survives rounds climbs retry → `rescue` → human. Effort concentrates where a
-  problem actually persists.
+```toml
+[tiers.0]                       # trivial
+review = false                  # single-agent, no adversarial pair
+models = { implementer = "claude-haiku-4-5" }   # cheap model
 
-Today you pick the tier yourself, by choosing which changes go into a batch.
-**Automatic, tier-aware routing** — the harness classifying a task and scaling
-its own phases and models — is
-[on the roadmap](https://github.com/AscendyProject/redteam/issues/13), not in
-this release.
+[tiers.2]                       # guarded (a sensible default)
+review = true                   # the adversarial pair; no human gate
+
+[tiers.4]                       # production-critical
+review = true
+gates = ["outcome", "pr"]       # add human checkpoints back here
+
+[tier_triggers]
+"**/auth/**" = 4                # touching auth floors the task at tier 4
+default = 2                     # unclassified → safe default
+```
+
+The binding tier is `max(declared, path-triggered, default)` — a task can be
+**raised** but never lowered below what its paths demand, and an unclassified task
+falls to the mandatory safe default. With no `[tiers]` section, routing is off and
+every task takes the default pipeline (fully backward-compatible).
+
+Two levers also work on their own, without tiers:
+
+- **Model per role** (`[models]`) — a cheaper implementer for routine work, a
+  frontier reviewer for guarded work; either provider on either side.
+- **The escalation ladder** — a `blocker` finding that survives review rounds
+  climbs retry → `rescue`, concentrating effort where a problem actually persists.
+
+Trigger globs are git-pathspec-style: `*` matches within a path segment, `**`
+matches across directories (so `**/auth/**` matches `auth/x` at any depth).
+
+> Scope note: v1 path triggers match the paths a task *declares* in its
+> front-matter, and tier profiles vary review/gates/models over the canonical
+> pipeline (not arbitrary phase orders). Re-checking the real committed diff and
+> richer profiles are tracked on
+> [issue #13](https://github.com/AscendyProject/redteam/issues/13).
 
 ## Install
 

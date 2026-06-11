@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -46,7 +47,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     validate_verification_commands,
 )
 from adapters import get_reviewer_adapter  # type: ignore[import-not-found]  # noqa: E402
-from config import load_config  # type: ignore[import-not-found]  # noqa: E402
+from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
 
 
 # ---------- phase order & runner registry ----------
@@ -61,7 +62,6 @@ TDD_PHASE_ORDER: list[str] = [
     "rescue",
     "human_gate_rescue",
     "create_pr",
-    "human_gate_pr",
     "done",
 ]
 
@@ -79,7 +79,6 @@ AGENT_PAIR_PHASE_ORDER: list[str] = [
     "rescue",
     "human_gate_rescue",
     "create_pr",
-    "human_gate_pr",
     "done",
 ]
 
@@ -166,10 +165,71 @@ def _mode(state: dict[str, Any]) -> str:
     return str(state.get("mode") or "agent-pair")
 
 
+def _build_tier_phase_order(profile: Any) -> list[str]:
+    """Build a coherent phase order from a tier profile's declarative toggles
+    (issue #13). The engine owns the structure, so every review/gate combination
+    composes safely — the conditionally-entered `rescue` slot and the create_pr
+    tail are always placed correctly, never skipped by an unsafe custom order.
+
+    - `review` adds the adversarial pair (plan_review + review_code) and the
+      rescue escalation slot; without it the task is single-agent.
+    - `gates` inserts the chosen human gates; the lean default is none.
+    """
+    order = ["plan_outcome"]
+    if profile.review:
+        order.append("plan_review")
+    if "outcome" in profile.gates:
+        order.append("human_gate_outcome")
+    order.append("implement")
+    if profile.review:
+        order.append("review_code")
+        order.append("rescue")  # conditionally entered; must be present so its completion resolves
+        if "rescue" in profile.gates:
+            order.append("human_gate_rescue")
+    order.append("create_pr")
+    if "pr" in profile.gates:
+        order.append("human_gate_pr")
+    order.append("done")
+    return order
+
+
 def _phase_order(state: dict[str, Any]) -> list[str]:
+    # A resolved tier profile (issue #13) overrides the order for this task.
+    tier_phases = state.get("tier_phases")
+    if tier_phases:
+        return list(tier_phases)
     if _mode(state) == "agent-pair":
         return AGENT_PAIR_PHASE_ORDER
     return TDD_PHASE_ORDER
+
+
+def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | None]:
+    """Read an optional leading TOML front-matter block from input.md, fenced by
+    `+++` lines, and return its `tier` (int) and `paths` (list[str]) if present.
+
+    No input.md, no fence, or a malformed block → (None, None): the task is then
+    treated as unclassified and resolves to the safe default tier. TOML (stdlib
+    tomllib) keeps the zero-dependency promise.
+    """
+    path = task_dir / "input.md"
+    if not path.exists():
+        return None, None
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("+++"):
+        return None, None
+    end = text.find("\n+++", 3)
+    if end == -1:
+        return None, None
+    block = text[3:end].strip()
+    try:
+        fm = tomllib.loads(block)
+    except tomllib.TOMLDecodeError:
+        return None, None
+    tier = fm.get("tier")
+    paths = fm.get("paths")
+    tier = tier if isinstance(tier, int) and not isinstance(tier, bool) else None
+    paths = [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else None
+    return tier, paths
 
 
 def _next_phase(state: dict[str, Any], current: str) -> str:
@@ -540,6 +600,30 @@ def process_task(task_dir: Path) -> TaskOutcome:
             save_state(task_dir, state)
             return "error"
 
+        # Resolve the risk tier ONCE, at a fresh task's start (issue #13), only
+        # when tier routing is configured. Stored in state so resume is stable.
+        # cfg.tiers empty → skipped → behavior unchanged. Restricted to fresh
+        # tasks (no phases completed yet) so a profile's phase order drives from
+        # the start and an in-flight task is never re-routed mid-pipeline.
+        if cfg.tiers and "tier" not in state and not state.get("phases_completed"):
+            explicit, paths = _parse_input_frontmatter(task_dir)
+            try:
+                tier = resolve_tier(cfg, explicit, paths)
+            except ValueError as e:
+                state["last_failure_reason"] = "tier_resolution_failed"
+                state["last_failure_log"] = str(e)
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            profile = cfg.tiers[tier]
+            tier_order = _build_tier_phase_order(profile)
+            state["tier_phases"] = tier_order
+            state["next_phase"] = tier_order[0]  # drive the built order from its first phase
+            if profile.models:
+                state["models"] = {**(state.get("models") or {}), **profile.models}
+            state["tier"] = tier
+            save_state(task_dir, state)
+
     while True:
         phase = state.get("next_phase") or _phase_order(state)[0]
 
@@ -622,6 +706,26 @@ def process_task(task_dir: Path) -> TaskOutcome:
 
         state["phase"] = phase
         save_state(task_dir, state)
+
+        # Fail-closed guard: in agent-pair mode, implement requires outcome.md
+        # (created by plan_outcome). When plan_outcome has completed but
+        # outcome.md is absent (e.g. plan_outcome was mocked in a unit test),
+        # launching the implement agent would block or fail with a confusing
+        # missing-file error. Return an immediate error instead.
+        if (
+            _mode(state) == "agent-pair"
+            and phase == "implement"
+            and "plan_outcome" in state.get("phases_completed", [])
+            and not (task_dir / "outcome.md").exists()
+        ):
+            state["last_failure_reason"] = "missing_outcome_md"
+            state["last_failure_log"] = (
+                f"outcome.md not found in {task_dir}; plan_outcome must create it before implement can run."
+            )
+            state["next_phase"] = "deferred"
+            save_state(task_dir, state)
+            return "error"
+
         result = runner(task_dir, state)
         if _mode(state) == "agent-pair" and phase in {"plan_review", "review_code"}:
             _sync_review_items(state, phase, result["log"])
@@ -642,6 +746,16 @@ def process_task(task_dir: Path) -> TaskOutcome:
                     state["next_phase"] = "plan_outcome"
                     save_state(task_dir, state)
                     continue
+            # A review=false tier (issue #13) has no plan_review, so the
+            # verification-allowlist snapshot (the IR-001 security boundary that
+            # pins verify_command + allowlist before implement) is taken here, at
+            # plan_outcome approval, instead. Same fail-closed contract: a bad
+            # snapshot defers rather than letting implement run unpinned.
+            if phase == "plan_outcome" and _mode(state) == "agent-pair" and "plan_review" not in _phase_order(state):
+                if not _snapshot_verification_commands(task_dir, state):
+                    state["next_phase"] = "deferred"
+                    save_state(task_dir, state)
+                    return "error"
             if phase == "review_code":
                 # An approved review goes straight to create_pr in BOTH modes,
                 # explicitly skipping the conditionally-entered `rescue` phase
