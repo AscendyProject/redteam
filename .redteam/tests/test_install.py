@@ -93,6 +93,20 @@ def test_protect_config_off_by_default_leaves_settings_untouched(tmp_path: Path)
     assert not (tmp_path / ".claude/settings.json").exists()
 
 
+def test_default_install_leaves_existing_settings_byte_for_byte(tmp_path: Path) -> None:
+    """A pre-existing consumer .claude/settings.json must survive a default install
+    (no --protect-config) completely unmodified — the deny-merge step is never
+    reached, so the consumer-owned file is untouched byte-for-byte."""
+    settings = tmp_path / ".claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    original = json.dumps({"model": "claude-opus-4-8", "permissions": {"deny": ["Bash(rm -rf:*)"]}})
+    settings.write_text(original, encoding="utf-8")
+
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+
+    assert settings.read_text(encoding="utf-8") == original
+
+
 def test_fresh_install_seeds_config_deny_rules(tmp_path: Path) -> None:
     """With --protect-config, a fresh install protects config.toml: settings.json
     gets the Edit/Write deny rules so an agent can't silently rewrite the harness's
