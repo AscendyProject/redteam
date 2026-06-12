@@ -683,6 +683,22 @@ def process_task(task_dir: Path) -> TaskOutcome:
                 state.setdefault("escape", {})["ask_user"] = False
                 _clear_ask_user_sentinel(task_dir)
                 _archive_ask_user_response(task_dir)
+                # If this escalation routes to implement but the verification
+                # snapshot was never taken — the plan_review that normally
+                # snapshots it escalated here instead of approving — take it now,
+                # fail-closed. Otherwise implement runs with no snapshotted
+                # commands and is falsely deferred (issue #35). When a snapshot
+                # already exists (e.g. REVISE_IMPLEMENTATION after an approved
+                # plan_review), the guard leaves it untouched.
+                if (
+                    state["next_phase"] == "implement"
+                    and _mode(state) == "agent-pair"
+                    and state.get("verification", {}).get("verify_command") is None
+                ):
+                    if not _snapshot_verification_commands(task_dir, state):
+                        state["next_phase"] = "deferred"
+                        save_state(task_dir, state)
+                        return "error"
             else:
                 if phase == "human_gate_rescue":
                     state["next_phase"] = "create_pr"
