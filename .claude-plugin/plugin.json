@@ -5,5 +5,16 @@
   "author": { "name": "AscendyProject" },
   "homepage": "https://github.com/AscendyProject/redteam",
   "repository": "https://github.com/AscendyProject/redteam",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "commands": [
+    "./commands/redteam-install.md"
+  ],
+  "agents": [
+    "./.claude/agents/code-security-reviewer.md",
+    "./.claude/agents/implementer.md",
+    "./.claude/agents/outcome-planner.md",
+    "./.claude/agents/pr-author.md",
+    "./.claude/agents/test-author.md",
+    "./.claude/agents/test-verifier.md"
+  ]
 }
