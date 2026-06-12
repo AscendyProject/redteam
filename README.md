@@ -20,7 +20,7 @@ point — automatic self-agreement is what it exists to prevent.
 **Quick install (Claude Code) — two commands:**
 
 ```text
-/plugin marketplace add AscendyProject/redteam
+/plugin marketplace add https://github.com/AscendyProject/redteam
 /plugin install redteam@ascendy-redteam
 ```
 
@@ -165,9 +165,13 @@ matches across directories (so `**/auth/**` matches `auth/x` at any depth).
 This repo doubles as a single-plugin marketplace, so two commands install it:
 
 ```text
-/plugin marketplace add AscendyProject/redteam
+/plugin marketplace add https://github.com/AscendyProject/redteam
 /plugin install redteam@ascendy-redteam
 ```
+
+> The HTTPS URL works everywhere, including behind firewalls that block SSH
+> (port 22). The `AscendyProject/redteam` shorthand also works if you have
+> GitHub SSH keys configured.
 
 That registers the six sub-agents and a `/redteam:redteam-install` command. Run
 that command (or the `redteam-install` tool it puts on PATH) from your project
