@@ -58,6 +58,37 @@ def get_worker_adapter(state: dict[str, Any]) -> WorkerAdapter:
     return ClaudeWorkerAdapter(state)
 
 
+def worker_provider(state: dict[str, Any]) -> str:
+    """Provider family the worker/planner resolves to: "codex" or "claude".
+
+    Mirrors `get_worker_adapter`'s selection (keyed off the implementer role)
+    without instantiating an adapter, so a guard can compare provider identities
+    cheaply. Anything not registered as a codex worker is the Claude default.
+    """
+    models = state.get("models")
+    configured = models.get("implementer") if isinstance(models, dict) else None
+    implementer = configured or default_model_for_role("implementer")
+    if isinstance(implementer, str) and implementer in _WORKER_ADAPTERS:
+        return "codex"
+    return "claude"
+
+
+def reviewer_provider(state: dict[str, Any]) -> str | None:
+    """Provider family of the configured headless reviewer ("codex"/"claude"),
+    or None when the reviewer is manual/human (no headless adapter).
+
+    Mirrors `get_reviewer_adapter`'s resolution: a value that maps to a registered
+    reviewer adapter returns that provider key; anything else (e.g. "human") is
+    the manual flow and returns None — a human is always a distinct adversary.
+    """
+    models = state.get("models")
+    configured = models.get("reviewer") if isinstance(models, dict) else None
+    reviewer = configured or default_model_for_role("reviewer")
+    if isinstance(reviewer, str) and reviewer in _REVIEWER_ADAPTERS:
+        return reviewer
+    return None
+
+
 def get_reviewer_adapter(state: dict[str, Any]) -> ReviewerAdapter | None:
     """Resolve the reviewer role to a headless adapter, or None for the legacy
     manual flow.
@@ -81,4 +112,6 @@ __all__ = [
     "WorkerAdapter",
     "get_reviewer_adapter",
     "get_worker_adapter",
+    "reviewer_provider",
+    "worker_provider",
 ]
