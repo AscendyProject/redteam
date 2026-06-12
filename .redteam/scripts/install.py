@@ -25,7 +25,12 @@ Two file classes:
     .redteam/batches/           (your tasks + run state — created empty)
 
 Usage:
-    python3 .redteam/scripts/install.py <target-dir> [--overwrite] [--dry-run]
+    python3 .redteam/scripts/install.py <target-dir> [--overwrite] [--dry-run] [--protect-config]
+
+--protect-config (opt-in, off by default) additionally merges Edit/Write deny
+rules for .redteam/config.toml into the consumer's .claude/settings.json
+(add-only, never clobbers). The orchestrator's runtime pairing guard is the
+backstop regardless of whether this front-line friction is enabled.
 """
 
 from __future__ import annotations
@@ -206,7 +211,7 @@ def _merge_settings_deny(target: Path, dry: bool) -> None:
     dst.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def install(target: Path, overwrite: bool, dry: bool) -> None:
+def install(target: Path, overwrite: bool, dry: bool, protect_config: bool = False) -> None:
     target = target.resolve()
     if target == SOURCE_ROOT:
         sys.exit("ERROR: refusing to install the harness onto itself.")
@@ -226,7 +231,8 @@ def install(target: Path, overwrite: bool, dry: bool) -> None:
         _seed_file(dst_rel, src_rel, target, dry)
     for rel in PROJECT_DIRS:
         _seed_dir(rel, target, dry)
-    _merge_settings_deny(target, dry)
+    if protect_config:
+        _merge_settings_deny(target, dry)
     print()
     print("Done. Next steps:")
     print("  1) Edit .redteam/config.toml for your stack.")
@@ -244,8 +250,17 @@ def main() -> None:
         help="Refresh harness-owned files even if they exist (project-owned files are never overwritten).",
     )
     ap.add_argument("--dry-run", action="store_true", help="Show what would change without writing.")
+    ap.add_argument(
+        "--protect-config",
+        action="store_true",
+        help=(
+            "Opt-in: merge Edit/Write deny rules for .redteam/config.toml into the consumer's "
+            ".claude/settings.json (add-only, never clobbers). Off by default — the orchestrator's "
+            "runtime pairing guard is the backstop regardless."
+        ),
+    )
     args = ap.parse_args()
-    install(Path(args.target), overwrite=args.overwrite, dry=args.dry_run)
+    install(Path(args.target), overwrite=args.overwrite, dry=args.dry_run, protect_config=args.protect_config)
 
 
 if __name__ == "__main__":
