@@ -9,6 +9,9 @@
       "name": "redteam",
       "source": ".",
       "description": "Adversarial agent-pair harness (TDD pipeline + adversarial review, human-gated).",
+      "commands": [
+        "./commands/redteam-install.md"
+      ],
       "agents": [
         "./.claude/agents/code-security-reviewer.md",
         "./.claude/agents/implementer.md",
