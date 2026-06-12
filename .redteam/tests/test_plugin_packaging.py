@@ -86,3 +86,36 @@ def test_install_command_has_frontmatter():
     body = _COMMAND.read_text()
     assert body.startswith("---")
     assert "description:" in body.split("---", 2)[1]
+
+
+# The slash commands the plugin ships (beyond install). Drift here — a command
+# file added/renamed but not registered, or vice versa — is the bug this guards.
+_EXPECTED_COMMANDS = {
+    "redteam-install",
+    "redteam-review",
+    "redteam-config",
+    "redteam-status",
+}
+
+
+def test_plugin_and_marketplace_register_the_same_commands():
+    """plugin.json and marketplace.json must list the same command set, and it
+    must be exactly the command files on disk — no orphans, no dangling refs."""
+    plugin_cmds = json.loads(_PLUGIN_JSON.read_text())["commands"]
+    market_cmds = json.loads(_MARKETPLACE_JSON.read_text())["plugins"][0]["commands"]
+    assert plugin_cmds == market_cmds  # the two manifests stay in sync
+    stems = {Path(c).stem for c in plugin_cmds}
+    assert stems == _EXPECTED_COMMANDS
+    on_disk = {p.stem for p in (_ROOT / "commands").glob("*.md")}
+    assert on_disk == _EXPECTED_COMMANDS  # every command file is registered
+
+
+def test_every_command_exists_and_has_frontmatter():
+    """Each registered command resolves to a real .md with a description so
+    Claude Code surfaces it in the slash-command list."""
+    for entry in json.loads(_PLUGIN_JSON.read_text())["commands"]:
+        path = (_ROOT / entry).resolve()
+        assert path.is_file() and path.suffix == ".md", f"missing command file: {entry}"
+        body = path.read_text(encoding="utf-8")
+        assert body.startswith("---"), f"{entry} missing frontmatter"
+        assert "description:" in body.split("---", 2)[1], f"{entry} missing description"

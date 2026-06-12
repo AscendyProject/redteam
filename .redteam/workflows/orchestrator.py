@@ -1180,23 +1180,95 @@ def cmd_status(batch_dir: Path) -> int:
     return 0
 
 
+# ---------- standalone review ----------
+
+
+def _standalone_review_prompt(cfg: Any) -> str:
+    """Prompt for a one-shot adversarial review of the current branch diff, with
+    no task context. Mirrors the in-pipeline review_code prompt's read-only,
+    stdout-only contract so the same reviewer adapter can run it unchanged."""
+    proj = cfg.project
+    return (
+        "Act as an adversarial code-security reviewer. Review the changes in "
+        f"`git diff {proj.base_branch}...HEAD`. Apply the review criteria in "
+        ".redteam/prompts/codex/code_review.md, the project security checklist at "
+        f"{proj.security_checklist}, and the project hard rules at {proj.context_file}. "
+        "DO NOT write any files or touch any sentinels — output the ENTIRE review to "
+        "stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
+        "CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with IR-NNN findings above it."
+    )
+
+
+def cmd_review(repo: Path | None = None) -> int:
+    """Run the configured reviewer (a DIFFERENT provider than whoever wrote the
+    code) over the current branch diff, read-only, with no task/state machine.
+
+    This is the harness's cross-model review surfaced as a standalone command:
+    "review my current changes with the review model." The exit code reflects the
+    decision so it can gate CI — 0 = APPROVED, 1 = changes/rescue/ask (issues
+    found), 2 = the reviewer itself failed (missing CLI / timeout / unparseable).
+    Fail-closed: a failed run is never reported as an approval.
+    """
+    rr = repo or repo_root()
+    cfg = load_config(rr)
+    adapter = get_reviewer_adapter({})  # {} → inherits config default reviewer
+    if adapter is None:
+        print(
+            'error: no headless reviewer configured (reviewer="human"?). Set '
+            '.redteam/config.toml [models].reviewer to a headless provider '
+            '(e.g. "codex") to use `review`.',
+            file=sys.stderr,
+        )
+        return 2
+    result = adapter.review(
+        role="review_code",
+        prompt=_standalone_review_prompt(cfg),
+        cwd=rr,
+        target={"kind": "branch_diff", "base": cfg.project.base_branch},
+    )
+    raw = result["raw"]
+    out_path = rr / ".redteam" / "last_review.md"
+    try:
+        out_path.write_text(raw, encoding="utf-8")
+        saved = " (saved to .redteam/last_review.md)"
+    except OSError:
+        saved = ""
+    print(raw)
+    if result["parse_status"] != "ok":
+        print(f"\n[redteam] reviewer failed (parse_status={result['parse_status']}).", file=sys.stderr)
+        return 2
+    print(f"\n[redteam] REVIEW_DECISION: {result['decision']}{saved}", file=sys.stderr)
+    return 0 if result["decision"] == "APPROVED" else 1
+
+
 USAGE = (
     "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
+    "       orchestrator.py review\n"
     "  start            — process every task from its current next_phase\n"
     "  resume           — same as start; convenient name to re-enter after a human gate\n"
     "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
     "                     and auto-touch the `pr.reviewed` sentinel once the PR is merged\n"
     "                     or closed; then run resume\n"
-    "  status           — print per-task summary without running anything"
+    "  status           — print per-task summary without running anything\n"
+    "  review           — one-shot adversarial review of the current branch diff with the\n"
+    "                     configured reviewer (a different provider than the worker); no batch"
 )
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 3:
+    if len(argv) < 2:
         print(USAGE, file=sys.stderr)
         return 2
 
     command = argv[1]
+
+    # `review` takes no batch dir — it reviews the current branch diff.
+    if command == "review":
+        return cmd_review()
+
+    if len(argv) < 3:
+        print(USAGE, file=sys.stderr)
+        return 2
     batch_dir = Path(argv[2]).resolve()
 
     if command == "start":
