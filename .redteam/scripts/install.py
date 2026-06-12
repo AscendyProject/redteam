@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -77,6 +78,22 @@ PROJECT_SEEDS = (
 
 # Directories created empty if absent (project-owned run state).
 PROJECT_DIRS = (".redteam/batches",)
+
+# Consumer-owned Claude Code settings to merge a protection rule into.
+SETTINGS_REL = ".claude/settings.json"
+# Permission rules that stop a Claude Code agent from silently rewriting the
+# harness's policy/model config. config.toml is the harness's "constitution": it
+# decides which model writes vs. which (different) model reviews, so an agent
+# editing it could collapse the adversarial pair into self-review. This is the
+# FRONT-LINE prevention; the orchestrator's runtime pairing guard is the backstop
+# that always catches a same-provider config regardless of how it got there.
+# Caveat: Claude Code deny rules govern the Edit/Write tools only — they raise
+# friction + signal intent, they are not airtight (e.g. a Bash `sed` could still
+# reach the file), which is exactly why the runtime guard exists.
+CONFIG_DENY_RULES = (
+    "Edit(./.redteam/config.toml)",
+    "Write(./.redteam/config.toml)",
+)
 
 
 def _log(action: str, path: str, dry: bool) -> None:
@@ -144,6 +161,51 @@ def _seed_dir(rel: str, target: Path, dry: bool) -> None:
     (dst / ".gitkeep").touch()
 
 
+def _merge_settings_deny(target: Path, dry: bool) -> None:
+    """Merge the config.toml protection rules into the consumer's
+    `.claude/settings.json`, ADD-ONLY.
+
+    `.claude/settings.json` is consumer-owned, so this never removes, reorders,
+    or overwrites existing keys — it only appends any of CONFIG_DENY_RULES that
+    are absent from `permissions.deny`, mirroring the never-clobber discipline
+    the rest of the installer follows for project-owned files. Idempotent: a
+    re-run with the rules already present is a no-op. Anything unexpected
+    (unreadable file, non-object JSON, wrong types for `permissions`/`deny`) is
+    skipped with a warning rather than risking corruption of a consumer file.
+    """
+    dst = target / SETTINGS_REL
+    data: dict = {}
+    if dst.exists():
+        try:
+            data = json.loads(dst.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"WARN     {SETTINGS_REL} unreadable/invalid JSON — skipped deny-merge ({exc}).", file=sys.stderr)
+            return
+        if not isinstance(data, dict):
+            print(f"WARN     {SETTINGS_REL} is not a JSON object — skipped deny-merge.", file=sys.stderr)
+            return
+    perms = data.get("permissions", {})
+    if not isinstance(perms, dict):
+        print(f"WARN     {SETTINGS_REL} 'permissions' is not an object — skipped deny-merge.", file=sys.stderr)
+        return
+    deny = perms.get("deny", [])
+    if not isinstance(deny, list):
+        print(f"WARN     {SETTINGS_REL} 'permissions.deny' is not a list — skipped deny-merge.", file=sys.stderr)
+        return
+    missing = [rule for rule in CONFIG_DENY_RULES if rule not in deny]
+    if not missing:
+        _log("keep", SETTINGS_REL + "  (config.toml deny rules already present)", dry)
+        return
+    _log("merge", SETTINGS_REL + f"  (+{len(missing)} config.toml deny rule(s))", dry)
+    if dry:
+        return
+    deny.extend(missing)
+    perms["deny"] = deny
+    data["permissions"] = perms
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def install(target: Path, overwrite: bool, dry: bool) -> None:
     target = target.resolve()
     if target == SOURCE_ROOT:
@@ -164,6 +226,7 @@ def install(target: Path, overwrite: bool, dry: bool) -> None:
         _seed_file(dst_rel, src_rel, target, dry)
     for rel in PROJECT_DIRS:
         _seed_dir(rel, target, dry)
+    _merge_settings_deny(target, dry)
     print()
     print("Done. Next steps:")
     print("  1) Edit .redteam/config.toml for your stack.")

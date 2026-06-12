@@ -9,6 +9,7 @@ seeded once and never overwritten — even with --overwrite.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -75,3 +76,66 @@ def test_refuses_self_install(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         install_mod.install(install_mod.SOURCE_ROOT, overwrite=False, dry=False)
+
+
+# ---- config.toml protection: deny-rule merge into .claude/settings.json ----
+
+
+def _settings(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / ".claude/settings.json").read_text(encoding="utf-8"))
+
+
+def test_fresh_install_seeds_config_deny_rules(tmp_path: Path) -> None:
+    """A fresh install protects config.toml: settings.json gets the Edit/Write
+    deny rules so an agent can't silently rewrite the harness's model config."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    deny = _settings(tmp_path)["permissions"]["deny"]
+    for rule in install_mod.CONFIG_DENY_RULES:
+        assert rule in deny
+
+
+def test_settings_merge_preserves_existing_keys(tmp_path: Path) -> None:
+    """settings.json is consumer-owned: the merge ADDS our rules without touching
+    the consumer's other settings or their own deny entries."""
+    settings = tmp_path / ".claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"model": "claude-opus-4-8", "permissions": {"deny": ["Bash(rm -rf:*)"], "allow": ["Read(*)"]}}),
+        encoding="utf-8",
+    )
+
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+
+    data = _settings(tmp_path)
+    assert data["model"] == "claude-opus-4-8"  # unrelated key preserved
+    assert data["permissions"]["allow"] == ["Read(*)"]  # sibling list preserved
+    assert "Bash(rm -rf:*)" in data["permissions"]["deny"]  # consumer's own rule preserved
+    for rule in install_mod.CONFIG_DENY_RULES:
+        assert rule in data["permissions"]["deny"]  # ours added alongside
+
+
+def test_settings_merge_is_idempotent(tmp_path: Path) -> None:
+    """Re-running install never duplicates the deny rules."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    install_mod.install(tmp_path, overwrite=True, dry=False)
+    deny = _settings(tmp_path)["permissions"]["deny"]
+    for rule in install_mod.CONFIG_DENY_RULES:
+        assert deny.count(rule) == 1
+
+
+def test_settings_merge_skips_malformed_json(tmp_path: Path) -> None:
+    """A consumer's invalid settings.json is left byte-for-byte untouched rather
+    than corrupted — fail safe, never clobber."""
+    settings = tmp_path / ".claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{ not valid json", encoding="utf-8")
+
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+
+    assert settings.read_text(encoding="utf-8") == "{ not valid json"  # untouched
+
+
+def test_dry_run_does_not_create_settings(tmp_path: Path) -> None:
+    """Dry-run must not write settings.json (mirrors the no-.claude invariant)."""
+    install_mod.install(tmp_path, overwrite=False, dry=True)
+    assert not (tmp_path / ".claude/settings.json").exists()
