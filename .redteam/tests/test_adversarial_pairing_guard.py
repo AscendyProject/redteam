@@ -78,8 +78,18 @@ def test_codex_self_review_is_flagged() -> None:
 def test_cross_provider_pair_passes() -> None:
     orch = _load_orchestrator_module()
     # claude worker / codex reviewer (the shipped default shape) and the reverse.
-    assert orch._adversarial_pairing_error({"mode": "agent-pair", "models": {"implementer": "claude-sonnet-4-6", "reviewer": "codex"}}) is None
-    assert orch._adversarial_pairing_error({"mode": "agent-pair", "models": {"implementer": "codex", "reviewer": "claude"}}) is None
+    assert (
+        orch._adversarial_pairing_error(
+            {"mode": "agent-pair", "models": {"implementer": "claude-sonnet-4-6", "reviewer": "codex"}}
+        )
+        is None
+    )
+    assert (
+        orch._adversarial_pairing_error(
+            {"mode": "agent-pair", "models": {"implementer": "codex", "reviewer": "claude"}}
+        )
+        is None
+    )
 
 
 def test_human_reviewer_passes() -> None:
@@ -129,7 +139,9 @@ def test_process_task_defers_on_self_review(monkeypatch, tmp_path) -> None:
         "escape": {"ask_user": False, "reason": None, "return_phase": None},
     }
     task_dir = _seed_task(tmp_path, state)
-    monkeypatch.setattr(orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"redteam/{task_id}")
+    monkeypatch.setattr(
+        orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"redteam/{task_id}"
+    )
     monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
     ran = {"any": False}
 
@@ -161,7 +173,9 @@ def test_process_task_cross_provider_passes_guard(monkeypatch, tmp_path) -> None
         "escape": {"ask_user": False, "reason": None, "return_phase": None},
     }
     task_dir = _seed_task(tmp_path, state)
-    monkeypatch.setattr(orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"redteam/{task_id}")
+    monkeypatch.setattr(
+        orch, "_ensure_task_branch", lambda task_id, repo, branch_prefix, base_branch: f"redteam/{task_id}"
+    )
     monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
     ran = {"plan_review": False}
 

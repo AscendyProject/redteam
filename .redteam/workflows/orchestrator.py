@@ -234,7 +234,7 @@ def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
         f"adversarial pairing collapsed: the reviewer and the worker both resolve to the "
         f"'{wp}' provider, so the code would be reviewed by the same model that wrote it "
         f"(self-review). The redteam harness requires a cross-provider pair. Fix "
-        f'.redteam/config.toml [models]: point reviewer at a different provider than the '
+        f".redteam/config.toml [models]: point reviewer at a different provider than the "
         f'implementer (e.g. implementer=claude-*, reviewer="codex"), or set reviewer="human" '
         f"for a manual review, or use a review=false tier for an explicit single-agent path."
     )
