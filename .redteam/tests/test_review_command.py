@@ -32,6 +32,9 @@ def _load_orchestrator_module():
 
 def _fake_adapter(decision: str, parse_status: str = "ok", raw: str | None = None) -> MagicMock:
     fake = MagicMock()
+    # Name the reviewer "codex" so the cross-provider guard sees a real string
+    # (the shipped default: codex reviewer / claude worker = cross-provider).
+    fake.name = "codex"
     fake.review.return_value = {
         "decision": decision,
         "raw": raw if raw is not None else f"IR-001 ...\nREVIEW_DECISION: {decision}",
@@ -84,6 +87,28 @@ def test_review_without_headless_reviewer_exits_with_guidance(monkeypatch, tmp_p
     assert rc == 2
     err = capsys.readouterr().err
     assert "human" in err and "reviewer" in err  # actionable guidance, no crash
+
+
+def test_review_refuses_same_provider_self_review(monkeypatch, tmp_path, capsys) -> None:
+    """Fail-closed cross-provider guard: when the configured reviewer collapses to
+    the worker's own provider, `review` must refuse (exit 2) WITHOUT running the
+    reviewer — a standalone review can't become a hole that silently self-reviews.
+    The worker adapter is named "claude-code" while the claude reviewer is named
+    "claude"; the guard must still see these as the same provider family."""
+    orch = _load_orchestrator_module()
+    reviewer = MagicMock()
+    reviewer.name = "claude"
+    worker = MagicMock()
+    worker.name = "claude-code"  # the Claude worker's name differs from the reviewer's
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: reviewer)
+    monkeypatch.setattr(orch, "get_worker_adapter", lambda state: worker)
+
+    rc = orch.cmd_review(repo=tmp_path)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "self-review" in err  # actionable, names the collapse
+    reviewer.review.assert_not_called()  # refused before the reviewer ran
 
 
 def test_review_dispatched_by_main_without_batch(monkeypatch) -> None:

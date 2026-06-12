@@ -47,7 +47,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     repo_root,
     validate_verification_commands,
 )
-from adapters import get_reviewer_adapter  # type: ignore[import-not-found]  # noqa: E402
+from adapters import get_reviewer_adapter, get_worker_adapter  # type: ignore[import-not-found]  # noqa: E402
 from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
 
 
@@ -1199,15 +1199,34 @@ def _standalone_review_prompt(cfg: Any) -> str:
     )
 
 
+def _provider_family(adapter_name: str) -> str:
+    """Collapse an adapter's `name` to its provider FAMILY ("claude"/"codex").
+
+    Reviewer adapters are already named by family ("claude"/"codex"), but the
+    Claude *worker* adapter is named "claude-code" — so a raw name comparison
+    would read a claude worker + claude reviewer as cross-provider when it is in
+    fact self-review. Normalizing both to the family is what makes the guard
+    below correct. (This mirrors the worker_provider/reviewer_provider resolvers
+    introduced for the in-pipeline guard; once that lands on the same branch the
+    two should converge on one helper.)
+    """
+    return "claude" if adapter_name.startswith("claude") else adapter_name
+
+
 def cmd_review(repo: Path | None = None) -> int:
-    """Run the configured reviewer (a DIFFERENT provider than whoever wrote the
-    code) over the current branch diff, read-only, with no task/state machine.
+    """Run the configured reviewer — fail-closed if it would collapse to the
+    worker's own provider — over the current branch diff, read-only, with no
+    task/state machine.
 
     This is the harness's cross-model review surfaced as a standalone command:
     "review my current changes with the review model." The exit code reflects the
     decision so it can gate CI — 0 = APPROVED, 1 = changes/rescue/ask (issues
-    found), 2 = the reviewer itself failed (missing CLI / timeout / unparseable).
-    Fail-closed: a failed run is never reported as an approval.
+    found), 2 = the reviewer itself failed (missing CLI / timeout / unparseable)
+    OR the configured reviewer collapses to the worker's provider (self-review).
+    Fail-closed: a failed run, and a self-review pairing, are never reported as
+    an approval. The cross-provider check mirrors the in-pipeline pairing guard
+    so this standalone entry point cannot become a hole that silently lets the
+    same model that wrote the code review it.
     """
     rr = repo or repo_root()
     cfg = load_config(rr)
@@ -1215,8 +1234,25 @@ def cmd_review(repo: Path | None = None) -> int:
     if adapter is None:
         print(
             'error: no headless reviewer configured (reviewer="human"?). Set '
-            '.redteam/config.toml [models].reviewer to a headless provider '
+            ".redteam/config.toml [models].reviewer to a headless provider "
             '(e.g. "codex") to use `review`.',
+            file=sys.stderr,
+        )
+        return 2
+    # Fail-closed adversarial-pairing guard: refuse to "review" with the same
+    # provider that the harness is configured to write with — that is self-review
+    # and defeats the point of the harness, exactly what the in-pipeline guard
+    # prevents. The worker resolver always returns an adapter, so a family match
+    # is a genuine collapse.
+    worker_family = _provider_family(get_worker_adapter({}).name)
+    reviewer_family = _provider_family(adapter.name)
+    if reviewer_family == worker_family:
+        print(
+            f"error: standalone review would be self-review — the configured reviewer and the "
+            f"worker both resolve to the '{worker_family}' provider, so the code would be reviewed "
+            f"by the same model that wrote it. Point .redteam/config.toml [models].reviewer at a "
+            f'different provider than the implementer (e.g. reviewer="codex" with a claude-* '
+            f'implementer), or set reviewer="human" for a manual review.',
             file=sys.stderr,
         )
         return 2
