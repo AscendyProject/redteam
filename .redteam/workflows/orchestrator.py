@@ -47,7 +47,11 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     repo_root,
     validate_verification_commands,
 )
-from adapters import get_reviewer_adapter  # type: ignore[import-not-found]  # noqa: E402
+from adapters import (  # type: ignore[import-not-found]  # noqa: E402
+    get_reviewer_adapter,
+    reviewer_provider,
+    worker_provider,
+)
 from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
 
 
@@ -202,6 +206,44 @@ def _phase_order(state: dict[str, Any]) -> list[str]:
     if _mode(state) == "agent-pair":
         return AGENT_PAIR_PHASE_ORDER
     return TDD_PHASE_ORDER
+
+
+def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
+    """Fail-closed guard on the harness's core promise: when a task actually runs
+    a headless reviewer phase, the reviewer must resolve to a DIFFERENT provider
+    than the worker. A reviewer silently pointed at the worker's own provider
+    (e.g. an agent flipping reviewer to "claude" while the worker is also claude)
+    collapses the adversarial pair into self-review — the code gets reviewed by
+    the same model that wrote it, which defeats the entire point of the harness.
+    Returns an error message if that collapse is configured, else None.
+
+    Enforced only in agent-pair mode, where the reviewer phase actually resolves
+    a headless reviewer adapter (review_code.py uses get_reviewer_adapter only
+    when mode == "agent-pair"). TDD mode reviews via the WORKER adapter
+    (get_worker_adapter(role="reviewer")), so its reviewer is the same agent
+    test-first by design — the headless-reviewer provider the guard polices is
+    never used there, and gating on it would be a false positive. A `review=false`
+    single-agent tier (no reviewer phase) or a human/manual reviewer (no headless
+    adapter) is likewise an explicit, non-adversarial-by-design choice and passes.
+    """
+    if _mode(state) != "agent-pair":
+        return None
+    if not any(p in REVIEWER_PHASES for p in _phase_order(state)):
+        return None
+    rp = reviewer_provider(state)  # None → manual/human reviewer, a distinct adversary
+    if rp is None:
+        return None
+    wp = worker_provider(state)
+    if rp != wp:
+        return None
+    return (
+        f"adversarial pairing collapsed: the reviewer and the worker both resolve to the "
+        f"'{wp}' provider, so the code would be reviewed by the same model that wrote it "
+        f"(self-review). The redteam harness requires a cross-provider pair. Fix "
+        f".redteam/config.toml [models]: point reviewer at a different provider than the "
+        f'implementer (e.g. implementer=claude-*, reviewer="codex"), or set reviewer="human" '
+        f"for a manual review, or use a review=false tier for an explicit single-agent path."
+    )
 
 
 def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | None]:
@@ -632,6 +674,19 @@ def process_task(task_dir: Path) -> TaskOutcome:
                 state["models"] = {**(state.get("models") or {}), **profile.models}
             state["tier"] = tier
             save_state(task_dir, state)
+
+        # Adversarial-pairing guard: refuse to run if the configured reviewer
+        # collapses to the worker's own provider (self-review). Runs after tier
+        # resolution so the final phase order + per-tier model overrides are in
+        # effect, and on every start/resume (not just fresh tasks) so a config
+        # edited mid-flight can't slip a same-model review past the gate.
+        pairing_error = _adversarial_pairing_error(state)
+        if pairing_error:
+            state["last_failure_reason"] = "adversarial_pairing_violation"
+            state["last_failure_log"] = pairing_error
+            state["next_phase"] = "deferred"
+            save_state(task_dir, state)
+            return "error"
 
     while True:
         phase = state.get("next_phase") or _phase_order(state)[0]
