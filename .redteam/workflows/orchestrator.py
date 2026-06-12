@@ -217,11 +217,17 @@ def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
     the same model that wrote it, which defeats the entire point of the harness.
     Returns an error message if that collapse is configured, else None.
 
-    Enforced only when the resolved phase order includes a reviewer phase AND a
-    headless reviewer adapter is configured. A `review=false` single-agent tier
-    (no reviewer phase) or a human/manual reviewer (no headless adapter) is an
-    explicit, non-adversarial-by-design choice and passes through.
+    Enforced only in agent-pair mode, where the reviewer phase actually resolves
+    a headless reviewer adapter (review_code.py uses get_reviewer_adapter only
+    when mode == "agent-pair"). TDD mode reviews via the WORKER adapter
+    (get_worker_adapter(role="reviewer")), so its reviewer is the same agent
+    test-first by design — the headless-reviewer provider the guard polices is
+    never used there, and gating on it would be a false positive. A `review=false`
+    single-agent tier (no reviewer phase) or a human/manual reviewer (no headless
+    adapter) is likewise an explicit, non-adversarial-by-design choice and passes.
     """
+    if _mode(state) != "agent-pair":
+        return None
     if not any(p in REVIEWER_PHASES for p in _phase_order(state)):
         return None
     rp = reviewer_provider(state)  # None → manual/human reviewer, a distinct adversary

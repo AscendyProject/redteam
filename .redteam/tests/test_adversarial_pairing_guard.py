@@ -112,6 +112,17 @@ def test_single_agent_tier_passes_despite_same_provider() -> None:
     assert orch._adversarial_pairing_error(state) is None
 
 
+def test_tdd_mode_same_provider_passes() -> None:
+    """TDD mode reviews via the WORKER adapter (get_worker_adapter role=reviewer),
+    not a headless reviewer adapter, so its reviewer is the same agent test-first
+    by design. The guard polices only the agent-pair headless path; a same-provider
+    TDD config must NOT be flagged (would be a false positive). Regression for the
+    #28 review finding PR-001."""
+    orch = _load_orchestrator_module()
+    state = {"mode": "tdd", "models": {"implementer": "codex", "reviewer": "codex"}}
+    assert orch._adversarial_pairing_error(state) is None
+
+
 # ---- orchestrator integration ----
 
 
