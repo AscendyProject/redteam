@@ -123,9 +123,11 @@ def test_settings_merge_is_idempotent(tmp_path: Path) -> None:
         assert deny.count(rule) == 1
 
 
-def test_settings_merge_skips_malformed_json(tmp_path: Path) -> None:
+def test_settings_merge_skips_malformed_json(tmp_path: Path, capsys) -> None:
     """A consumer's invalid settings.json is left byte-for-byte untouched rather
-    than corrupted — fail safe, never clobber."""
+    than corrupted — fail safe, never clobber. The deny-merge step must run and
+    hit its fail-safe branch (the emitted WARN proves it executed and skipped,
+    not that the installer simply never looked at the file)."""
     settings = tmp_path / ".claude/settings.json"
     settings.parent.mkdir(parents=True)
     settings.write_text("{ not valid json", encoding="utf-8")
@@ -133,9 +135,19 @@ def test_settings_merge_skips_malformed_json(tmp_path: Path) -> None:
     install_mod.install(tmp_path, overwrite=False, dry=False)
 
     assert settings.read_text(encoding="utf-8") == "{ not valid json"  # untouched
+    # The deny-merge ran and chose to skip — distinguishes the new fail-safe code
+    # path from the pre-feature installer, which never touched settings.json.
+    err = capsys.readouterr().err
+    assert install_mod.SETTINGS_REL in err and "deny-merge" in err
 
 
-def test_dry_run_does_not_create_settings(tmp_path: Path) -> None:
-    """Dry-run must not write settings.json (mirrors the no-.claude invariant)."""
+def test_dry_run_does_not_create_settings(tmp_path: Path, capsys) -> None:
+    """Dry-run must not write settings.json (mirrors the no-.claude invariant),
+    yet must still report the merge it WOULD do — proving the deny-merge step
+    executed in dry mode and chose not to write, rather than being absent."""
     install_mod.install(tmp_path, overwrite=False, dry=True)
     assert not (tmp_path / ".claude/settings.json").exists()
+    # The dry-run still logs the planned settings.json deny-merge; the pre-feature
+    # installer emitted no such line, so this fails against pre-change code.
+    out = capsys.readouterr().out
+    assert install_mod.SETTINGS_REL in out and "deny rule" in out
