@@ -20,7 +20,9 @@ Two file classes:
   never overwritten (even with --overwrite), so your edits and task state are
   safe:
     .redteam/config.toml        (seeded from .redteam/templates/config.toml)
-    .redteam/docs/*.md          (template skeletons you flesh out)
+    .redteam/docs/*.md          (seeded from .redteam/templates/docs/*.md — generic
+                                 skeletons you flesh out; this repo's own .redteam/docs/*
+                                 are redteam-specific and are NOT what gets vendored)
     .redteam/scripts/verify.sh  (your lint/type/test gate)
     .redteam/batches/           (your tasks + run state — created empty)
 
@@ -75,9 +77,12 @@ HARNESS_FILES = (
 # None source → create an empty file/dir. config.toml seeds from the template.
 PROJECT_SEEDS = (
     (".redteam/config.toml", ".redteam/templates/config.toml"),
-    (".redteam/docs/project-context.md", ".redteam/docs/project-context.md"),
-    (".redteam/docs/security-checklist.md", ".redteam/docs/security-checklist.md"),
-    (".redteam/docs/test-conventions.md", ".redteam/docs/test-conventions.md"),
+    # Docs seed from the generic templates, NOT from this repo's own (filled-in,
+    # redteam-specific) .redteam/docs/* — otherwise a consumer install would
+    # inherit redteam's rules instead of a blank skeleton (project-agnosticism).
+    (".redteam/docs/project-context.md", ".redteam/templates/docs/project-context.md"),
+    (".redteam/docs/security-checklist.md", ".redteam/templates/docs/security-checklist.md"),
+    (".redteam/docs/test-conventions.md", ".redteam/templates/docs/test-conventions.md"),
     (".redteam/scripts/verify.sh", ".redteam/scripts/verify.sh"),
 )
 
