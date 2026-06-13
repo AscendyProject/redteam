@@ -562,6 +562,7 @@ def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam"
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if stash_proc.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -613,6 +614,7 @@ def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam"
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
             )
             if pop_proc.returncode != 0:
                 raise RuntimeError(
@@ -1108,6 +1110,7 @@ def _pr_state_via_gh(pr_url: str) -> dict[str, Any] | None:
         ["gh", "pr", "view", pr_url, "--json", "state,isDraft,reviewDecision"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if proc.returncode != 0:

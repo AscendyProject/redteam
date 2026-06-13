@@ -53,6 +53,7 @@ class CodexReviewerAdapter:
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout_sec,
             )
         except FileNotFoundError:
@@ -182,6 +183,7 @@ class CodexWorkerAdapter:
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=DEFAULT_TIMEOUT_SEC,
             )
         except FileNotFoundError:

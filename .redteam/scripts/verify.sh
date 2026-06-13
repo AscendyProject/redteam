@@ -12,10 +12,17 @@ set -euo pipefail
 # examples/fastapi-like/.redteam/scripts/verify.sh for a real example.
 
 # Auto-activate a local venv if present, so the script works whether invoked
-# from an activated shell or directly by the orchestrator.
-if [ -z "${VIRTUAL_ENV:-}" ] && [ -f "venv/bin/activate" ]; then
-    # shellcheck disable=SC1091
-    source venv/bin/activate
+# from an activated shell or directly by the orchestrator. Handle both the POSIX
+# layout (venv/bin/activate) and the Windows one (venv/Scripts/activate, used by
+# Git Bash / MSYS where this script still runs under bash).
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    if [ -f "venv/bin/activate" ]; then
+        # shellcheck disable=SC1091
+        source venv/bin/activate
+    elif [ -f "venv/Scripts/activate" ]; then
+        # shellcheck disable=SC1091
+        source venv/Scripts/activate
+    fi
 fi
 
 echo "=== ruff check ==="
