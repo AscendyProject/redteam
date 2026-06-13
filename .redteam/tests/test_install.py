@@ -32,6 +32,12 @@ def test_fresh_install_vendors_and_seeds(tmp_path: Path) -> None:
     # project-owned seeds: config from the template (placeholder, not redteam's own)
     cfg = (tmp_path / ".redteam/config.toml").read_text()
     assert 'name = "my-project"' in cfg
+    # docs seed from templates/docs/*, NOT this repo's filled-in redteam-specific
+    # docs — a consumer must get the blank skeleton, not redteam's own rules (#31).
+    for doc in ("project-context.md", "security-checklist.md", "test-conventions.md"):
+        seeded = (tmp_path / ".redteam/docs" / doc).read_text()
+        assert "Template." in seeded and "<Project name>" in seeded
+        assert "dogfood" not in seeded  # redteam's filled docs say "dogfoods its own harness"
     assert (tmp_path / ".redteam/scripts/verify.sh").is_file()
     assert (tmp_path / ".redteam/batches/.gitkeep").is_file()
     # the harness's own tests are NOT shipped to a consumer
