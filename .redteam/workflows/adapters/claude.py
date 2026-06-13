@@ -92,6 +92,7 @@ class ClaudeReviewerAdapter:
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout_sec,
             )
         except FileNotFoundError:

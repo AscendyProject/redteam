@@ -42,6 +42,16 @@ def test_parses_decision_from_json_result() -> None:
     assert "REVIEW_DECISION: APPROVED" in r["raw"]
 
 
+def test_decodes_as_utf8() -> None:
+    """#32: subprocess.run must pin encoding="utf-8" so reviewer output with
+    non-ASCII decodes consistently instead of crashing on a non-UTF-8 platform
+    default (e.g. cp949 on Korean Windows)."""
+    fake = _fake_proc(0, _claude_json("REVIEW_DECISION: APPROVED"))
+    with patch("adapters.claude.subprocess.run", return_value=fake) as run:
+        ClaudeReviewerAdapter().review(role="review_code", prompt="x", cwd=Path("."), target=_TARGET)
+    assert run.call_args.kwargs["encoding"] == "utf-8"
+
+
 def test_missing_decision_unparseable() -> None:
     with patch("adapters.claude.subprocess.run", return_value=_fake_proc(0, _claude_json("no decision here"))):
         r = ClaudeReviewerAdapter().review(role="review_code", prompt="x", cwd=Path("."), target=_TARGET)

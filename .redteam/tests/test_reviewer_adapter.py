@@ -71,6 +71,18 @@ def test_codex_adapter_parses_decision() -> None:
     assert "REVIEW_DECISION: APPROVED" in r["raw"]
 
 
+def test_codex_adapter_decodes_as_utf8() -> None:
+    """#32: subprocess.run must pin encoding="utf-8" so reviewer output with
+    non-ASCII (em-dash, Korean) decodes consistently instead of crashing on a
+    non-UTF-8 platform default (e.g. cp949 on Korean Windows)."""
+    fake = _fake_proc(0, "REVIEW_DECISION: APPROVED\n")
+    with patch("adapters.codex.subprocess.run", return_value=fake) as run:
+        CodexReviewerAdapter().review(
+            role="review_code", prompt="x", cwd=Path("."), target={"kind": "branch_diff", "base": "main"}
+        )
+    assert run.call_args.kwargs["encoding"] == "utf-8"
+
+
 def test_codex_adapter_missing_decision_unparseable() -> None:
     with patch("adapters.codex.subprocess.run", return_value=_fake_proc(0, "no decision here")):
         r = CodexReviewerAdapter().review(
