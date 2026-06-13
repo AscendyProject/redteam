@@ -36,6 +36,7 @@ def _new_test_files_under_tests(rr: Path, test_dir: str, test_file_glob: str) ->
         cwd=str(rr),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     return [line for line in proc.stdout.splitlines() if fnmatch.fnmatch(basename(line), test_file_glob)]

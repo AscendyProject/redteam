@@ -34,6 +34,7 @@ def _run_verify_sh(cwd: Path, argv: list[str]) -> tuple[int, str]:
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
@@ -62,6 +63,7 @@ def _run_verification_commands(
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
         output = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
@@ -117,6 +119,7 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, di
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     diff_check = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
@@ -124,6 +127,7 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, di
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if diff_check.returncode == 0:
         return
@@ -135,6 +139,7 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, di
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     _write_current_diff(task_dir, cwd)
 

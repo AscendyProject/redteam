@@ -51,6 +51,24 @@ def test_run_claude_passes_model_when_configured(monkeypatch):
     assert captured["cmd"][1:3] == ["--model", "claude-sonnet-4-6"]
 
 
+def test_run_claude_pins_utf8_encoding(monkeypatch):
+    """#32: the streaming Popen must pin encoding="utf-8" so non-ASCII worker
+    output doesn't raise UnicodeDecodeError on a non-UTF-8 platform default
+    (e.g. cp949 on Korean Windows) while iterating the stream."""
+    base = _load_base_module()
+    captured: dict[str, object] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    assert captured["kwargs"]["encoding"] == "utf-8"
+
+
 def test_run_claude_omits_model_when_none(monkeypatch):
     base = _load_base_module()
     captured: dict[str, list[str]] = {}

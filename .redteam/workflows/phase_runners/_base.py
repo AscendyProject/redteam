@@ -181,6 +181,7 @@ def run_claude(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",  # #32: pin UTF-8 so non-ASCII stream output doesn't crash on a cp949 default
             bufsize=1,  # line-buffered
         )
     except FileNotFoundError:
@@ -265,6 +266,7 @@ def compute_repo_diff(cwd: Path | None = None) -> str:
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     return proc.stdout
@@ -280,6 +282,7 @@ def compute_branch_diff(cwd: Path | None = None) -> str:
         cwd=str(base),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     ).stdout
     unstaged = subprocess.run(
@@ -287,6 +290,7 @@ def compute_branch_diff(cwd: Path | None = None) -> str:
         cwd=str(base),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     ).stdout
     staged = subprocess.run(
@@ -294,6 +298,7 @@ def compute_branch_diff(cwd: Path | None = None) -> str:
         cwd=str(base),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     ).stdout
     return committed + unstaged + staged
@@ -322,6 +327,7 @@ def compute_branch_changed_paths(cwd: Path | None = None) -> list[str]:
             cwd=str(base),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         ).stdout
         for p in out.split("\0"):
