@@ -222,18 +222,21 @@ def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
     the same model that wrote it, which defeats the entire point of the harness.
     Returns an error message if that collapse is configured, else None.
 
-    Enforced only in agent-pair mode, where the reviewer phase actually resolves
-    a headless reviewer adapter (review_code.py uses get_reviewer_adapter only
-    when mode == "agent-pair"). TDD mode reviews via the WORKER adapter
-    (get_worker_adapter(role="reviewer")), so its reviewer is the same agent
-    test-first by design — the headless-reviewer provider the guard polices is
-    never used there, and gating on it would be a false positive. A `review=false`
-    single-agent tier (no reviewer phase) or a human/manual reviewer (no headless
-    adapter) is likewise an explicit, non-adversarial-by-design choice and passes.
+    Enforced exactly when a phase that runs the HEADLESS reviewer adapter is in
+    the resolved order:
+      - `plan_review` always uses the headless adapter (plan_review.run calls
+        get_reviewer_adapter regardless of mode — e.g. a tier-routed order with
+        review=true even while mode="tdd"), and
+      - `review_code` uses the headless adapter ONLY in agent-pair mode; in tdd it
+        reviews via the WORKER adapter (get_worker_adapter role="reviewer"), the
+        same-agent-test-first-by-design case, so it is not a headless self-review
+        risk and must not trip the guard (avoids the #28 false positive).
+    A `review=false` single-agent tier (neither phase) or a human/manual reviewer
+    (no headless adapter → reviewer_provider None) passes by design.
     """
-    if _mode(state) != "agent-pair":
-        return None
-    if not any(p in REVIEWER_PHASES for p in _phase_order(state)):
+    order = _phase_order(state)
+    runs_headless_review = "plan_review" in order or ("review_code" in order and _mode(state) == "agent-pair")
+    if not runs_headless_review:
         return None
     rp = reviewer_provider(state)  # None → manual/human reviewer, a distinct adversary
     if rp is None:
@@ -674,6 +677,22 @@ def process_task(task_dir: Path) -> TaskOutcome:
         # gates unnoticed. Validation runs on every start/resume so a hand-edited
         # bad mode in state.json also fails closed.
         if fm_mode is not None and is_fresh_task:
+            # When tier routing is configured the tier profile governs the phase
+            # order (_phase_order gives tier_phases precedence), so a front-matter
+            # mode would be silently ignored — reject it loudly. Keyed on cfg.tiers
+            # (every task is tier-routed when [tiers] is configured), which also
+            # catches a tier already persisted from a prior run, before this fresh
+            # task ever completed a phase (PR-002).
+            if cfg.tiers:
+                state["last_failure_reason"] = "mode_tier_conflict"
+                state["last_failure_log"] = (
+                    "input.md front-matter sets `mode`, but this repo is tier-routed and the "
+                    "tier profile governs the phase order — `mode` would be ignored. Remove `mode` "
+                    "from the front-matter, or use an untiered repo to choose the pipeline mode."
+                )
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
             state["mode"] = fm_mode
         if state.get("mode") not in VALID_MODES:
             state["last_failure_reason"] = "invalid_mode"
@@ -691,20 +710,8 @@ def process_task(task_dir: Path) -> TaskOutcome:
         # tasks (no phases completed yet) so a profile's phase order drives from
         # the start and an in-flight task is never re-routed mid-pipeline.
         if cfg.tiers and "tier" not in state and not state.get("phases_completed"):
-            # mode is governed by the tier-built order when tier routing is active,
-            # so _phase_order ignores it (issue #36 reconcile). A front-matter mode
-            # would be silently dropped — reject it loudly instead of pretending it
-            # took effect.
-            if fm_mode is not None:
-                state["last_failure_reason"] = "mode_tier_conflict"
-                state["last_failure_log"] = (
-                    "input.md front-matter sets `mode`, but this task is tier-routed and the "
-                    "tier profile governs the phase order — `mode` would be ignored. Remove `mode` "
-                    "from the front-matter, or run an untiered task to choose the pipeline mode."
-                )
-                state["next_phase"] = "deferred"
-                save_state(task_dir, state)
-                return "error"
+            # A front-matter mode here was already rejected above (mode_tier_conflict),
+            # so by this point either no mode was declared or we never reach here.
             try:
                 tier = resolve_tier(cfg, fm_tier, fm_paths)
             except ValueError as e:

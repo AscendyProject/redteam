@@ -123,6 +123,21 @@ def test_tdd_mode_same_provider_passes() -> None:
     assert orch._adversarial_pairing_error(state) is None
 
 
+def test_tier_plan_review_flagged_even_in_tdd_mode() -> None:
+    """plan_review always runs the HEADLESS reviewer adapter regardless of mode, so
+    a tier-routed order containing plan_review is a same-provider self-review risk
+    even when mode="tdd". The guard must fire here — gating purely on
+    mode=="agent-pair" would miss it (#36 review finding PR-001, HIGH)."""
+    orch = _load_orchestrator_module()
+    state = {
+        "mode": "tdd",
+        "tier_phases": ["plan_outcome", "plan_review", "implement", "review_code", "rescue", "create_pr", "done"],
+        "models": {"implementer": "codex", "reviewer": "codex"},
+    }
+    err = orch._adversarial_pairing_error(state)
+    assert err is not None and "self-review" in err
+
+
 # ---- orchestrator integration ----
 
 

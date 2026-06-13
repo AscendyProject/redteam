@@ -157,6 +157,26 @@ def test_frontmatter_mode_conflicts_with_tier_routing(monkeypatch, tmp_path) -> 
     assert st["next_phase"] == "deferred"
 
 
+def test_mode_conflict_fires_when_tier_already_persisted(monkeypatch, tmp_path) -> None:
+    """PR-002: a prior run can persist tier/tier_phases yet stop before completing
+    a phase (phases_completed still empty). On the next start the tier block is
+    skipped (`tier` already in state), but tier_phases still governs the order — so
+    a front-matter mode must STILL be rejected, not silently applied-then-ignored."""
+    orch = _load_orchestrator()
+    task_dir = _setup(tmp_path, _CFG_WITH_TIERS, input_md='+++\nmode = "tdd"\n+++\n')
+    # simulate a half-run: tier resolved + persisted, but no phase completed yet
+    st = _read_state(task_dir)
+    st["tier"] = 0
+    st["tier_phases"] = ["plan_outcome", "implement", "create_pr", "done"]
+    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
+    _mocks(orch, monkeypatch, tmp_path)
+
+    outcome = orch.process_task(task_dir)
+
+    assert outcome == "error"
+    assert _read_state(task_dir)["last_failure_reason"] == "mode_tier_conflict"
+
+
 def test_frontmatter_mode_ignored_on_resume(monkeypatch, tmp_path) -> None:
     """Mode is only selectable at a fresh task's start; an in-flight task keeps its
     persisted mode even if input.md is edited mid-run."""
