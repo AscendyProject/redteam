@@ -88,6 +88,10 @@ AGENT_PAIR_PHASE_ORDER: list[str] = [
     "done",
 ]
 
+# The two pipeline modes (issue #36). `mode` decides WHICH review gates run, so an
+# unknown value must fail closed, never silently fall through to one of them.
+VALID_MODES: tuple[str, ...] = ("agent-pair", "tdd")
+
 
 PhaseRunner = Callable[[Path, dict[str, Any]], PhaseResult]
 
@@ -206,7 +210,7 @@ def _phase_order(state: dict[str, Any]) -> list[str]:
         return list(tier_phases)
     if _mode(state) == "agent-pair":
         return AGENT_PAIR_PHASE_ORDER
-    return TDD_PHASE_ORDER
+    return TDD_PHASE_ORDER  # mode == "tdd"; validated against VALID_MODES upstream
 
 
 def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
@@ -218,18 +222,21 @@ def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
     the same model that wrote it, which defeats the entire point of the harness.
     Returns an error message if that collapse is configured, else None.
 
-    Enforced only in agent-pair mode, where the reviewer phase actually resolves
-    a headless reviewer adapter (review_code.py uses get_reviewer_adapter only
-    when mode == "agent-pair"). TDD mode reviews via the WORKER adapter
-    (get_worker_adapter(role="reviewer")), so its reviewer is the same agent
-    test-first by design — the headless-reviewer provider the guard polices is
-    never used there, and gating on it would be a false positive. A `review=false`
-    single-agent tier (no reviewer phase) or a human/manual reviewer (no headless
-    adapter) is likewise an explicit, non-adversarial-by-design choice and passes.
+    Enforced exactly when a phase that runs the HEADLESS reviewer adapter is in
+    the resolved order:
+      - `plan_review` always uses the headless adapter (plan_review.run calls
+        get_reviewer_adapter regardless of mode — e.g. a tier-routed order with
+        review=true even while mode="tdd"), and
+      - `review_code` uses the headless adapter ONLY in agent-pair mode; in tdd it
+        reviews via the WORKER adapter (get_worker_adapter role="reviewer"), the
+        same-agent-test-first-by-design case, so it is not a headless self-review
+        risk and must not trip the guard (avoids the #28 false positive).
+    A `review=false` single-agent tier (neither phase) or a human/manual reviewer
+    (no headless adapter → reviewer_provider None) passes by design.
     """
-    if _mode(state) != "agent-pair":
-        return None
-    if not any(p in REVIEWER_PHASES for p in _phase_order(state)):
+    order = _phase_order(state)
+    runs_headless_review = "plan_review" in order or ("review_code" in order and _mode(state) == "agent-pair")
+    if not runs_headless_review:
         return None
     rp = reviewer_provider(state)  # None → manual/human reviewer, a distinct adversary
     if rp is None:
@@ -247,33 +254,38 @@ def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
     )
 
 
-def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | None]:
+def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | None, str | None]:
     """Read an optional leading TOML front-matter block from input.md, fenced by
-    `+++` lines, and return its `tier` (int) and `paths` (list[str]) if present.
+    `+++` lines, and return its `tier` (int), `paths` (list[str]), and `mode`
+    (str) if present.
 
-    No input.md, no fence, or a malformed block → (None, None): the task is then
-    treated as unclassified and resolves to the safe default tier. TOML (stdlib
-    tomllib) keeps the zero-dependency promise.
+    No input.md, no fence, or a malformed block → (None, None, None): the task is
+    then treated as unclassified and resolves to the safe default tier and the
+    state's existing mode. TOML (stdlib tomllib) keeps the zero-dependency promise.
+    `mode` is returned raw (any string) and enum-validated by the caller, so a
+    typo fails closed rather than silently selecting a pipeline.
     """
     path = task_dir / "input.md"
     if not path.exists():
-        return None, None
+        return None, None, None
     text = path.read_text(encoding="utf-8")
     if not text.startswith("+++"):
-        return None, None
+        return None, None, None
     end = text.find("\n+++", 3)
     if end == -1:
-        return None, None
+        return None, None, None
     block = text[3:end].strip()
     try:
         fm = tomllib.loads(block)
     except tomllib.TOMLDecodeError:
-        return None, None
+        return None, None, None
     tier = fm.get("tier")
     paths = fm.get("paths")
+    mode = fm.get("mode")
     tier = tier if isinstance(tier, int) and not isinstance(tier, bool) else None
     paths = [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else None
-    return tier, paths
+    mode = mode if isinstance(mode, str) else None
+    return tier, paths, mode
 
 
 def _changed_paths(cwd: Path) -> list[str]:
@@ -654,15 +666,54 @@ def process_task(task_dir: Path) -> TaskOutcome:
             save_state(task_dir, state)
             return "error"
 
+        fm_tier, fm_paths, fm_mode = _parse_input_frontmatter(task_dir)
+        is_fresh_task = not state.get("phases_completed")
+
+        # Pipeline mode (issue #36): a fresh task may select agent-pair vs tdd via
+        # input.md front-matter (`+++ mode = "tdd" +++`); otherwise the existing /
+        # template-seeded state mode stands. Validate against an explicit enum and
+        # FAIL CLOSED on an unknown value — the old code silently fell through any
+        # non-"agent-pair" value to the TDD order, so a typo ran the wrong review
+        # gates unnoticed. Validation runs on every start/resume so a hand-edited
+        # bad mode in state.json also fails closed.
+        if fm_mode is not None and is_fresh_task:
+            # When tier routing is configured the tier profile governs the phase
+            # order (_phase_order gives tier_phases precedence), so a front-matter
+            # mode would be silently ignored — reject it loudly. Keyed on cfg.tiers
+            # (every task is tier-routed when [tiers] is configured), which also
+            # catches a tier already persisted from a prior run, before this fresh
+            # task ever completed a phase (PR-002).
+            if cfg.tiers:
+                state["last_failure_reason"] = "mode_tier_conflict"
+                state["last_failure_log"] = (
+                    "input.md front-matter sets `mode`, but this repo is tier-routed and the "
+                    "tier profile governs the phase order — `mode` would be ignored. Remove `mode` "
+                    "from the front-matter, or use an untiered repo to choose the pipeline mode."
+                )
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            state["mode"] = fm_mode
+        if state.get("mode") not in VALID_MODES:
+            state["last_failure_reason"] = "invalid_mode"
+            state["last_failure_log"] = (
+                f"Unknown pipeline mode {state.get('mode')!r}. Valid modes: {list(VALID_MODES)}. "
+                'Select it via input.md front-matter (`+++\\nmode = "agent-pair"\\n+++`) or state.json.'
+            )
+            state["next_phase"] = "deferred"
+            save_state(task_dir, state)
+            return "error"
+
         # Resolve the risk tier ONCE, at a fresh task's start (issue #13), only
         # when tier routing is configured. Stored in state so resume is stable.
         # cfg.tiers empty → skipped → behavior unchanged. Restricted to fresh
         # tasks (no phases completed yet) so a profile's phase order drives from
         # the start and an in-flight task is never re-routed mid-pipeline.
         if cfg.tiers and "tier" not in state and not state.get("phases_completed"):
-            explicit, paths = _parse_input_frontmatter(task_dir)
+            # A front-matter mode here was already rejected above (mode_tier_conflict),
+            # so by this point either no mode was declared or we never reach here.
             try:
-                tier = resolve_tier(cfg, explicit, paths)
+                tier = resolve_tier(cfg, fm_tier, fm_paths)
             except ValueError as e:
                 state["last_failure_reason"] = "tier_resolution_failed"
                 state["last_failure_log"] = str(e)
