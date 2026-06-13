@@ -49,6 +49,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
     get_reviewer_adapter,
+    get_worker_adapter,
     reviewer_provider,
     worker_provider,
 )
@@ -1251,23 +1252,131 @@ def cmd_status(batch_dir: Path) -> int:
     return 0
 
 
+# ---------- standalone review ----------
+
+
+def _standalone_review_prompt(cfg: Any) -> str:
+    """Prompt for a one-shot adversarial review of the current branch diff, with
+    no task context. Mirrors the in-pipeline review_code prompt's read-only,
+    stdout-only contract so the same reviewer adapter can run it unchanged."""
+    proj = cfg.project
+    return (
+        "Act as an adversarial code-security reviewer. Review the changes in "
+        f"`git diff {proj.base_branch}...HEAD`. Apply the review criteria in "
+        ".redteam/prompts/codex/code_review.md, the project security checklist at "
+        f"{proj.security_checklist}, and the project hard rules at {proj.context_file}. "
+        "DO NOT write any files or touch any sentinels — output the ENTIRE review to "
+        "stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
+        "CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with IR-NNN findings above it."
+    )
+
+
+def _provider_family(adapter_name: str) -> str:
+    """Collapse an adapter's `name` to its provider FAMILY ("claude"/"codex").
+
+    Reviewer adapters are already named by family ("claude"/"codex"), but the
+    Claude *worker* adapter is named "claude-code" — so a raw name comparison
+    would read a claude worker + claude reviewer as cross-provider when it is in
+    fact self-review. Normalizing both to the family is what makes the guard
+    below correct. (This mirrors the worker_provider/reviewer_provider resolvers
+    introduced for the in-pipeline guard; once that lands on the same branch the
+    two should converge on one helper.)
+    """
+    return "claude" if adapter_name.startswith("claude") else adapter_name
+
+
+def cmd_review(repo: Path | None = None) -> int:
+    """Run the configured reviewer — fail-closed if it would collapse to the
+    worker's own provider — over the current branch diff, read-only, with no
+    task/state machine.
+
+    This is the harness's cross-model review surfaced as a standalone command:
+    "review my current changes with the review model." The exit code reflects the
+    decision so it can gate CI — 0 = APPROVED, 1 = changes/rescue/ask (issues
+    found), 2 = the reviewer itself failed (missing CLI / timeout / unparseable)
+    OR the configured reviewer collapses to the worker's provider (self-review).
+    Fail-closed: a failed run, and a self-review pairing, are never reported as
+    an approval. The cross-provider check mirrors the in-pipeline pairing guard
+    so this standalone entry point cannot become a hole that silently lets the
+    same model that wrote the code review it.
+    """
+    rr = repo or repo_root()
+    cfg = load_config(rr)
+    adapter = get_reviewer_adapter({})  # {} → inherits config default reviewer
+    if adapter is None:
+        print(
+            'error: no headless reviewer configured (reviewer="human"?). Set '
+            ".redteam/config.toml [models].reviewer to a headless provider "
+            '(e.g. "codex") to use `review`.',
+            file=sys.stderr,
+        )
+        return 2
+    # Fail-closed adversarial-pairing guard: refuse to "review" with the same
+    # provider that the harness is configured to write with — that is self-review
+    # and defeats the point of the harness, exactly what the in-pipeline guard
+    # prevents. The worker resolver always returns an adapter, so a family match
+    # is a genuine collapse.
+    worker_family = _provider_family(get_worker_adapter({}).name)
+    reviewer_family = _provider_family(adapter.name)
+    if reviewer_family == worker_family:
+        print(
+            f"error: standalone review would be self-review — the configured reviewer and the "
+            f"worker both resolve to the '{worker_family}' provider, so the code would be reviewed "
+            f"by the same model that wrote it. Point .redteam/config.toml [models].reviewer at a "
+            f'different provider than the implementer (e.g. reviewer="codex" with a claude-* '
+            f'implementer), or set reviewer="human" for a manual review.',
+            file=sys.stderr,
+        )
+        return 2
+    result = adapter.review(
+        role="review_code",
+        prompt=_standalone_review_prompt(cfg),
+        cwd=rr,
+        target={"kind": "branch_diff", "base": cfg.project.base_branch},
+    )
+    raw = result["raw"]
+    out_path = rr / ".redteam" / "last_review.md"
+    try:
+        out_path.write_text(raw, encoding="utf-8")
+        saved = " (saved to .redteam/last_review.md)"
+    except OSError:
+        saved = ""
+    print(raw)
+    if result["parse_status"] != "ok":
+        print(f"\n[redteam] reviewer failed (parse_status={result['parse_status']}).", file=sys.stderr)
+        return 2
+    print(f"\n[redteam] REVIEW_DECISION: {result['decision']}{saved}", file=sys.stderr)
+    return 0 if result["decision"] == "APPROVED" else 1
+
+
 USAGE = (
     "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
+    "       orchestrator.py review\n"
     "  start            — process every task from its current next_phase\n"
     "  resume           — same as start; convenient name to re-enter after a human gate\n"
     "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
     "                     and auto-touch the `pr.reviewed` sentinel once the PR is merged\n"
     "                     or closed; then run resume\n"
-    "  status           — print per-task summary without running anything"
+    "  status           — print per-task summary without running anything\n"
+    "  review           — one-shot adversarial review of the current branch diff with the\n"
+    "                     configured reviewer (a different provider than the worker); no batch"
 )
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 3:
+    if len(argv) < 2:
         print(USAGE, file=sys.stderr)
         return 2
 
     command = argv[1]
+
+    # `review` takes no batch dir — it reviews the current branch diff.
+    if command == "review":
+        return cmd_review()
+
+    if len(argv) < 3:
+        print(USAGE, file=sys.stderr)
+        return 2
     batch_dir = Path(argv[2]).resolve()
 
     if command == "start":

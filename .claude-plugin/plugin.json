@@ -7,7 +7,10 @@
   "repository": "https://github.com/AscendyProject/redteam",
   "license": "Apache-2.0",
   "commands": [
-    "./commands/redteam-install.md"
+    "./commands/redteam-install.md",
+    "./commands/redteam-review.md",
+    "./commands/redteam-config.md",
+    "./commands/redteam-status.md"
   ],
   "agents": [
     "./.claude/agents/code-security-reviewer.md",
