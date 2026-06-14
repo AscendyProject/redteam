@@ -1,6 +1,6 @@
 [project]
 name = "redteam-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "Adversarial agent-pair harness: one model writes code through a test-first pipeline, a second model reviews it, gated at human checkpoints."
 readme = "README.md"
 requires-python = ">=3.11"
