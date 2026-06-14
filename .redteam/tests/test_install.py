@@ -199,6 +199,18 @@ def test_dry_run_writes_no_version_stamp(tmp_path: Path) -> None:
     assert not (tmp_path / install_mod.VERSION_STAMP_REL).exists()
 
 
+def test_source_version_ignores_consumer_pyproject(tmp_path: Path, monkeypatch) -> None:
+    """#34 PR-001: a vendored install.py has SOURCE_ROOT == the CONSUMER repo,
+    which may carry its own pyproject.toml with an unrelated version. _source_version
+    must NOT read that as the harness version — it ignores a non-redteam pyproject
+    and falls back to the harness stamp."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)  # writes the real harness stamp
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "consumer-app"\nversion = "9.9.9"\n', encoding="utf-8")
+    monkeypatch.setattr(install_mod, "SOURCE_ROOT", tmp_path)  # simulate the vendored copy
+    assert install_mod._source_version() != "9.9.9"
+    assert install_mod._source_version() == install_mod._stamp_version(tmp_path)
+
+
 def test_overwrite_refreshes_version_stamp(tmp_path: Path) -> None:
     """The stamp is harness-owned, so --overwrite refreshes it even after a
     consumer scribbled an old version into it."""

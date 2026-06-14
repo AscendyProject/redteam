@@ -55,14 +55,26 @@ SOURCE_ROOT = Path(__file__).resolve().parents[2]
 # behind the source. Harness-owned: refreshed on every install, incl. --overwrite.
 VERSION_STAMP_REL = ".redteam/.redteam-version"
 REPO_URL = "https://github.com/AscendyProject/redteam"
+# pyproject [project].name in the harness's OWN repo. Used to tell the source
+# repo's pyproject apart from a consumer's: a vendored install.py has
+# SOURCE_ROOT == the consumer repo, which may carry its own (unrelated) pyproject.
+HARNESS_DIST_NAME = "redteam-harness"
 
 
 def _pyproject_version(root: Path) -> str | None:
+    """Version from root/pyproject.toml, but ONLY if it is the harness's own
+    pyproject (project.name == redteam-harness). A consumer's pyproject is a
+    different project whose version is NOT the harness version, so it must be
+    ignored — otherwise a vendored install.py (SOURCE_ROOT = the consumer repo)
+    would read the consumer's app version as the harness version (#34 PR-001)."""
     try:
         data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
         return None
-    v = data.get("project", {}).get("version")
+    project = data.get("project", {})
+    if not isinstance(project, dict) or project.get("name") != HARNESS_DIST_NAME:
+        return None
+    v = project.get("version")
     return v if isinstance(v, str) else None
 
 
