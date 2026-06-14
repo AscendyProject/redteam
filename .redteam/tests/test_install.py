@@ -180,3 +180,60 @@ def test_dry_run_does_not_create_settings(tmp_path: Path, capsys) -> None:
     # installer emitted no such line, so this fails against pre-change code.
     out = capsys.readouterr().out
     assert install_mod.SETTINGS_REL in out and "deny rule" in out
+
+
+# ---- version stamp + --check (#34) ----
+
+
+def test_install_writes_version_stamp(tmp_path: Path) -> None:
+    """An install stamps the vendored harness version (harness-owned) so a
+    consumer / --check can tell which version is installed (#34)."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    stamp = json.loads((tmp_path / install_mod.VERSION_STAMP_REL).read_text(encoding="utf-8"))
+    assert stamp["version"] == install_mod._source_version()
+    assert "installed_from" in stamp
+
+
+def test_dry_run_writes_no_version_stamp(tmp_path: Path) -> None:
+    install_mod.install(tmp_path, overwrite=False, dry=True)
+    assert not (tmp_path / install_mod.VERSION_STAMP_REL).exists()
+
+
+def test_source_version_ignores_consumer_pyproject(tmp_path: Path, monkeypatch) -> None:
+    """#34 PR-001: a vendored install.py has SOURCE_ROOT == the CONSUMER repo,
+    which may carry its own pyproject.toml with an unrelated version. _source_version
+    must NOT read that as the harness version — it ignores a non-redteam pyproject
+    and falls back to the harness stamp."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)  # writes the real harness stamp
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "consumer-app"\nversion = "9.9.9"\n', encoding="utf-8")
+    monkeypatch.setattr(install_mod, "SOURCE_ROOT", tmp_path)  # simulate the vendored copy
+    assert install_mod._source_version() != "9.9.9"
+    assert install_mod._source_version() == install_mod._stamp_version(tmp_path)
+
+
+def test_overwrite_refreshes_version_stamp(tmp_path: Path) -> None:
+    """The stamp is harness-owned, so --overwrite refreshes it even after a
+    consumer scribbled an old version into it."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    stamp_path = tmp_path / install_mod.VERSION_STAMP_REL
+    stamp_path.write_text(json.dumps({"version": "0.0.1"}), encoding="utf-8")
+    install_mod.install(tmp_path, overwrite=True, dry=False)
+    assert json.loads(stamp_path.read_text())["version"] == install_mod._source_version()
+
+
+def test_check_up_to_date_returns_zero(tmp_path: Path) -> None:
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    assert install_mod.cmd_check(tmp_path) == 0
+
+
+def test_check_outdated_returns_one(tmp_path: Path, capsys) -> None:
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    stamp_path = tmp_path / install_mod.VERSION_STAMP_REL
+    stamp_path.write_text(json.dumps({"version": "0.0.1"}), encoding="utf-8")
+    assert install_mod.cmd_check(tmp_path) == 1
+    assert "OUTDATED" in capsys.readouterr().out
+
+
+def test_check_unknown_returns_two(tmp_path: Path) -> None:
+    """No stamp (pre-#34 install or never installed) → cannot determine → exit 2."""
+    assert install_mod.cmd_check(tmp_path) == 2

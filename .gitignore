@@ -10,6 +10,10 @@ dist/
 build/
 .DS_Store
 
+# Per-install harness version stamp (written into a consumer by install.py; the
+# source repo itself is never a vendored install, so this should never appear here)
+/.redteam/.redteam-version
+
 # Internal cross-repo coordination — never part of the public project
 /docs/requests/
 /docs/cross-stack-findings.md
