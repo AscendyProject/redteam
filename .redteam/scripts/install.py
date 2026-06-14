@@ -28,6 +28,7 @@ Two file classes:
 
 Usage:
     python3 .redteam/scripts/install.py <target-dir> [--overwrite] [--dry-run] [--protect-config]
+    python3 .redteam/scripts/install.py [<target-dir>] --check   # report version, no writes
 
 --protect-config (opt-in, off by default) additionally merges Edit/Write deny
 rules for .redteam/config.toml into the consumer's .claude/settings.json
@@ -40,12 +41,69 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 # Source root = the harness repo this script ships in
 # (.redteam/scripts/install.py → parents[2]).
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
+
+# Harness version stamp written into a consumer on install (issue #34). Lets a
+# consumer (and `--check`) tell which harness version is vendored and whether it's
+# behind the source. Harness-owned: refreshed on every install, incl. --overwrite.
+VERSION_STAMP_REL = ".redteam/.redteam-version"
+REPO_URL = "https://github.com/AscendyProject/redteam"
+
+
+def _pyproject_version(root: Path) -> str | None:
+    try:
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    v = data.get("project", {}).get("version")
+    return v if isinstance(v, str) else None
+
+
+def _stamp_version(root: Path) -> str | None:
+    try:
+        data = json.loads((root / VERSION_STAMP_REL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    v = data.get("version") if isinstance(data, dict) else None
+    return v if isinstance(v, str) else None
+
+
+def _source_version() -> str | None:
+    """The version the installer would vendor: the repo's pyproject when run from
+    source, or this vendored copy's own stamp when install.py is itself vendored
+    (a consumer has no pyproject.toml)."""
+    return _pyproject_version(SOURCE_ROOT) or _stamp_version(SOURCE_ROOT)
+
+
+def _git_short_commit(root: Path) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except (OSError, ValueError):
+        return None
+    return out.stdout.strip() or None
+
+
+def _parse_semver(v: str | None) -> tuple[int, ...] | None:
+    if not isinstance(v, str):
+        return None
+    try:
+        return tuple(int(p) for p in v.strip().split("."))
+    except ValueError:
+        return None
+
 
 # Directory subtrees re-vendored on install (harness-owned). These live entirely
 # under .redteam/ which the harness owns, so replacing the whole subtree on
@@ -216,6 +274,44 @@ def _merge_settings_deny(target: Path, dry: bool) -> None:
     dst.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _write_version_stamp(target: Path, dry: bool) -> None:
+    """Stamp the vendored harness version into the consumer (harness-owned).
+    Refreshed on every install so `--check` can detect a stale vendored tree."""
+    version = _source_version() or "unknown"
+    _log("stamp", VERSION_STAMP_REL + f"  (harness {version})", dry)
+    if dry:
+        return
+    stamp = {"version": version, "installed_from": _git_short_commit(SOURCE_ROOT), "source": str(SOURCE_ROOT)}
+    dst = target / VERSION_STAMP_REL
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(json.dumps(stamp, indent=2) + "\n", encoding="utf-8")
+
+
+def cmd_check(target: Path) -> int:
+    """Read-only: report the vendored harness version vs the available (source)
+    version and exit. 0 = up-to-date / ahead, 1 = outdated, 2 = cannot determine.
+    No writes — safe to run from the vendored copy itself."""
+    target = target.resolve()
+    vendored = _stamp_version(target)
+    available = _source_version()
+    print(f"redteam harness version check ({target})")
+    print(f"  vendored:  {vendored or 'unknown (unstamped — pre-#34 install)'}")
+    print(f"  available: {available or 'unknown'}")
+    sv, av = _parse_semver(vendored), _parse_semver(available)
+    if sv is None or av is None:
+        print("  verdict:   unknown — cannot compare versions.")
+        return 2
+    if sv < av:
+        print(f"  verdict:   OUTDATED — re-vendor: python3 .redteam/scripts/install.py {target} --overwrite")
+        print(f"             changes:  {REPO_URL}/compare/v{vendored}...v{available}")
+        return 1
+    if sv > av:
+        print("  verdict:   ahead — the vendored copy is newer than the source.")
+        return 0
+    print("  verdict:   up-to-date.")
+    return 0
+
+
 def install(target: Path, overwrite: bool, dry: bool, protect_config: bool = False) -> None:
     target = target.resolve()
     if target == SOURCE_ROOT:
@@ -238,6 +334,7 @@ def install(target: Path, overwrite: bool, dry: bool, protect_config: bool = Fal
         _seed_dir(rel, target, dry)
     if protect_config:
         _merge_settings_deny(target, dry)
+    _write_version_stamp(target, dry)
     print()
     print("Done. Next steps:")
     print("  1) Edit .redteam/config.toml for your stack.")
@@ -248,7 +345,7 @@ def install(target: Path, overwrite: bool, dry: bool, protect_config: bool = Fal
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Install the redteam harness into a project (vendoring).")
-    ap.add_argument("target", help="Path to the target project root.")
+    ap.add_argument("target", nargs="?", help="Path to the target project root.")
     ap.add_argument(
         "--overwrite",
         action="store_true",
@@ -264,7 +361,20 @@ def main() -> None:
             "runtime pairing guard is the backstop regardless."
         ),
     )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Read-only: report the vendored vs available harness version and exit "
+            "(0 up-to-date, 1 outdated, 2 cannot determine) without vendoring anything. "
+            "Target defaults to this script's own tree."
+        ),
+    )
     args = ap.parse_args()
+    if args.check:
+        raise SystemExit(cmd_check(Path(args.target) if args.target else SOURCE_ROOT))
+    if not args.target:
+        ap.error("target is required (or use --check)")
     install(Path(args.target), overwrite=args.overwrite, dry=args.dry_run, protect_config=args.protect_config)
 
 
