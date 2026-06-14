@@ -79,13 +79,16 @@ all security boundaries — never loosen them inline; plan_review first.
 
 ## Project status
 
-`v0.1.0` is released and the repo is public. Extraction, the cross-stack
-validation that proved the engine generic on a non-Python stack, and Claude Code
-plugin packaging are all done.
+`v0.2.0` is released and the repo is public. Extraction, the cross-stack
+validation that proved the engine generic on a non-Python stack, Claude Code
+plugin packaging, and tier-aware routing (#13) are all done. v0.2.0 adds the
+fail-closed same-provider self-review guard (#28), the `/redteam` slash commands
++ standalone `review` subcommand (#29), the opt-in `--protect-config` installer
+flag (#30), and pipeline-mode validation/selection (#36). See `CHANGELOG.md`.
 
-**Roadmap:** tier-aware routing — let a task's risk tier select its phases and
-models instead of one uniform pipeline (issue #13). It's a security-boundary
-change, so it goes through `plan_review` when picked up.
+**Roadmap:** pluggable reviewer execution (#37, the review-latency root cause)
+and install version-stamping + `redteam-install --check` (#34). Both are
+security-boundary-adjacent and go through `plan_review` when picked up.
 
 Coordination with downstream adopters of the harness is tracked **privately**,
 outside this public repo. For project work here, use GitHub issues / PRs /
