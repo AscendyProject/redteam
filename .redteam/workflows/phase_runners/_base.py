@@ -39,7 +39,7 @@ def default_model_for_role(role: str) -> str | None:
     return getattr(load_config(repo_root()).models, role, None)
 
 
-PhaseStatus = Literal["approved", "changes_requested", "rescue_required", "ask_user", "error"]
+PhaseStatus = Literal["approved", "changes_requested", "rescue_required", "ask_user", "error", "manual_required"]
 ReviewDecision = Literal["APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER", "MISSING"]
 
 

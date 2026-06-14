@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from adapters import get_reviewer_adapter, get_worker_adapter
+from adapters import MANUAL_REQUIRED, get_reviewer_adapter, get_worker_adapter, review_with_fallback
 
 from ._base import (
     PhaseResult,
@@ -41,14 +41,21 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         diff = compute_repo_diff(cwd=repo_root())
         review_path = task_dir / "code_review.md"
 
+        # A prior fallback exhausted to manual for THIS phase → take the manual
+        # branch and wait on the pasted-review sentinel rather than re-invoking the
+        # failing headless primary (#37).
+        manual_required = "review_code" in (state.get("manual_review_required") or {})
         adapter = get_reviewer_adapter(state)
-        if adapter is not None:
-            result = adapter.review(
+        if adapter is not None and not manual_required:
+            result = review_with_fallback(
+                state,
                 role="review_code",
                 prompt=_code_review_prompt(task_dir),
                 cwd=repo_root(),
                 target={"kind": "branch_diff", "base": project_config().base_branch},
             )
+            if result["parse_status"] == MANUAL_REQUIRED:
+                return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
             review_text = result["raw"]
             review_path.write_text(review_text, encoding="utf-8")
             # Fail closed on any non-ok parse status; trust the adapter's decision

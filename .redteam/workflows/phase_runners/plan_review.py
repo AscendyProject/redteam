@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from adapters import get_reviewer_adapter
+from adapters import MANUAL_REQUIRED, get_reviewer_adapter, review_with_fallback
 
 from ._base import PhaseResult, compute_repo_diff, parse_review_decision, read_text_if_exists, repo_root
 
@@ -33,14 +33,23 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     diff = compute_repo_diff(cwd=repo_root())
     review_path = task_dir / "plan_review.md"
 
+    # When a prior fallback exhausted to manual for THIS phase, the orchestrator
+    # flags it and waits on the pasted-review sentinel; take the manual branch
+    # rather than re-invoking the failing headless primary (#37).
+    manual_required = "plan_review" in (state.get("manual_review_required") or {})
     adapter = get_reviewer_adapter(state)
-    if adapter is not None:
-        result = adapter.review(
+    if adapter is not None and not manual_required:
+        result = review_with_fallback(
+            state,
             role="plan_review",
             prompt=_plan_review_prompt(task_dir),
             cwd=repo_root(),
             target={"kind": "plan", "base": None},
         )
+        # The reviewer (primary or fallback) failed infra → block for a manual
+        # review. The audit is NOT persisted as plan_review.md (it is not a review).
+        if result["parse_status"] == MANUAL_REQUIRED:
+            return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
         review_text = result["raw"]
         review_path.write_text(review_text, encoding="utf-8")
         # Fail closed on ANY non-ok parse status; trust the adapter's decision

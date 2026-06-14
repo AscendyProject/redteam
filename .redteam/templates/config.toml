@@ -35,3 +35,8 @@ planner = "claude-opus-4-7"
 implementer = "claude-sonnet-4-6"
 reviewer = "codex"
 rescue = "codex"
+# Fallback when the primary reviewer fails on INFRA (missing CLI / auth / timeout
+# / unparseable) — never on a valid CHANGES_REQUESTED. A provider key (must differ
+# from the worker provider, or its APPROVED is not trusted) or "manual"/"human" to
+# block for a pasted review. Default "manual" = fail-closed.
+reviewer_fallback = "manual"

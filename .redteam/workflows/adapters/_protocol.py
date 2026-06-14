@@ -42,6 +42,10 @@ class ReviewerCapabilities(TypedDict):
     native_diff_review: bool
     # Hard timeout; the adapter MUST fail closed (parse_status="error") on it.
     timeout_sec: int
+    # The adapter runs the reviewer with NO write capability (read-only sandbox /
+    # plan permission mode). The engine requires this True before trusting an
+    # AUTOMATIC fallback APPROVED from this adapter (#37 adapter trust boundary).
+    read_only_enforced: bool
 
 
 class ReviewResult(TypedDict):
