@@ -151,6 +151,20 @@ def test_config_rejects_unknown_reviewer_fallback(tmp_path):
         load_config(tmp_path)
 
 
+def test_config_rejects_unknown_reviewer_fallback_in_tier_override(tmp_path):
+    """A tier model override must validate reviewer_fallback with the same loud
+    discipline as the top-level block — a typo can't slip through #37 / PR-001."""
+    (tmp_path / ".redteam").mkdir()
+    (tmp_path / ".redteam" / "config.toml").write_text(
+        '[project]\nname = "p"\nsource_dirs = ["a/"]\ntest_file_glob = "test_*.py"\n'
+        'verification_allowlist = ["pytest"]\n[tiers.2]\nreview = true\n'
+        '[tiers.2.models]\nreviewer_fallback = "codx"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="reviewer_fallback"):
+        load_config(tmp_path)
+
+
 # ---- orchestrator manual_required handling ----
 
 
@@ -233,3 +247,32 @@ def test_pasted_manual_review_clears_flag_and_syncs_items(monkeypatch, tmp_path)
     assert "plan_review" not in st.get("manual_review_required", {})  # flag cleared
     ids = [it.get("id") for it in st.get("review_items", [])]
     assert "PR-007" in ids  # synced from the genuine pasted review
+
+
+def test_successful_fallback_records_state_audit(monkeypatch, tmp_path):
+    """An AUTOMATIC fallback approval/decision records the audit trail in
+    state["review_audit"] too (not just the manual-required block), so the
+    machine-readable trail covers the success path (#37 / code-review follow-up)."""
+    orch = _load_orchestrator()
+    task_dir = _task(tmp_path)
+    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
+    fallback_log = (
+        f"{orch.FALLBACK_AUDIT_MARKER} primary reviewer 'codex' failed. Fell back to 'claude'.\n\n"
+        "PR-009 severity:low status:open nit\nREVIEW_DECISION: CHANGES_REQUESTED"
+    )
+    monkeypatch.setitem(
+        orch.PHASE_RUNNERS,
+        "plan_review",
+        lambda td, st: {"status": "changes_requested", "feedback": fallback_log, "log": fallback_log, "diff": ""},
+    )
+    # CHANGES_REQUESTED backtracks to plan_outcome; halt there (no real subprocess).
+    monkeypatch.setitem(
+        orch.PHASE_RUNNERS, "plan_outcome", lambda td, st: {"status": "ask_user", "feedback": "", "log": "", "diff": ""}
+    )
+
+    orch.process_task(task_dir)
+
+    st = json.loads((task_dir / "state.json").read_text())
+    audit = st.get("review_audit", [])
+    assert any(a.get("phase") == "plan_review" and orch.FALLBACK_AUDIT_MARKER in a.get("reason", "") for a in audit)

@@ -112,6 +112,9 @@ def get_reviewer_adapter(state: dict[str, Any]) -> ReviewerAdapter | None:
 # it to the manual gate, never to a retry/defer/approval (#37).
 MANUAL_REQUIRED = "manual_required"
 _MANUAL_FALLBACKS = frozenset({"manual", "human"})
+# Prefix on a successful-fallback review's raw, so the engine can record the audit
+# trail in state for an automatic fallback approval too (not just the manual case).
+FALLBACK_AUDIT_MARKER = "[redteam fallback]"
 
 
 def _resolved_reviewer_fallback(state: dict[str, Any]) -> str:
@@ -176,7 +179,7 @@ def review_with_fallback(
     if _is_valid_result(fb_result):
         return {
             "decision": fb_result["decision"],
-            "raw": f"[redteam fallback] {audit} Fell back to '{fb}'.\n\n{fb_result['raw']}",
+            "raw": f"{FALLBACK_AUDIT_MARKER} {audit} Fell back to '{fb}'.\n\n{fb_result['raw']}",
             "parse_status": "ok",
         }
     return _manual_required(
@@ -185,6 +188,7 @@ def review_with_fallback(
 
 
 __all__ = [
+    "FALLBACK_AUDIT_MARKER",
     "MANUAL_REQUIRED",
     "ReviewerAdapter",
     "ReviewResult",

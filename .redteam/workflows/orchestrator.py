@@ -48,6 +48,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     validate_verification_commands,
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
+    FALLBACK_AUDIT_MARKER,
     MANUAL_REQUIRED,
     get_reviewer_adapter,
     get_worker_adapter,
@@ -919,6 +920,15 @@ def process_task(task_dir: Path) -> TaskOutcome:
         # the headless primary; a still-broken primary simply re-flags (#37).
         if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"}:
             state.get("manual_review_required", {}).pop(phase, None)
+
+        # A decision that came from an AUTOMATIC fallback reviewer records the audit
+        # trail in state too (it is also durable in the persisted review artifact),
+        # so the machine-readable trail covers automatic-fallback approvals, not
+        # only the manual-required blocks (#37).
+        if result["status"] in {"approved", "changes_requested", "rescue_required"} and result["log"].startswith(
+            FALLBACK_AUDIT_MARKER
+        ):
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": result["log"].splitlines()[0]})
 
         # Only a result carrying a VALID parsed review decision may seed
         # review_items — never a failed/manual body (which can contain PR-/IR-
