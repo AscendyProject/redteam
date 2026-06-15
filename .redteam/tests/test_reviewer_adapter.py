@@ -155,43 +155,51 @@ def test_codex_adapter_nonzero_exit_fails_closed() -> None:
 
 
 def test_plan_review_runner_uses_adapter(tmp_path) -> None:
+    """The runner delegates the headless review to the fallback ladder
+    (review_with_fallback) and maps a valid APPROVED result to status=approved."""
     from phase_runners import plan_review
 
-    fake = MagicMock()
-    fake.review.return_value = {
-        "decision": "APPROVED",
-        "raw": "review body\nREVIEW_DECISION: APPROVED",
-        "parse_status": "ok",
-    }
+    fake = MagicMock()  # non-None adapter → headless branch is entered
     with (
         patch("phase_runners.plan_review.get_reviewer_adapter", return_value=fake),
+        patch(
+            "phase_runners.plan_review.review_with_fallback",
+            return_value={
+                "decision": "APPROVED",
+                "raw": "review body\nREVIEW_DECISION: APPROVED",
+                "parse_status": "ok",
+            },
+        ) as rwf,
         patch("phase_runners.plan_review.compute_repo_diff", return_value=""),
         patch("phase_runners.plan_review.repo_root", return_value=tmp_path),
     ):
         res = plan_review.run(tmp_path, {"models": {"reviewer": "codex"}})
     assert res["status"] == "approved"
     assert (tmp_path / "plan_review.md").read_text(encoding="utf-8").endswith("APPROVED")
-    fake.review.assert_called_once()
+    rwf.assert_called_once()
 
 
 def test_review_code_runner_uses_adapter_in_agent_pair(tmp_path) -> None:
     from phase_runners import review_code
 
     fake = MagicMock()
-    fake.review.return_value = {
-        "decision": "CHANGES_REQUESTED",
-        "raw": "IR-001 ...\nREVIEW_DECISION: CHANGES_REQUESTED",
-        "parse_status": "ok",
-    }
     with (
         patch("phase_runners.review_code.get_reviewer_adapter", return_value=fake),
+        patch(
+            "phase_runners.review_code.review_with_fallback",
+            return_value={
+                "decision": "CHANGES_REQUESTED",
+                "raw": "IR-001 ...\nREVIEW_DECISION: CHANGES_REQUESTED",
+                "parse_status": "ok",
+            },
+        ) as rwf,
         patch("phase_runners.review_code.compute_repo_diff", return_value=""),
         patch("phase_runners.review_code.repo_root", return_value=tmp_path),
     ):
         res = review_code.run(tmp_path, {"mode": "agent-pair", "models": {"reviewer": "codex"}})
     assert res["status"] == "changes_requested"
     assert (tmp_path / "code_review.md").exists()
-    fake.review.assert_called_once()
+    rwf.assert_called_once()
 
 
 def test_runner_fails_closed_on_unparseable_with_stray_decision(tmp_path) -> None:
@@ -200,13 +208,16 @@ def test_runner_fails_closed_on_unparseable_with_stray_decision(tmp_path) -> Non
     from phase_runners import plan_review
 
     fake = MagicMock()
-    fake.review.return_value = {
-        "decision": "MISSING",
-        "raw": "garbage output\nREVIEW_DECISION: APPROVED",
-        "parse_status": "unparseable",
-    }
     with (
         patch("phase_runners.plan_review.get_reviewer_adapter", return_value=fake),
+        patch(
+            "phase_runners.plan_review.review_with_fallback",
+            return_value={
+                "decision": "MISSING",
+                "raw": "garbage output\nREVIEW_DECISION: APPROVED",
+                "parse_status": "unparseable",
+            },
+        ),
         patch("phase_runners.plan_review.compute_repo_diff", return_value=""),
         patch("phase_runners.plan_review.repo_root", return_value=tmp_path),
     ):
