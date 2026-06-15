@@ -59,20 +59,29 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             feedback = f"reviewer returned parse_status={result['parse_status']}\n\n{review_text[-2000:]}"
             return PhaseResult(status="error", feedback=feedback, log=review_text, diff=diff)
         decision = result["decision"]
+        fallback_audit = result.get("fallback_audit")  # structured provenance, not text
     else:
         review_text = read_text_if_exists(review_path)
         if review_text is None:
             feedback = f"plan_review.md was not produced at {review_path}"
             return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
         decision = parse_review_decision(review_text)
+        fallback_audit = None
+
+    def _emit(status: str, feedback: str) -> PhaseResult:
+        res = PhaseResult(status=status, feedback=feedback, log=review_text, diff=diff)
+        if fallback_audit:
+            res["fallback_audit"] = fallback_audit
+        return res
+
     if decision == "APPROVED":
-        return PhaseResult(status="approved", feedback="", log=review_text, diff=diff)
+        return _emit("approved", "")
     if decision == "CHANGES_REQUESTED":
-        return PhaseResult(status="changes_requested", feedback=review_text, log=review_text, diff=diff)
+        return _emit("changes_requested", review_text)
     if decision == "RESCUE_REQUIRED":
-        return PhaseResult(status="rescue_required", feedback=review_text, log=review_text, diff=diff)
+        return _emit("rescue_required", review_text)
     if decision == "ASK_USER":
-        return PhaseResult(status="ask_user", feedback=review_text, log=review_text, diff=diff)
+        return _emit("ask_user", review_text)
 
     feedback = (
         "plan_review.md is missing a final valid `REVIEW_DECISION:` line.\n"

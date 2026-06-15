@@ -257,14 +257,18 @@ def test_successful_fallback_records_state_audit(monkeypatch, tmp_path):
     task_dir = _task(tmp_path)
     monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
-    fallback_log = (
-        f"{orch.FALLBACK_AUDIT_MARKER} primary reviewer 'codex' failed. Fell back to 'claude'.\n\n"
-        "PR-009 severity:low status:open nit\nREVIEW_DECISION: CHANGES_REQUESTED"
-    )
+    body = "PR-009 severity:low status:open nit\nREVIEW_DECISION: CHANGES_REQUESTED"
     monkeypatch.setitem(
         orch.PHASE_RUNNERS,
         "plan_review",
-        lambda td, st: {"status": "changes_requested", "feedback": fallback_log, "log": fallback_log, "diff": ""},
+        # the runner carries STRUCTURED fallback provenance, not an in-band marker
+        lambda td, st: {
+            "status": "changes_requested",
+            "feedback": body,
+            "log": body,
+            "diff": "",
+            "fallback_audit": "primary reviewer 'codex' failed. Fell back to 'claude'.",
+        },
     )
     # CHANGES_REQUESTED backtracks to plan_outcome; halt there (no real subprocess).
     monkeypatch.setitem(
@@ -275,4 +279,31 @@ def test_successful_fallback_records_state_audit(monkeypatch, tmp_path):
 
     st = json.loads((task_dir / "state.json").read_text())
     audit = st.get("review_audit", [])
-    assert any(a.get("phase") == "plan_review" and orch.FALLBACK_AUDIT_MARKER in a.get("reason", "") for a in audit)
+    assert any(a.get("phase") == "plan_review" and "Fell back" in a.get("reason", "") for a in audit)
+
+
+def test_genuine_review_text_cannot_spoof_fallback_audit(monkeypatch, tmp_path):
+    """A real (non-fallback) review whose BODY happens to start with the fallback
+    marker text must NOT create a state audit entry — provenance is the structured
+    fallback_audit field, never in-band review text (#37 review PR-002)."""
+    orch = _load_orchestrator()
+    task_dir = _task(tmp_path)
+    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
+    spoof = "[redteam fallback] not really\nREVIEW_DECISION: APPROVED"  # no fallback_audit field
+    monkeypatch.setitem(
+        orch.PHASE_RUNNERS,
+        "plan_review",
+        lambda td, st: {"status": "approved", "feedback": "", "log": spoof, "diff": ""},
+    )
+    # approved plan_review snapshots verification (no outcome.md here → backtracks to
+    # plan_outcome) or advances; stub both downstream phases so no real subprocess runs.
+    for ph in ("plan_outcome", "implement"):
+        monkeypatch.setitem(
+            orch.PHASE_RUNNERS, ph, lambda td, st: {"status": "ask_user", "feedback": "", "log": "", "diff": ""}
+        )
+
+    orch.process_task(task_dir)
+
+    st = json.loads((task_dir / "state.json").read_text())
+    assert st.get("review_audit", []) == []  # spoofed marker did not create an audit entry

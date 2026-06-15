@@ -48,7 +48,6 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     validate_verification_commands,
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
-    FALLBACK_AUDIT_MARKER,
     MANUAL_REQUIRED,
     get_reviewer_adapter,
     get_worker_adapter,
@@ -924,11 +923,12 @@ def process_task(task_dir: Path) -> TaskOutcome:
         # A decision that came from an AUTOMATIC fallback reviewer records the audit
         # trail in state too (it is also durable in the persisted review artifact),
         # so the machine-readable trail covers automatic-fallback approvals, not
-        # only the manual-required blocks (#37).
-        if result["status"] in {"approved", "changes_requested", "rescue_required"} and result["log"].startswith(
-            FALLBACK_AUDIT_MARKER
-        ):
-            state.setdefault("review_audit", []).append({"phase": phase, "reason": result["log"].splitlines()[0]})
+        # only the manual-required blocks. Driven by the STRUCTURED fallback_audit
+        # provenance field (set only by the engine), never by in-band review text,
+        # so a reviewer can't spoof an audit entry (#37 review PR-002).
+        fallback_audit = result.get("fallback_audit")
+        if result["status"] in {"approved", "changes_requested", "rescue_required"} and fallback_audit:
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": fallback_audit})
 
         # Only a result carrying a VALID parsed review decision may seed
         # review_items — never a failed/manual body (which can contain PR-/IR-

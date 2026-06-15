@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 # Default per-phase timeout in seconds. Halved from the original 1800s. With
@@ -50,6 +50,10 @@ class PhaseResult(TypedDict):
     feedback: str
     log: str
     diff: str
+    # Structured provenance: set ONLY by the engine (review_with_fallback → runner)
+    # when an automatic fallback produced this decision. Trusted for the audit
+    # trail so reviewer-controlled text can't spoof it (#37 review PR-002).
+    fallback_audit: NotRequired[str]
 
 
 class ClaudeRunResult(TypedDict):

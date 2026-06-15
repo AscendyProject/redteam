@@ -177,10 +177,14 @@ def review_with_fallback(
 
     fb_result = fb_adapter.review(role=role, prompt=prompt, cwd=cwd, target=target)
     if _is_valid_result(fb_result):
+        audit_line = f"{audit} Fell back to '{fb}'."
         return {
             "decision": fb_result["decision"],
-            "raw": f"{FALLBACK_AUDIT_MARKER} {audit} Fell back to '{fb}'.\n\n{fb_result['raw']}",
+            # The marker stays in raw for a HUMAN reading the persisted artifact; the
+            # engine trusts the structured fallback_audit field, not this text.
+            "raw": f"{FALLBACK_AUDIT_MARKER} {audit_line}\n\n{fb_result['raw']}",
             "parse_status": "ok",
+            "fallback_audit": audit_line,
         }
     return _manual_required(
         f"{audit} Fallback '{fb}' also failed (parse_status={fb_result['parse_status']}) — manual review required.\n\n{fb_result['raw'][-2000:]}"
