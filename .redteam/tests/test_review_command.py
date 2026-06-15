@@ -32,9 +32,6 @@ def _load_orchestrator_module():
 
 def _fake_adapter(decision: str, parse_status: str = "ok", raw: str | None = None) -> MagicMock:
     fake = MagicMock()
-    # Name the reviewer "codex" so the cross-provider guard sees a real string
-    # (the shipped default: codex reviewer / claude worker = cross-provider).
-    fake.name = "codex"
     fake.review.return_value = {
         "decision": decision,
         "raw": raw if raw is not None else f"IR-001 ...\nREVIEW_DECISION: {decision}",
@@ -93,15 +90,14 @@ def test_review_refuses_same_provider_self_review(monkeypatch, tmp_path, capsys)
     """Fail-closed cross-provider guard: when the configured reviewer collapses to
     the worker's own provider, `review` must refuse (exit 2) WITHOUT running the
     reviewer — a standalone review can't become a hole that silently self-reviews.
-    The worker adapter is named "claude-code" while the claude reviewer is named
-    "claude"; the guard must still see these as the same provider family."""
+    Provider resolution goes through the shared worker_provider/reviewer_provider
+    helpers (the same source of truth as the in-pipeline guard)."""
     orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
     reviewer = MagicMock()
-    reviewer.name = "claude"
-    worker = MagicMock()
-    worker.name = "claude-code"  # the Claude worker's name differs from the reviewer's
     monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: reviewer)
-    monkeypatch.setattr(orch, "get_worker_adapter", lambda state: worker)
+    monkeypatch.setattr(orch, "worker_provider", lambda state: "claude")
+    monkeypatch.setattr(orch, "reviewer_provider", lambda state: "claude")  # collapse
 
     rc = orch.cmd_review(repo=tmp_path)
 
@@ -109,6 +105,29 @@ def test_review_refuses_same_provider_self_review(monkeypatch, tmp_path, capsys)
     err = capsys.readouterr().err
     assert "self-review" in err  # actionable, names the collapse
     reviewer.review.assert_not_called()  # refused before the reviewer ran
+
+
+def test_review_fails_closed_on_bad_config(monkeypatch, tmp_path, capsys) -> None:
+    """#40: a malformed/unreadable .redteam/config.toml must exit 2 with guidance
+    (fail-closed), not raise a traceback (exit 1), and never resolve/run a reviewer."""
+    orch = _load_orchestrator_module()
+    called = {"reviewer": False}
+
+    def _boom(rr):
+        raise ValueError("unknown key 'verfy_command' in [project]")
+
+    def _reviewer(state):
+        called["reviewer"] = True
+        return MagicMock()
+
+    monkeypatch.setattr(orch, "load_config", _boom)
+    monkeypatch.setattr(orch, "get_reviewer_adapter", _reviewer)
+
+    rc = orch.cmd_review(repo=tmp_path)
+
+    assert rc == 2
+    assert "config" in capsys.readouterr().err.lower()
+    assert called["reviewer"] is False  # bailed before resolving the reviewer
 
 
 def test_review_dispatched_by_main_without_batch(monkeypatch) -> None:

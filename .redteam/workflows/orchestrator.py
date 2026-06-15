@@ -49,7 +49,6 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
     get_reviewer_adapter,
-    get_worker_adapter,
     reviewer_provider,
     worker_provider,
 )
@@ -1325,20 +1324,6 @@ def _standalone_review_prompt(cfg: Any) -> str:
     )
 
 
-def _provider_family(adapter_name: str) -> str:
-    """Collapse an adapter's `name` to its provider FAMILY ("claude"/"codex").
-
-    Reviewer adapters are already named by family ("claude"/"codex"), but the
-    Claude *worker* adapter is named "claude-code" — so a raw name comparison
-    would read a claude worker + claude reviewer as cross-provider when it is in
-    fact self-review. Normalizing both to the family is what makes the guard
-    below correct. (This mirrors the worker_provider/reviewer_provider resolvers
-    introduced for the in-pipeline guard; once that lands on the same branch the
-    two should converge on one helper.)
-    """
-    return "claude" if adapter_name.startswith("claude") else adapter_name
-
-
 def cmd_review(repo: Path | None = None) -> int:
     """Run the configured reviewer — fail-closed if it would collapse to the
     worker's own provider — over the current branch diff, read-only, with no
@@ -1355,7 +1340,18 @@ def cmd_review(repo: Path | None = None) -> int:
     same model that wrote the code review it.
     """
     rr = repo or repo_root()
-    cfg = load_config(rr)
+    # Fail closed (exit 2) on a malformed/unreadable config rather than raising a
+    # traceback (exit 1) — consistent with the rest of the command's fail-closed
+    # contract. tomllib.TOMLDecodeError is a ValueError subclass, so this also
+    # covers a syntactically broken config.toml.
+    try:
+        cfg = load_config(rr)
+    except (OSError, ValueError) as exc:
+        print(
+            f"error: could not load .redteam/config.toml ({exc}). Fix the config, then re-run `review`.",
+            file=sys.stderr,
+        )
+        return 2
     adapter = get_reviewer_adapter({})  # {} → inherits config default reviewer
     if adapter is None:
         print(
@@ -1368,15 +1364,17 @@ def cmd_review(repo: Path | None = None) -> int:
     # Fail-closed adversarial-pairing guard: refuse to "review" with the same
     # provider that the harness is configured to write with — that is self-review
     # and defeats the point of the harness, exactly what the in-pipeline guard
-    # prevents. The worker resolver always returns an adapter, so a family match
-    # is a genuine collapse.
-    worker_family = _provider_family(get_worker_adapter({}).name)
-    reviewer_family = _provider_family(adapter.name)
-    if reviewer_family == worker_family:
+    # prevents. Resolve providers through the SAME worker_provider/reviewer_provider
+    # helpers the in-pipeline guard uses (single source of truth — no second
+    # provider-resolution path to drift). adapter is non-None here, so the reviewer
+    # resolves to a real provider; a match with the worker provider is a collapse.
+    wp = worker_provider({})
+    rp = reviewer_provider({})
+    if rp == wp:
         print(
             f"error: standalone review would be self-review — the configured reviewer and the "
-            f"worker both resolve to the '{worker_family}' provider, so the code would be reviewed "
-            f"by the same model that wrote it. Point .redteam/config.toml [models].reviewer at a "
+            f"worker both resolve to the '{wp}' provider, so the code would be reviewed by the "
+            f"same model that wrote it. Point .redteam/config.toml [models].reviewer at a "
             f'different provider than the implementer (e.g. reviewer="codex" with a claude-* '
             f'implementer), or set reviewer="human" for a manual review.',
             file=sys.stderr,
