@@ -275,3 +275,16 @@ def test_batches_gitignore_merge_is_idempotent(tmp_path: Path) -> None:
     install_mod.install(tmp_path, overwrite=True, dry=False)
     text = (tmp_path / ".redteam/batches/.gitignore").read_text(encoding="utf-8")
     assert text.count("**/progress.md") == 1
+
+
+def test_batches_gitignore_non_utf8_is_skipped_not_clobbered(tmp_path: Path) -> None:
+    """#49 round-3 IR-003: a non-UTF-8 consumer .gitignore must be skipped with a
+    warning (fail-safe), not traceback the installer or get clobbered."""
+    batches = tmp_path / ".redteam/batches"
+    batches.mkdir(parents=True)
+    raw = b"\xff\xfe# latin-1 rule \xe9\n"  # invalid UTF-8
+    (batches / ".gitignore").write_bytes(raw)
+
+    install_mod.install(tmp_path, overwrite=False, dry=False)  # must not raise
+
+    assert (batches / ".gitignore").read_bytes() == raw  # untouched, not clobbered

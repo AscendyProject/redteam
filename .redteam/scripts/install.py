@@ -269,7 +269,10 @@ def _seed_batches_gitignore(target: Path, dry: bool) -> None:
     if dst.exists():
         try:
             existing = dst.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError covers UnicodeDecodeError from a non-UTF-8 consumer file —
+            # skip with guidance rather than tracebacking, and never clobber it
+            # (mirrors the settings.json deny-merge's fail-safe).
             print(f"WARN     {BATCHES_GITIGNORE_REL} unreadable — skipped progress.md ignore ({exc}).", file=sys.stderr)
             return
         if any(line.strip() == BATCHES_GITIGNORE_RULE for line in existing.splitlines()):
