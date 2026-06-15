@@ -207,9 +207,16 @@ def _write_progress(task_dir: Path, state: dict[str, Any]) -> None:
         open_items = [i for i in items if isinstance(i, dict) and i.get("status") == "open"]
         if open_items:
             lines.append(f"- open review items: {len(open_items)}")
-            summary = str(open_items[0].get("summary") or "").strip()
-            if summary:
-                lines.append(f"  - latest: {summary[:200]}")
+            # Render ONLY the regex-extracted structured fields (id/severity/status),
+            # NEVER the free-form `summary` — that is the raw reviewer line and could
+            # carry a secret a reviewer quoted from a diff/stderr. progress.md is a
+            # convenience mirror, not the audit trail (the full item stays in
+            # state.json / the review artifact). (#49 review PR-001.)
+            latest = open_items[0]
+            lines.append(
+                f"  - latest: {latest.get('id') or '?'} "
+                f"severity:{latest.get('severity') or '?'} status:{latest.get('status') or '?'}"
+            )
     action = g("next_action")
     if isinstance(action, dict) and (action.get("who") or action.get("what")):
         lines.append(f"- next action ({action.get('who')}): {str(action.get('what') or '')[:300]}")

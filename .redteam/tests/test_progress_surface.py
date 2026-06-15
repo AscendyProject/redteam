@@ -47,6 +47,29 @@ def test_progress_uses_failure_reason_not_log(tmp_path):
     assert "gho_SECRETSECRET" not in text and "remote token" not in text  # the log is NOT
 
 
+def test_progress_renders_review_item_fields_not_raw_summary(tmp_path):
+    """#49 review PR-001: a review item's free-form `summary` is the raw reviewer
+    line and can quote a secret. progress.md must render only the regex-extracted
+    id/severity/status, NEVER the summary text."""
+    orch = _load_orchestrator()
+    state = {
+        "task_id": "t1",
+        "phase": "review_code",
+        "review_items": [
+            {
+                "id": "IR-001",
+                "severity": "high",
+                "status": "open",
+                "summary": "IR-001 severity:high status:open token sk-SECRETLEAK123 exposed in diff",
+            }
+        ],
+    }
+    orch._write_progress(tmp_path, state)
+    text = (tmp_path / "progress.md").read_text(encoding="utf-8")
+    assert "sk-SECRETLEAK123" not in text  # the raw summary (and any quoted secret) is NOT rendered
+    assert "IR-001" in text and "severity:high" in text and "status:open" in text  # structured fields are
+
+
 def test_save_state_persists_even_if_progress_render_fails(monkeypatch, tmp_path):
     orch = _load_orchestrator()
 
