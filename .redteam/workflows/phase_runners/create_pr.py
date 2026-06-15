@@ -87,16 +87,20 @@ def _preflight_pr_auth(cwd: Path) -> str | None:
             "cannot resolve the PR remote. Re-run create_pr."
         )
     if remote.returncode != 0:
+        # Do NOT echo git stderr — it can carry a credentialed remote URL / helper
+        # output; truncation is not sanitization (#51 review PR-001, IR-002).
         return (
             "could not resolve the `origin` remote for PR creation "
-            f"(`git remote get-url --push origin` failed: {(remote.stderr or '').strip()[:200]}). "
+            f"(`git remote get-url --push origin` failed, exit {remote.returncode}). "
             "Add an `origin` remote, then re-run create_pr."
         )
     host = _remote_host(remote.stdout or "")
     if not host:
+        # Do NOT echo the raw push URL — it can embed credentials
+        # (https://user:token@host/...). Report only that the host is unparseable.
         return (
-            f"could not parse a host from the origin push URL {(remote.stdout or '').strip()!r} "
-            "— cannot verify PR auth. Fix the remote, then re-run create_pr."
+            "could not parse a host from the origin push URL — cannot verify PR auth. "
+            "Fix the remote, then re-run create_pr."
         )
     try:
         auth = _run(["gh", "auth", "status", "--hostname", host], _GH_AUTH_TIMEOUT_SEC)

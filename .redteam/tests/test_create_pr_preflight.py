@@ -117,6 +117,31 @@ def test_unparseable_remote_fails_actionable(monkeypatch, tmp_path):
     assert calls["invoked"] is False
 
 
+def test_preflight_does_not_leak_secrets_in_errors(monkeypatch, tmp_path):
+    """#51 review PR-001 (HIGH, IR-002): a preflight failure must not echo git
+    stderr or the raw push URL into feedback/state — both can carry a credentialed
+    remote (https://user:token@host). Truncation is not sanitization."""
+    create_pr = _load_create_pr()
+
+    # case A: `git remote get-url --push origin` fails with a token in stderr
+    def fake_a(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="fatal: https://x:ghp_SECRETTOKEN@host/o/r.git denied")
+
+    monkeypatch.setattr(create_pr.subprocess, "run", fake_a)
+    err = create_pr._preflight_pr_auth(Path("/repo"))
+    assert err is not None and "ghp_SECRETTOKEN" not in err
+
+    # case B: an unparseable push URL that itself embeds a token
+    def fake_b(argv, **kwargs):
+        if argv[:2] == ["git", "remote"]:
+            return SimpleNamespace(returncode=0, stdout="ghp_SECRETTOKEN-not-a-url", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(create_pr.subprocess, "run", fake_b)
+    err = create_pr._preflight_pr_auth(Path("/repo"))
+    assert err is not None and "ghp_SECRETTOKEN" not in err
+
+
 def test_preflight_checks_push_host_not_fetch_host(monkeypatch, tmp_path):
     """IR-003: pin that the preflight authenticates the PUSH target host. The fetch
     URL and push URL resolve to different hosts here; the guard must check the push
