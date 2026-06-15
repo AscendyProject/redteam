@@ -151,11 +151,17 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     the implementer changed OUTSIDE that set stays in the working tree — making the
     committed range `git diff <base>...HEAD` the reviewer inspects STALE relative to
     the tree verification just passed on (verify ran on the dirty worktree). Returns
-    the uncommitted *source/test* files: tracked-but-uncommitted modifications plus
-    untracked, non-ignored new files, restricted to the project's source_dirs /
-    test_dir. Restricting to those roots means harness artifacts (impl_diff.patch,
-    verification.log) and gitignored files (e.g. __pycache__, *.pyc) never trip it —
-    only real code/test changes that would diverge the committed range from review.
+    the uncommitted *source/test* files across all three states that would diverge
+    the committed range from the worktree verification ran on:
+      - staged-but-uncommitted (`git diff --cached`): the commit did not land them
+        (a `git commit` failure / hook); `_commit_agent_pair_diff` ignores the
+        commit returncode, so this is reachable and MUST be caught here;
+      - tracked-but-unstaged modifications (`git diff`);
+      - untracked, non-ignored new files (`git ls-files --others`).
+    Restricted to the project's source_dirs / test_dir, so harness artifacts
+    (impl_diff.patch, verification.log) and gitignored files (e.g. __pycache__,
+    *.pyc) never trip it — only real code/test changes. After a SUCCESSFUL commit
+    the index equals HEAD, so the `--cached` probe is empty (no false positive).
     """
 
     def _names(args: list[str]) -> list[str]:
@@ -169,7 +175,11 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
         )
         return [n for n in (proc.stdout or "").split("\0") if n]
 
-    candidates = _names(["diff", "--name-only", "-z"]) + _names(["ls-files", "--others", "--exclude-standard", "-z"])
+    candidates = (
+        _names(["diff", "--cached", "--name-only", "-z"])
+        + _names(["diff", "--name-only", "-z"])
+        + _names(["ls-files", "--others", "--exclude-standard", "-z"])
+    )
     roots = [r if r.endswith("/") else r + "/" for r in (*proj.source_dirs, proj.test_dir)]
     stray = {path for path in candidates if any(path.replace("\\", "/").startswith(root) for root in roots)}
     return sorted(stray)

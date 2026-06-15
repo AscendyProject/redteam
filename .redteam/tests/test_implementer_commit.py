@@ -129,6 +129,56 @@ def test_agent_pair_fails_closed_on_uncommitted_source_after_commit(monkeypatch,
     assert "stale" in result["feedback"].lower()
 
 
+def test_agent_pair_fails_closed_on_staged_uncommitted_after_failed_commit(monkeypatch, tmp_path):
+    """#50 round-2 (IR-001): _commit_agent_pair_diff ignores git commit's returncode,
+    so a failed commit / hook can leave changes STAGED but not in HEAD — the committed
+    range is still stale. The clean-check must catch staged-but-uncommitted source/test
+    files (git diff --cached), not only unstaged/untracked."""
+    implement = _load_implement_module()
+    task_dir = tmp_path / "batch" / "tasks" / "task-001-demo"
+    task_dir.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    monkeypatch.setattr(implement, "repo_root", lambda: repo)
+    monkeypatch.setattr(
+        implement,
+        "project_config",
+        lambda: SimpleNamespace(source_dirs=["app/"], test_dir="tests/", context_file="docs/ctx.md"),
+    )
+    monkeypatch.setattr(
+        implement,
+        "get_worker_adapter",
+        lambda state: SimpleNamespace(invoke=lambda **kwargs: {"returncode": 0, "stdout": "done", "stderr": ""}),
+    )
+    monkeypatch.setattr(
+        implement,
+        "_run_verification_commands",
+        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
+    )
+    monkeypatch.setattr(implement, "compute_branch_diff", lambda cwd: "diff --git a/app/example.py b/app/example.py\n")
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "diff", "--cached", "--quiet"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")  # commit helper: staged exists
+        if argv[:4] == ["git", "diff", "--cached", "--name-only"]:
+            # staged but not landed in HEAD (commit failed): clean-check must see this
+            return SimpleNamespace(returncode=0, stdout="app/staged_leftover.py\0", stderr="")
+        if argv[:3] == ["git", "diff", "--name-only"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")  # nothing unstaged
+        if argv[:2] == ["git", "ls-files"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")  # nothing untracked
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(implement.subprocess, "run", fake_run)
+
+    state = {"task_id": "task-001-demo", "mode": "agent-pair", "verification": {"commands": []}}
+    result = implement._run_agent_pair(task_dir, state)
+
+    assert result["status"] == "error"  # fail closed on staged-but-uncommitted
+    assert "app/staged_leftover.py" in result["feedback"]
+
+
 def test_uncommitted_scope_files_ignores_artifacts_outside_source_dirs(monkeypatch, tmp_path):
     """The clean-check is restricted to source_dirs/test_dir, so harness artifacts and
     files outside those roots (e.g. impl_diff.patch, README.md) never trip it."""
