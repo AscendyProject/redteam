@@ -56,6 +56,12 @@ class ModelsConfig:
     implementer: str = "claude-sonnet-4-6"
     reviewer: str = "codex"
     rescue: str = "codex"
+    # Fallback reviewer when the primary reviewer fails on INFRA (missing CLI,
+    # auth, timeout, unparseable) — never on a valid CHANGES_REQUESTED (#37). A
+    # provider key (must differ from the worker provider, or its APPROVED won't be
+    # trusted) or "manual"/"human" to block for a pasted review. Default "manual"
+    # = fail-closed (an infra failure never becomes an automatic approval).
+    reviewer_fallback: str = "manual"
 
 
 GATE_NAMES = ("outcome", "pr", "rescue")  # the human gates a tier may opt into
@@ -149,9 +155,20 @@ def _validate(cfg: RedteamConfig) -> None:
     m = cfg.models
     for name in ("planner", "implementer", "reviewer", "rescue"):
         _require_nonempty_str("models", name, getattr(m, name))
+    _validate_reviewer_fallback("models.reviewer_fallback", m.reviewer_fallback)
 
 
 _KNOWN_ROLES = frozenset(f.name for f in dataclasses.fields(ModelsConfig))
+
+# reviewer_fallback is POLICY, not a model name: it must be a known reviewer
+# provider or a manual sentinel. Validated loudly (a typo fails at load) in BOTH
+# the top-level [models] block and any [tiers.N.models] override (#37).
+_ALLOWED_REVIEWER_FALLBACK = ("codex", "claude", "manual", "human")
+
+
+def _validate_reviewer_fallback(where: str, value: str) -> None:
+    if value not in _ALLOWED_REVIEWER_FALLBACK:
+        raise ValueError(f"{where} must be one of {list(_ALLOWED_REVIEWER_FALLBACK)}, got {value!r}.")
 
 
 def _parse_tiers(raw: dict) -> dict[int, TierProfile]:
@@ -195,6 +212,10 @@ def _parse_tiers(raw: dict) -> dict[int, TierProfile]:
         for role, model in models.items():
             if not isinstance(model, str) or not model:
                 raise ValueError(f"[tiers.{tier}].models.{role} must be a non-empty string, got {model!r}.")
+            # reviewer_fallback is policy, not a model name — same loud validation
+            # as the top-level block, so a tier-override typo fails at load too (#37).
+            if role == "reviewer_fallback":
+                _validate_reviewer_fallback(f"[tiers.{tier}].models.reviewer_fallback", model)
         tiers[tier] = TierProfile(review=review, gates=tuple(gates), models=dict(models))
     return tiers
 

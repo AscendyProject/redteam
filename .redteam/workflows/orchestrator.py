@@ -48,8 +48,10 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     validate_verification_commands,
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
+    MANUAL_REQUIRED,
     get_reviewer_adapter,
     get_worker_adapter,
+    review_with_fallback,
     reviewer_provider,
     worker_provider,
 )
@@ -817,12 +819,20 @@ def process_task(task_dir: Path) -> TaskOutcome:
             save_state(task_dir, state)
             continue
 
-        if _mode(state) == "agent-pair" and phase in MANUAL_PHASE_SENTINELS:
+        # A phase flagged manual_required (its reviewer's fallback ladder exhausted
+        # to manual, #37) must engage the manual sentinel wait REGARDLESS of mode —
+        # e.g. a tier-routed tdd plan_review still uses the headless reviewer, so on
+        # resume it must wait for the pasted review, not run the failing primary.
+        phase_manual_required = phase in state.get("manual_review_required", {})
+        if (_mode(state) == "agent-pair" or phase_manual_required) and phase in MANUAL_PHASE_SENTINELS:
             # A configured headless reviewer adapter produces the review
             # synchronously inside the runner, so the manual sentinel wait is
-            # skipped for the reviewer phases. rescue is a mutating flow (not a
-            # read-only reviewer adapter) and stays manual.
-            headless_reviewer = phase in REVIEWER_PHASES and get_reviewer_adapter(state) is not None
+            # skipped for the reviewer phases — UNLESS this phase was flagged
+            # manual_required, in which case we force the manual wait. rescue is a
+            # mutating flow (not a read-only reviewer adapter) and stays manual.
+            headless_reviewer = (
+                phase in REVIEWER_PHASES and get_reviewer_adapter(state) is not None and not phase_manual_required
+            )
             if not headless_reviewer and not _manual_phase_ready(task_dir, phase):
                 state["phase"] = phase
                 _set_next_action_for_manual_phase(task_dir, state, phase)
@@ -890,7 +900,44 @@ def process_task(task_dir: Path) -> TaskOutcome:
                 return "deferred"
 
         result = runner(task_dir, state)
-        if _mode(state) == "agent-pair" and phase in {"plan_review", "review_code"}:
+
+        # A reviewer that exhausted its fallback ladder to manual (#37 step 4):
+        # record the audit and BLOCK at this same review phase for a pasted review.
+        # Handled BEFORE _sync_review_items and before any retry/error/decision
+        # accounting — an infra-failed/manual audit body is never a review and must
+        # never seed review_items, count a retry, defer, or approve.
+        if result["status"] == "manual_required":
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": result["feedback"][:4000]})
+            state.setdefault("manual_review_required", {})[phase] = "reviewer fallback exhausted to manual"
+            state["phase"] = phase
+            _set_next_action_for_manual_phase(task_dir, state, phase)
+            save_state(task_dir, state)
+            return "blocked_on_human_gate"
+
+        # A previously-flagged phase has now produced a real decision (the manual
+        # review was consumed) — clear the flag so a later fresh re-entry retries
+        # the headless primary; a still-broken primary simply re-flags (#37).
+        if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"}:
+            state.get("manual_review_required", {}).pop(phase, None)
+
+        # A decision that came from an AUTOMATIC fallback reviewer records the audit
+        # trail in state too (it is also durable in the persisted review artifact),
+        # so the machine-readable trail covers automatic-fallback approvals, not
+        # only the manual-required blocks. Driven by the STRUCTURED fallback_audit
+        # provenance field (set only by the engine), never by in-band review text,
+        # so a reviewer can't spoof an audit entry (#37 review PR-002).
+        fallback_audit = result.get("fallback_audit")
+        if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"} and fallback_audit:
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": fallback_audit})
+
+        # Only a result carrying a VALID parsed review decision may seed
+        # review_items — never a failed/manual body (which can contain PR-/IR-
+        # looking lines).
+        if (
+            result["status"] in {"approved", "changes_requested", "rescue_required"}
+            and _mode(state) == "agent-pair"
+            and phase in {"plan_review", "review_code"}
+        ):
             _sync_review_items(state, phase, result["log"])
 
         retries_map: dict[str, int] = state.setdefault("retries", {})
@@ -1382,7 +1429,8 @@ def cmd_review(repo: Path | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    result = adapter.review(
+    result = review_with_fallback(
+        {},
         role="review_code",
         prompt=_standalone_review_prompt(cfg),
         cwd=rr,
@@ -1396,6 +1444,9 @@ def cmd_review(repo: Path | None = None) -> int:
     except OSError:
         saved = ""
     print(raw)
+    if result["parse_status"] == MANUAL_REQUIRED:
+        print(f"\n[redteam] reviewer fallback exhausted — manual review required{saved}.", file=sys.stderr)
+        return 2
     if result["parse_status"] != "ok":
         print(f"\n[redteam] reviewer failed (parse_status={result['parse_status']}).", file=sys.stderr)
         return 2

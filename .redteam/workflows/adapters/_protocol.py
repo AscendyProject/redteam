@@ -23,7 +23,7 @@ on a non-zero/timeout/unparseable result.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Protocol, TypedDict
+from typing import NotRequired, Optional, Protocol, TypedDict
 
 from phase_runners._base import ReviewDecision
 
@@ -42,6 +42,10 @@ class ReviewerCapabilities(TypedDict):
     native_diff_review: bool
     # Hard timeout; the adapter MUST fail closed (parse_status="error") on it.
     timeout_sec: int
+    # The adapter runs the reviewer with NO write capability (read-only sandbox /
+    # plan permission mode). The engine requires this True before trusting an
+    # AUTOMATIC fallback APPROVED from this adapter (#37 adapter trust boundary).
+    read_only_enforced: bool
 
 
 class ReviewResult(TypedDict):
@@ -51,6 +55,10 @@ class ReviewResult(TypedDict):
     raw: str
     # "ok" | "unparseable" | "error" — the core fails closed on anything but "ok".
     parse_status: str
+    # Structured fallback provenance: set ONLY by review_with_fallback when an
+    # automatic fallback produced this result. The engine trusts THIS (not any
+    # in-band marker in `raw`) for the audit trail (#37 review PR-002).
+    fallback_audit: NotRequired[str]
 
 
 class ReviewerAdapter(Protocol):

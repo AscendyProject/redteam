@@ -43,11 +43,22 @@ def _fake_adapter(decision: str, parse_status: str = "ok", raw: str | None = Non
     return fake
 
 
+def _result(decision: str, parse_status: str = "ok", raw: str | None = None) -> dict:
+    return {
+        "decision": decision,
+        "raw": raw if raw is not None else f"IR-001 ...\nREVIEW_DECISION: {decision}",
+        "parse_status": parse_status,
+    }
+
+
 def test_review_approved_returns_zero_and_saves(monkeypatch, tmp_path, capsys) -> None:
     orch = _load_orchestrator_module()
     (tmp_path / ".redteam").mkdir()
-    fake = _fake_adapter("APPROVED")
-    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: fake)
+    # get_reviewer_adapter is still used for the None check + self-review guard;
+    # the actual review now flows through the fallback ladder (review_with_fallback).
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    rwf = MagicMock(return_value=_result("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", rwf)
 
     rc = orch.cmd_review(repo=tmp_path)
 
@@ -56,8 +67,8 @@ def test_review_approved_returns_zero_and_saves(monkeypatch, tmp_path, capsys) -
     assert "REVIEW_DECISION: APPROVED" in out  # full review printed
     saved = (tmp_path / ".redteam" / "last_review.md").read_text(encoding="utf-8")
     assert "REVIEW_DECISION: APPROVED" in saved  # persisted for reference
-    # The adapter was asked for a read-only branch_diff review.
-    _, kwargs = fake.review.call_args
+    # The ladder was asked for a read-only branch_diff review.
+    _, kwargs = rwf.call_args
     assert kwargs["target"] == {"kind": "branch_diff", "base": "main"}
     assert kwargs["role"] == "review_code"
 
@@ -67,16 +78,22 @@ def test_review_changes_requested_returns_one(monkeypatch, tmp_path) -> None:
     orch = _load_orchestrator_module()
     (tmp_path / ".redteam").mkdir()
     monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("CHANGES_REQUESTED"))
+    monkeypatch.setattr(orch, "review_with_fallback", lambda *a, **k: _result("CHANGES_REQUESTED"))
     assert orch.cmd_review(repo=tmp_path) == 1
 
 
 def test_review_failed_reviewer_returns_two(monkeypatch, tmp_path) -> None:
-    """Fail-closed: a reviewer that errored/timed out (parse_status != ok) must
-    exit 2, never be read as an approval even if the raw body says APPROVED."""
+    """Fail-closed: when the reviewer fails infra and the fallback ladder exhausts
+    to manual (parse_status manual_required), `review` exits 2 — never an approval
+    even if a stray body says APPROVED."""
     orch = _load_orchestrator_module()
     (tmp_path / ".redteam").mkdir()
-    fake = _fake_adapter("MISSING", parse_status="error", raw="codex exec timed out\nREVIEW_DECISION: APPROVED")
-    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: fake)
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(
+        orch,
+        "review_with_fallback",
+        lambda *a, **k: _result("MISSING", parse_status=orch.MANUAL_REQUIRED, raw="codex timed out; manual required"),
+    )
     assert orch.cmd_review(repo=tmp_path) == 2
 
 
