@@ -49,8 +49,9 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     validate_verification_commands,
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
+    MANUAL_REQUIRED,
     get_reviewer_adapter,
-    get_worker_adapter,
+    review_with_fallback,
     reviewer_provider,
     worker_provider,
 )
@@ -509,6 +510,28 @@ def _snapshot_verification_commands(task_dir: Path, state: dict[str, Any]) -> bo
     return True
 
 
+def _verification_pinned(state: dict[str, Any]) -> bool:
+    """True only when the FULL plan-time snapshot is present: verify_command (str),
+    verify_allowlist (list), AND the actual verification commands (non-empty
+    list[str]) the post-implement gate runs (#39). A partially-pinned state — e.g.
+    verify_command+allowlist present but `commands` missing/empty — is NOT pinned:
+    implement.py would only discover the missing commands AFTER the implementer
+    mutated the tree (and fail "No verification commands were snapshotted"), which
+    is the exact failure this dispatch-time invariant prevents. So treat it as
+    unpinned and re-snapshot/defer BEFORE the implementer runs."""
+    verification = state.get("verification")
+    if not isinstance(verification, dict):
+        return False
+    commands = verification.get("commands")
+    return (
+        isinstance(verification.get("verify_command"), str)
+        and isinstance(verification.get("verify_allowlist"), list)
+        and isinstance(commands, list)
+        and bool(commands)
+        and all(isinstance(c, str) for c in commands)
+    )
+
+
 REVIEW_ITEM_RE = re.compile(
     r"^(?P<id>(?:PR|IR)-\d{3})\s+severity:(?P<severity>\w+)\s+status:(?P<status>\w+)\b",
     re.IGNORECASE,
@@ -873,12 +896,20 @@ def process_task(task_dir: Path) -> TaskOutcome:
             save_state(task_dir, state)
             continue
 
-        if _mode(state) == "agent-pair" and phase in MANUAL_PHASE_SENTINELS:
+        # A phase flagged manual_required (its reviewer's fallback ladder exhausted
+        # to manual, #37) must engage the manual sentinel wait REGARDLESS of mode —
+        # e.g. a tier-routed tdd plan_review still uses the headless reviewer, so on
+        # resume it must wait for the pasted review, not run the failing primary.
+        phase_manual_required = phase in state.get("manual_review_required", {})
+        if (_mode(state) == "agent-pair" or phase_manual_required) and phase in MANUAL_PHASE_SENTINELS:
             # A configured headless reviewer adapter produces the review
             # synchronously inside the runner, so the manual sentinel wait is
-            # skipped for the reviewer phases. rescue is a mutating flow (not a
-            # read-only reviewer adapter) and stays manual.
-            headless_reviewer = phase in REVIEWER_PHASES and get_reviewer_adapter(state) is not None
+            # skipped for the reviewer phases — UNLESS this phase was flagged
+            # manual_required, in which case we force the manual wait. rescue is a
+            # mutating flow (not a read-only reviewer adapter) and stays manual.
+            headless_reviewer = (
+                phase in REVIEWER_PHASES and get_reviewer_adapter(state) is not None and not phase_manual_required
+            )
             if not headless_reviewer and not _manual_phase_ready(task_dir, phase):
                 state["phase"] = phase
                 _set_next_action_for_manual_phase(task_dir, state, phase)
@@ -920,6 +951,24 @@ def process_task(task_dir: Path) -> TaskOutcome:
             save_state(task_dir, state)
             return "error"
 
+        # Pre-implement snapshot invariant (#39): implement must NEVER run unpinned.
+        # The verify_command + allowlist are normally snapshotted at plan_review /
+        # plan_outcome approval / the ask_user→implement hand-off; this is the single
+        # authoritative backstop for ANY path that reaches implement unpinned
+        # (corrupted/legacy state.json, or a future transition that forgets to
+        # snapshot). "Pinned" requires BOTH fields (see _verification_pinned) so a
+        # partially-pinned state is caught HERE, before the implementer mutates the
+        # tree — not by implement.py's post-invocation guard. On the normal path the
+        # snapshot is already present, so this is a no-op (it never re-pins/clobbers
+        # an existing snapshot, preserving IR-001). If it can't be taken, fail closed.
+        if _mode(state) == "agent-pair" and phase == "implement" and not _verification_pinned(state):
+            if not _snapshot_verification_commands(task_dir, state):
+                state["last_failure_reason"] = "unpinned_verification_snapshot"
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            save_state(task_dir, state)
+
         # Tier downgrade guard (issue #19): the tier was resolved from the paths
         # the task DECLARED. Now that the real diff exists, re-resolve against the
         # actually-changed files just before shipping. If the real diff floors the
@@ -950,7 +999,44 @@ def process_task(task_dir: Path) -> TaskOutcome:
                 return "deferred"
 
         result = runner(task_dir, state)
-        if _mode(state) == "agent-pair" and phase in {"plan_review", "review_code"}:
+
+        # A reviewer that exhausted its fallback ladder to manual (#37 step 4):
+        # record the audit and BLOCK at this same review phase for a pasted review.
+        # Handled BEFORE _sync_review_items and before any retry/error/decision
+        # accounting — an infra-failed/manual audit body is never a review and must
+        # never seed review_items, count a retry, defer, or approve.
+        if result["status"] == "manual_required":
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": result["feedback"][:4000]})
+            state.setdefault("manual_review_required", {})[phase] = "reviewer fallback exhausted to manual"
+            state["phase"] = phase
+            _set_next_action_for_manual_phase(task_dir, state, phase)
+            save_state(task_dir, state)
+            return "blocked_on_human_gate"
+
+        # A previously-flagged phase has now produced a real decision (the manual
+        # review was consumed) — clear the flag so a later fresh re-entry retries
+        # the headless primary; a still-broken primary simply re-flags (#37).
+        if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"}:
+            state.get("manual_review_required", {}).pop(phase, None)
+
+        # A decision that came from an AUTOMATIC fallback reviewer records the audit
+        # trail in state too (it is also durable in the persisted review artifact),
+        # so the machine-readable trail covers automatic-fallback approvals, not
+        # only the manual-required blocks. Driven by the STRUCTURED fallback_audit
+        # provenance field (set only by the engine), never by in-band review text,
+        # so a reviewer can't spoof an audit entry (#37 review PR-002).
+        fallback_audit = result.get("fallback_audit")
+        if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"} and fallback_audit:
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": fallback_audit})
+
+        # Only a result carrying a VALID parsed review decision may seed
+        # review_items — never a failed/manual body (which can contain PR-/IR-
+        # looking lines).
+        if (
+            result["status"] in {"approved", "changes_requested", "rescue_required"}
+            and _mode(state) == "agent-pair"
+            and phase in {"plan_review", "review_code"}
+        ):
             _sync_review_items(state, phase, result["log"])
 
         retries_map: dict[str, int] = state.setdefault("retries", {})
@@ -1385,20 +1471,6 @@ def _standalone_review_prompt(cfg: Any) -> str:
     )
 
 
-def _provider_family(adapter_name: str) -> str:
-    """Collapse an adapter's `name` to its provider FAMILY ("claude"/"codex").
-
-    Reviewer adapters are already named by family ("claude"/"codex"), but the
-    Claude *worker* adapter is named "claude-code" — so a raw name comparison
-    would read a claude worker + claude reviewer as cross-provider when it is in
-    fact self-review. Normalizing both to the family is what makes the guard
-    below correct. (This mirrors the worker_provider/reviewer_provider resolvers
-    introduced for the in-pipeline guard; once that lands on the same branch the
-    two should converge on one helper.)
-    """
-    return "claude" if adapter_name.startswith("claude") else adapter_name
-
-
 def cmd_review(repo: Path | None = None) -> int:
     """Run the configured reviewer — fail-closed if it would collapse to the
     worker's own provider — over the current branch diff, read-only, with no
@@ -1415,7 +1487,18 @@ def cmd_review(repo: Path | None = None) -> int:
     same model that wrote the code review it.
     """
     rr = repo or repo_root()
-    cfg = load_config(rr)
+    # Fail closed (exit 2) on a malformed/unreadable config rather than raising a
+    # traceback (exit 1) — consistent with the rest of the command's fail-closed
+    # contract. tomllib.TOMLDecodeError is a ValueError subclass, so this also
+    # covers a syntactically broken config.toml.
+    try:
+        cfg = load_config(rr)
+    except (OSError, ValueError) as exc:
+        print(
+            f"error: could not load .redteam/config.toml ({exc}). Fix the config, then re-run `review`.",
+            file=sys.stderr,
+        )
+        return 2
     adapter = get_reviewer_adapter({})  # {} → inherits config default reviewer
     if adapter is None:
         print(
@@ -1428,21 +1511,24 @@ def cmd_review(repo: Path | None = None) -> int:
     # Fail-closed adversarial-pairing guard: refuse to "review" with the same
     # provider that the harness is configured to write with — that is self-review
     # and defeats the point of the harness, exactly what the in-pipeline guard
-    # prevents. The worker resolver always returns an adapter, so a family match
-    # is a genuine collapse.
-    worker_family = _provider_family(get_worker_adapter({}).name)
-    reviewer_family = _provider_family(adapter.name)
-    if reviewer_family == worker_family:
+    # prevents. Resolve providers through the SAME worker_provider/reviewer_provider
+    # helpers the in-pipeline guard uses (single source of truth — no second
+    # provider-resolution path to drift). adapter is non-None here, so the reviewer
+    # resolves to a real provider; a match with the worker provider is a collapse.
+    wp = worker_provider({})
+    rp = reviewer_provider({})
+    if rp == wp:
         print(
             f"error: standalone review would be self-review — the configured reviewer and the "
-            f"worker both resolve to the '{worker_family}' provider, so the code would be reviewed "
-            f"by the same model that wrote it. Point .redteam/config.toml [models].reviewer at a "
+            f"worker both resolve to the '{wp}' provider, so the code would be reviewed by the "
+            f"same model that wrote it. Point .redteam/config.toml [models].reviewer at a "
             f'different provider than the implementer (e.g. reviewer="codex" with a claude-* '
             f'implementer), or set reviewer="human" for a manual review.',
             file=sys.stderr,
         )
         return 2
-    result = adapter.review(
+    result = review_with_fallback(
+        {},
         role="review_code",
         prompt=_standalone_review_prompt(cfg),
         cwd=rr,
@@ -1456,6 +1542,9 @@ def cmd_review(repo: Path | None = None) -> int:
     except OSError:
         saved = ""
     print(raw)
+    if result["parse_status"] == MANUAL_REQUIRED:
+        print(f"\n[redteam] reviewer fallback exhausted — manual review required{saved}.", file=sys.stderr)
+        return 2
     if result["parse_status"] != "ok":
         print(f"\n[redteam] reviewer failed (parse_status={result['parse_status']}).", file=sys.stderr)
         return 2
