@@ -117,6 +117,37 @@ def test_unparseable_remote_fails_actionable(monkeypatch, tmp_path):
     assert calls["invoked"] is False
 
 
+def test_preflight_checks_push_host_not_fetch_host(monkeypatch, tmp_path):
+    """IR-003: pin that the preflight authenticates the PUSH target host. The fetch
+    URL and push URL resolve to different hosts here; the guard must check the push
+    host (github.sec.samsung.net), so dropping `--push` (reverting to the fetch URL,
+    github.com) would fail this test."""
+    create_pr = _load_create_pr()
+    seen = {"hostname": None}
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["git", "remote", "get-url"]:
+            if "--push" in argv:
+                return SimpleNamespace(returncode=0, stdout="https://github.sec.samsung.net/bdp/x.git", stderr="")
+            return SimpleNamespace(returncode=0, stdout="https://github.com/o/r.git", stderr="")
+        if argv[:2] == ["gh", "auth"]:
+            seen["hostname"] = argv[argv.index("--hostname") + 1]
+            return SimpleNamespace(returncode=1, stdout="", stderr="")  # unauth → error path
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(create_pr.subprocess, "run", fake_run)
+    monkeypatch.setattr(create_pr, "compute_repo_diff", lambda cwd: "")
+    monkeypatch.setattr(create_pr, "repo_root", lambda: Path("/repo"))
+    calls, get = _worker_spy()
+    monkeypatch.setattr(create_pr, "get_worker_adapter", get)
+
+    result = create_pr.run(tmp_path / "task-001", {})
+
+    assert seen["hostname"] == "github.sec.samsung.net"  # push host, NOT the fetch host github.com
+    assert "github.sec.samsung.net" in result["feedback"]
+    assert calls["invoked"] is False
+
+
 def test_gh_auth_timeout_fails_closed_without_invoking_worker(monkeypatch, tmp_path):
     """IR-001: the preflight must not become the new hang. A `gh auth status` that
     hangs (TimeoutExpired) fails closed fast with guidance — never reaching the
