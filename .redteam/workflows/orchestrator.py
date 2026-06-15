@@ -453,6 +453,20 @@ def _snapshot_verification_commands(task_dir: Path, state: dict[str, Any]) -> bo
     return True
 
 
+def _verification_pinned(state: dict[str, Any]) -> bool:
+    """True only when BOTH the plan-time verify_command (str) and verify_allowlist
+    (list) are snapshotted (#39). A partially-pinned state (e.g. command set but
+    allowlist missing) is NOT pinned — implement.py's own guard would only catch
+    that AFTER the implementer mutated the tree, so the dispatch-time invariant
+    must treat it as unpinned and re-snapshot/defer before the implementer runs."""
+    verification = state.get("verification")
+    if not isinstance(verification, dict):
+        return False
+    return isinstance(verification.get("verify_command"), str) and isinstance(
+        verification.get("verify_allowlist"), list
+    )
+
+
 REVIEW_ITEM_RE = re.compile(
     r"^(?P<id>(?:PR|IR)-\d{3})\s+severity:(?P<severity>\w+)\s+status:(?P<status>\w+)\b",
     re.IGNORECASE,
@@ -859,6 +873,24 @@ def process_task(task_dir: Path) -> TaskOutcome:
             state["next_phase"] = "deferred"
             save_state(task_dir, state)
             return "error"
+
+        # Pre-implement snapshot invariant (#39): implement must NEVER run unpinned.
+        # The verify_command + allowlist are normally snapshotted at plan_review /
+        # plan_outcome approval / the ask_user→implement hand-off; this is the single
+        # authoritative backstop for ANY path that reaches implement unpinned
+        # (corrupted/legacy state.json, or a future transition that forgets to
+        # snapshot). "Pinned" requires BOTH fields (see _verification_pinned) so a
+        # partially-pinned state is caught HERE, before the implementer mutates the
+        # tree — not by implement.py's post-invocation guard. On the normal path the
+        # snapshot is already present, so this is a no-op (it never re-pins/clobbers
+        # an existing snapshot, preserving IR-001). If it can't be taken, fail closed.
+        if _mode(state) == "agent-pair" and phase == "implement" and not _verification_pinned(state):
+            if not _snapshot_verification_commands(task_dir, state):
+                state["last_failure_reason"] = "unpinned_verification_snapshot"
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            save_state(task_dir, state)
 
         # Tier downgrade guard (issue #19): the tier was resolved from the paths
         # the task DECLARED. Now that the real diff exists, re-resolve against the
