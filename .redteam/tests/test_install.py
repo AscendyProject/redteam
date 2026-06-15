@@ -254,12 +254,24 @@ def test_fresh_install_seeds_batches_gitignore(tmp_path: Path) -> None:
     assert (tmp_path / ".redteam/batches/.gitkeep").is_file()
 
 
-def test_batches_gitignore_is_project_owned_and_never_overwritten(tmp_path: Path) -> None:
-    """Seeded once; a consumer's own edits survive --overwrite (project-owned)."""
+def test_existing_batches_gitignore_gets_progress_rule_added(tmp_path: Path) -> None:
+    """An existing install / consumer .gitignore that LACKS the rule must get it
+    ADDED (add-only), preserving their content — not skipped. Pins #49 round-2
+    IR-001: pre-change, install never touched the file, so the rule would be absent."""
+    batches = tmp_path / ".redteam/batches"
+    batches.mkdir(parents=True)
+    (batches / ".gitignore").write_text("# my own rule\n*.tmp\n", encoding="utf-8")
+
     install_mod.install(tmp_path, overwrite=False, dry=False)
-    gi = tmp_path / ".redteam/batches/.gitignore"
-    gi.write_text("**/progress.md\n# my own rule\n*.tmp\n", encoding="utf-8")
 
+    text = (batches / ".gitignore").read_text(encoding="utf-8")
+    assert "**/progress.md" in text  # rule added
+    assert "# my own rule" in text and "*.tmp" in text  # consumer content preserved
+
+
+def test_batches_gitignore_merge_is_idempotent(tmp_path: Path) -> None:
+    """Re-running install never duplicates the progress.md rule."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)
     install_mod.install(tmp_path, overwrite=True, dry=False)
-
-    assert "# my own rule" in gi.read_text(encoding="utf-8")  # not clobbered
+    text = (tmp_path / ".redteam/batches/.gitignore").read_text(encoding="utf-8")
+    assert text.count("**/progress.md") == 1
