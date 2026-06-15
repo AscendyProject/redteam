@@ -60,8 +60,9 @@ def test_agent_pair_implement_commits_patch_file_paths(monkeypatch, tmp_path):
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
-        if argv[:3] == ["git", "diff", "--cached"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if argv == ["git", "diff", "--cached", "--quiet"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")  # staged → commit proceeds
+        # integrity probes (--name-only -z, ls-files) succeed clean → no strays → approved
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(implement.subprocess, "run", fake_run)
@@ -110,8 +111,10 @@ def test_agent_pair_fails_closed_on_uncommitted_source_after_commit(monkeypatch,
     monkeypatch.setattr(implement, "compute_branch_diff", lambda cwd: "diff --git a/app/example.py b/app/example.py\n")
 
     def fake_run(argv, **kwargs):
-        if argv[:3] == ["git", "diff", "--cached"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="")  # staged → commit proceeds
+        if argv == ["git", "diff", "--cached", "--quiet"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")  # commit helper: staged → commit proceeds
+        if argv[:4] == ["git", "diff", "--cached", "--name-only"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")  # commit landed; nothing staged remains
         if argv[:3] == ["git", "diff", "--name-only"]:
             # a tracked source file left modified-but-uncommitted after the scoped commit
             return SimpleNamespace(returncode=0, stdout="app/leftover.py\0", stderr="")
@@ -199,3 +202,50 @@ def test_uncommitted_scope_files_ignores_artifacts_outside_source_dirs(monkeypat
     stray = implement._uncommitted_scope_files(repo, proj)
 
     assert stray == ["app/new_module.py"]  # only the in-scope untracked source file
+
+
+def test_agent_pair_fails_closed_when_a_git_probe_fails(monkeypatch, tmp_path):
+    """#50 review PR-001 (HIGH): if an integrity probe (git diff/ls-files) itself
+    FAILS (index lock, repo corruption), the empty stdout must NOT be read as
+    'clean'. The phase must fail closed (status error), never approve a possibly-
+    stale committed range."""
+    implement = _load_implement_module()
+    task_dir = tmp_path / "batch" / "tasks" / "task-001-demo"
+    task_dir.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    monkeypatch.setattr(implement, "repo_root", lambda: repo)
+    monkeypatch.setattr(
+        implement,
+        "project_config",
+        lambda: SimpleNamespace(source_dirs=["app/"], test_dir="tests/", context_file="docs/ctx.md"),
+    )
+    monkeypatch.setattr(
+        implement,
+        "get_worker_adapter",
+        lambda state: SimpleNamespace(invoke=lambda **kwargs: {"returncode": 0, "stdout": "done", "stderr": ""}),
+    )
+    monkeypatch.setattr(
+        implement,
+        "_run_verification_commands",
+        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
+    )
+    monkeypatch.setattr(implement, "compute_branch_diff", lambda cwd: "diff --git a/app/example.py b/app/example.py\n")
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "diff", "--cached", "--quiet"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")  # commit proceeds
+        if argv[:3] == ["git", "diff", "--name-only"]:
+            # the probe itself errors — empty stdout must NOT pass as "clean"
+            return SimpleNamespace(returncode=128, stdout="", stderr="fatal: index.lock exists")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(implement.subprocess, "run", fake_run)
+
+    state = {"task_id": "task-001-demo", "mode": "agent-pair", "verification": {"commands": []}}
+    result = implement._run_agent_pair(task_dir, state)
+
+    assert result["status"] == "error"  # fail closed, NOT approved
+    assert "could not verify commit integrity" in result["feedback"]
+    assert "index.lock" not in result["feedback"]  # stderr (possible secrets) not leaked

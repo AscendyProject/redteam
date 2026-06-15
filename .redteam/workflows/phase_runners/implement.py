@@ -173,6 +173,12 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
             text=True,
             encoding="utf-8",
         )
+        if proc.returncode != 0:
+            # Fail closed: a FAILED probe (index lock, repo corruption, bad cwd)
+            # must NOT be read as "no stray files = clean", which would hand a
+            # possibly-stale committed range to review (#50 review PR-001). stderr is
+            # omitted from the message (it can carry secrets, cf. IR-002).
+            raise RuntimeError(f"git {' '.join(args)} failed (exit {proc.returncode}) — cannot verify commit integrity")
         return [n for n in (proc.stdout or "").split("\0") if n]
 
     candidates = (
@@ -251,7 +257,14 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         # uncommitted, that range is stale — fail closed (don't hand a stale range to
         # the reviewer). status="error" routes through the generic retry, carrying the
         # stray-file list back to the implementer; a repeat defers/escalates normally.
-        stray = _uncommitted_scope_files(rr, proj)
+        try:
+            stray = _uncommitted_scope_files(rr, proj)
+        except (OSError, RuntimeError) as exc:
+            # A git probe failed → can't confirm the committed range is fresh. Fail
+            # closed (don't approve a possibly-stale range); the generic retry path
+            # re-runs, a repeat defers (#50 review PR-001).
+            feedback = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
         if stray:
             feedback = (
                 "implement left source/test changes uncommitted after the scoped commit, so the "
