@@ -282,6 +282,33 @@ def test_successful_fallback_records_state_audit(monkeypatch, tmp_path):
     assert any(a.get("phase") == "plan_review" and "Fell back" in a.get("reason", "") for a in audit)
 
 
+def test_fallback_ask_user_records_state_audit(monkeypatch, tmp_path):
+    """ASK_USER is a valid automatic-fallback outcome too — its structured audit
+    must be recorded in state, same as approved/changes_requested (#37 PR-003)."""
+    orch = _load_orchestrator()
+    task_dir = _task(tmp_path)
+    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
+    monkeypatch.setitem(
+        orch.PHASE_RUNNERS,
+        "plan_review",
+        lambda td, st: {
+            "status": "ask_user",
+            "feedback": "needs a human call",
+            "log": "needs a human call",
+            "diff": "",
+            "fallback_audit": "primary reviewer 'codex' failed. Fell back to 'claude'.",
+        },
+    )
+
+    orch.process_task(task_dir)
+
+    st = json.loads((task_dir / "state.json").read_text())
+    assert any(
+        a.get("phase") == "plan_review" and "Fell back" in a.get("reason", "") for a in st.get("review_audit", [])
+    )
+
+
 def test_genuine_review_text_cannot_spoof_fallback_audit(monkeypatch, tmp_path):
     """A real (non-fallback) review whose BODY happens to start with the fallback
     marker text must NOT create a state audit entry — provenance is the structured

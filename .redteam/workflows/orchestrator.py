@@ -927,7 +927,7 @@ def process_task(task_dir: Path) -> TaskOutcome:
         # provenance field (set only by the engine), never by in-band review text,
         # so a reviewer can't spoof an audit entry (#37 review PR-002).
         fallback_audit = result.get("fallback_audit")
-        if result["status"] in {"approved", "changes_requested", "rescue_required"} and fallback_audit:
+        if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"} and fallback_audit:
             state.setdefault("review_audit", []).append({"phase": phase, "reason": fallback_audit})
 
         # Only a result carrying a VALID parsed review decision may seed
