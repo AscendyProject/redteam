@@ -173,12 +173,15 @@ This repo doubles as a single-plugin marketplace, so two commands install it:
 > (port 22). The `AscendyProject/redteam` shorthand also works if you have
 > GitHub SSH keys configured.
 
-That registers the six sub-agents and a `/redteam:redteam-install` command. Run
-that command (or the `redteam-install` tool it puts on PATH) from your project
-root to vendor the harness in:
+That registers the six sub-agents and the `/redteam:*` commands. Run
+`redteam-install` (also exposed as a `redteam-install` tool on PATH) from your
+project root to vendor the harness in, then use the others as needed:
 
 ```text
-/redteam:redteam-install        # vendors .redteam/ into the current repo
+/redteam:redteam-install        # vendor .redteam/ into the current repo
+/redteam:redteam-review         # one-shot cross-model review of the current branch diff
+/redteam:redteam-config         # choose the per-role models (writer / reviewer / rescue)
+/redteam:redteam-status         # show the pipeline status for a batch
 ```
 
 ### Or vendor directly (any stack, no Claude Code needed)
@@ -190,6 +193,13 @@ python3 .redteam/scripts/install.py /path/to/your/project
 # preview first:
 python3 .redteam/scripts/install.py /path/to/your/project --dry-run
 ```
+
+Useful flags: `--overwrite` (refresh harness-owned files; never touches your
+`config.toml` / `docs/*` / `batches/`), `--protect-config` (opt-in: add Claude
+Code `Edit/Write` deny rules for `.redteam/config.toml` to the consumer's
+`.claude/settings.json`, add-only — the runtime pairing guard is the backstop
+regardless), and `--check` (report whether a vendored install is behind this
+harness version, then exit — writes nothing).
 
 Either way it's the same vendoring model: the harness ships *inside* your project
 tree (`.redteam/`) because the engine resolves your repo root from its own file
@@ -235,6 +245,19 @@ python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
 A batch is a directory of `tasks/<task-id>/input.md` briefs. The orchestrator
 creates a per-task branch (`<branch_prefix>/<task-id>`), runs the pipeline, and
 stops at each human gate until you touch the sentinel file it names.
+
+**One-shot review (no batch).** To run just the adversarial reviewer over your
+current branch diff — a *different* provider than whoever wrote the code,
+read-only:
+
+```bash
+python3 .redteam/workflows/orchestrator.py review
+```
+
+It reviews `git diff <base>...HEAD` and exits `0` / `1` / `2` (approved /
+changes requested / reviewer failed), so it can gate CI. Exposed as
+`/redteam:redteam-review` in Claude Code. Fail-closed: it refuses if the
+configured reviewer would collapse to the worker's own provider (self-review).
 
 ## Contributing
 
