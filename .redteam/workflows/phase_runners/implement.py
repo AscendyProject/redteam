@@ -180,7 +180,12 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
         + _names(["diff", "--name-only", "-z"])
         + _names(["ls-files", "--others", "--exclude-standard", "-z"])
     )
-    roots = [r if r.endswith("/") else r + "/" for r in (*proj.source_dirs, proj.test_dir)]
+
+    def _root(r: str) -> str:
+        r = r.replace("\\", "/")  # normalize roots too, not just candidates (portability)
+        return r if r.endswith("/") else r + "/"
+
+    roots = [_root(r) for r in (*proj.source_dirs, proj.test_dir)]
     stray = {path for path in candidates if any(path.replace("\\", "/").startswith(root) for root in roots)}
     return sorted(stray)
 
