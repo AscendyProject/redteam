@@ -455,16 +455,24 @@ def _snapshot_verification_commands(task_dir: Path, state: dict[str, Any]) -> bo
 
 
 def _verification_pinned(state: dict[str, Any]) -> bool:
-    """True only when BOTH the plan-time verify_command (str) and verify_allowlist
-    (list) are snapshotted (#39). A partially-pinned state (e.g. command set but
-    allowlist missing) is NOT pinned — implement.py's own guard would only catch
-    that AFTER the implementer mutated the tree, so the dispatch-time invariant
-    must treat it as unpinned and re-snapshot/defer before the implementer runs."""
+    """True only when the FULL plan-time snapshot is present: verify_command (str),
+    verify_allowlist (list), AND the actual verification commands (non-empty
+    list[str]) the post-implement gate runs (#39). A partially-pinned state — e.g.
+    verify_command+allowlist present but `commands` missing/empty — is NOT pinned:
+    implement.py would only discover the missing commands AFTER the implementer
+    mutated the tree (and fail "No verification commands were snapshotted"), which
+    is the exact failure this dispatch-time invariant prevents. So treat it as
+    unpinned and re-snapshot/defer BEFORE the implementer runs."""
     verification = state.get("verification")
     if not isinstance(verification, dict):
         return False
-    return isinstance(verification.get("verify_command"), str) and isinstance(
-        verification.get("verify_allowlist"), list
+    commands = verification.get("commands")
+    return (
+        isinstance(verification.get("verify_command"), str)
+        and isinstance(verification.get("verify_allowlist"), list)
+        and isinstance(commands, list)
+        and bool(commands)
+        and all(isinstance(c, str) for c in commands)
     )
 
 

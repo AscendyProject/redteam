@@ -59,13 +59,14 @@ def _setup(tmp_path: Path, verification: dict):
 def _run(orch, monkeypatch, tmp_path, task_dir):
     monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
-    seen = {"implement_called": False, "verify_command": None, "allowlist": None}
+    seen = {"implement_called": False, "verify_command": None, "allowlist": None, "commands": None}
 
     def fake_implement(td, st):
         seen["implement_called"] = True
         v = st.get("verification", {})
         seen["verify_command"] = v.get("verify_command")
         seen["allowlist"] = v.get("verify_allowlist")
+        seen["commands"] = v.get("commands")
         return {"status": "ask_user", "feedback": "halt", "log": "", "diff": ""}
 
     monkeypatch.setitem(orch.PHASE_RUNNERS, "implement", fake_implement)
@@ -98,6 +99,21 @@ def test_partial_pin_is_treated_as_unpinned(monkeypatch, tmp_path):
     assert seen["implement_called"] is True
     assert seen["verify_command"] == "bash .redteam/scripts/verify.sh"  # re-snapshotted, not "PARTIAL"
     assert isinstance(seen["allowlist"], list)
+
+
+def test_missing_commands_is_treated_as_unpinned(monkeypatch, tmp_path):
+    """#39 review PR-001 (HIGH): verify_command + verify_allowlist present but the
+    actual verification `commands` MISSING is NOT pinned — without this, implement
+    would run and mutate the tree, then fail "No verification commands were
+    snapshotted" only AFTER mutation. The dispatch guard must re-snapshot so
+    `commands` is populated before the implementer runs."""
+    orch = _load_orchestrator()
+    task_dir = _setup(tmp_path, {"verify_command": "PRESET", "verify_allowlist": ["pytest"]})  # no commands
+    _, seen = _run(orch, monkeypatch, tmp_path, task_dir)
+
+    assert seen["implement_called"] is True
+    assert seen["verify_command"] == "bash .redteam/scripts/verify.sh"  # re-snapshotted, not "PRESET"
+    assert isinstance(seen["commands"], list) and seen["commands"]  # commands now pinned (non-empty)
 
 
 def test_defers_and_does_not_run_implement_when_snapshot_fails(monkeypatch, tmp_path):
