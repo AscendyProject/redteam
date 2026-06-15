@@ -146,6 +146,9 @@ def test_create_pr_prompt_injects_foreign_config(tmp_path) -> None:
         patch("phase_runners.create_pr.get_worker_adapter", return_value=rec),
         patch("phase_runners.create_pr.repo_root", return_value=tmp_path),
         patch("phase_runners.create_pr.compute_repo_diff", return_value=""),
+        # The PR-auth preflight (#51) runs before the worker; stub it to pass so this
+        # test exercises the prompt the agent receives (its actual subject).
+        patch("phase_runners.create_pr._preflight_pr_auth", return_value=None),
     ):
         create_pr.run(tmp_path, {})
     prompt = rec.prompt
