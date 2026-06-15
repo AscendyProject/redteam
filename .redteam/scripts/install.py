@@ -241,6 +241,34 @@ def _seed_dir(rel: str, target: Path, dry: bool) -> None:
     (dst / ".gitkeep").touch()
 
 
+# Seeded into the consumer's batches dir so the operator progress mirror (#49) is
+# never committed into a PR. pr-author stages the whole task dir (`git add
+# <task_dir>`), and progress.md is an operational surface, not part of the audit
+# trail. The source repo handles this via its own root .gitignore; consumers get
+# it from here (project-owned, seeded once, never overwritten).
+BATCHES_GITIGNORE_REL = ".redteam/batches/.gitignore"
+BATCHES_GITIGNORE = (
+    "# redteam run artifacts not meant for a PR (#49). The operator progress\n"
+    "# mirror is an operational surface, not part of the audit trail, and\n"
+    "# pr-author stages the whole task dir.\n"
+    "**/progress.md\n"
+)
+
+
+def _seed_batches_gitignore(target: Path, dry: bool) -> None:
+    """Seed `.redteam/batches/.gitignore` (project-owned, once) so progress.md is
+    excluded from pr-author's whole-task-dir staging in a consumer repo (#49)."""
+    dst = target / BATCHES_GITIGNORE_REL
+    if dst.exists():
+        _log("keep", BATCHES_GITIGNORE_REL + "  (project-owned; left as-is)", dry)
+        return
+    _log("seed", BATCHES_GITIGNORE_REL, dry)
+    if dry:
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(BATCHES_GITIGNORE, encoding="utf-8")
+
+
 def _merge_settings_deny(target: Path, dry: bool) -> None:
     """Merge the config.toml protection rules into the consumer's
     `.claude/settings.json`, ADD-ONLY.
@@ -344,6 +372,7 @@ def install(target: Path, overwrite: bool, dry: bool, protect_config: bool = Fal
         _seed_file(dst_rel, src_rel, target, dry)
     for rel in PROJECT_DIRS:
         _seed_dir(rel, target, dry)
+    _seed_batches_gitignore(target, dry)
     if protect_config:
         _merge_settings_deny(target, dry)
     _write_version_stamp(target, dry)
