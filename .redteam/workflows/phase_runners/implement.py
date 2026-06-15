@@ -144,6 +144,37 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, di
     _write_current_diff(task_dir, cwd)
 
 
+def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
+    """Source/test files still uncommitted AFTER the scoped commit (#50).
+
+    `_commit_agent_pair_diff` stages only the declared Affected files, so anything
+    the implementer changed OUTSIDE that set stays in the working tree — making the
+    committed range `git diff <base>...HEAD` the reviewer inspects STALE relative to
+    the tree verification just passed on (verify ran on the dirty worktree). Returns
+    the uncommitted *source/test* files: tracked-but-uncommitted modifications plus
+    untracked, non-ignored new files, restricted to the project's source_dirs /
+    test_dir. Restricting to those roots means harness artifacts (impl_diff.patch,
+    verification.log) and gitignored files (e.g. __pycache__, *.pyc) never trip it —
+    only real code/test changes that would diverge the committed range from review.
+    """
+
+    def _names(args: list[str]) -> list[str]:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return [n for n in (proc.stdout or "").split("\0") if n]
+
+    candidates = _names(["diff", "--name-only", "-z"]) + _names(["ls-files", "--others", "--exclude-standard", "-z"])
+    roots = [r if r.endswith("/") else r + "/" for r in (*proj.source_dirs, proj.test_dir)]
+    stray = {path for path in candidates if any(path.replace("\\", "/").startswith(root) for root in roots)}
+    return sorted(stray)
+
+
 def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     proj = project_config()
     base = (
@@ -200,6 +231,21 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     verification["last_diff_sha256"] = diff_sha
 
     if rc == 0:
+        # Integrity gate (#50): verification passed on the WORKTREE, but review_code
+        # inspects the committed range. If the scoped commit left source/test changes
+        # uncommitted, that range is stale — fail closed (don't hand a stale range to
+        # the reviewer). status="error" routes through the generic retry, carrying the
+        # stray-file list back to the implementer; a repeat defers/escalates normally.
+        stray = _uncommitted_scope_files(rr, proj)
+        if stray:
+            feedback = (
+                "implement left source/test changes uncommitted after the scoped commit, so the "
+                "reviewed range (git diff <base>...HEAD) would be STALE relative to the tree "
+                "verification just passed on. Uncommitted: " + ", ".join(stray) + ". Declare these "
+                "in outcome.md's Affected files so they are committed, or remove them — refusing to "
+                "hand a stale committed range to review."
+            )
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
         return PhaseResult(
             status="approved",
             feedback="",

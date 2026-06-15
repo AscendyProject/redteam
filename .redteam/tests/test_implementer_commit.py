@@ -79,3 +79,73 @@ def test_agent_pair_implement_commits_patch_file_paths(monkeypatch, tmp_path):
     assert ["git", "add", "--", "app/example.py", "tests/test_example.py"] in calls
     assert ["git", "commit", "-m", "wip(task-001-demo): implement round 1"] in calls
     assert (task_dir / "impl_diff.patch").read_text(encoding="utf-8") == diff
+
+
+def test_agent_pair_fails_closed_on_uncommitted_source_after_commit(monkeypatch, tmp_path):
+    """#50: when verification passes but the scoped commit left a source/test file
+    uncommitted, the committed range is stale — the phase must FAIL CLOSED (status
+    error, naming the stray file) instead of returning approved into review_code."""
+    implement = _load_implement_module()
+    task_dir = tmp_path / "batch" / "tasks" / "task-001-demo"
+    task_dir.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    monkeypatch.setattr(implement, "repo_root", lambda: repo)
+    monkeypatch.setattr(
+        implement,
+        "project_config",
+        lambda: SimpleNamespace(source_dirs=["app/"], test_dir="tests/", context_file="docs/ctx.md"),
+    )
+    monkeypatch.setattr(
+        implement,
+        "get_worker_adapter",
+        lambda state: SimpleNamespace(invoke=lambda **kwargs: {"returncode": 0, "stdout": "done", "stderr": ""}),
+    )
+    monkeypatch.setattr(
+        implement,
+        "_run_verification_commands",
+        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
+    )
+    monkeypatch.setattr(implement, "compute_branch_diff", lambda cwd: "diff --git a/app/example.py b/app/example.py\n")
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["git", "diff", "--cached"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")  # staged → commit proceeds
+        if argv[:3] == ["git", "diff", "--name-only"]:
+            # a tracked source file left modified-but-uncommitted after the scoped commit
+            return SimpleNamespace(returncode=0, stdout="app/leftover.py\0", stderr="")
+        if argv[:2] == ["git", "ls-files"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(implement.subprocess, "run", fake_run)
+
+    state = {"task_id": "task-001-demo", "mode": "agent-pair", "verification": {"commands": []}}
+    result = implement._run_agent_pair(task_dir, state)
+
+    assert result["status"] == "error"  # fail closed, NOT approved
+    assert "app/leftover.py" in result["feedback"]  # names the stray file
+    assert "stale" in result["feedback"].lower()
+
+
+def test_uncommitted_scope_files_ignores_artifacts_outside_source_dirs(monkeypatch, tmp_path):
+    """The clean-check is restricted to source_dirs/test_dir, so harness artifacts and
+    files outside those roots (e.g. impl_diff.patch, README.md) never trip it."""
+    implement = _load_implement_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["git", "diff", "--name-only"]:
+            return SimpleNamespace(returncode=0, stdout="impl_diff.patch\0README.md\0", stderr="")
+        if argv[:2] == ["git", "ls-files"]:
+            return SimpleNamespace(returncode=0, stdout="app/new_module.py\0", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(implement.subprocess, "run", fake_run)
+    proj = SimpleNamespace(source_dirs=["app/"], test_dir="tests/")
+
+    stray = implement._uncommitted_scope_files(repo, proj)
+
+    assert stray == ["app/new_module.py"]  # only the in-scope untracked source file
