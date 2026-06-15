@@ -41,6 +41,7 @@ class CodexReviewerAdapter:
     capabilities: ReviewerCapabilities = {
         "native_diff_review": False,
         "timeout_sec": _DEFAULT_TIMEOUT_SEC,
+        "read_only_enforced": True,  # codex exec --sandbox read-only
     }
 
     def review(self, *, role: str, prompt: str, cwd: Path, target: ReviewTarget) -> ReviewResult:
