@@ -17,3 +17,9 @@ build/
 # Internal cross-repo coordination — never part of the public project
 /docs/requests/
 /docs/cross-stack-findings.md
+
+# Per-task operator progress mirror (#49): a best-effort human-facing status file
+# the orchestrator rewrites under each batch task dir. It is an operational
+# surface, not part of the audit trail, so it must not ride into a PR via
+# pr-author's whole-task-dir staging.
+.redteam/batches/**/progress.md

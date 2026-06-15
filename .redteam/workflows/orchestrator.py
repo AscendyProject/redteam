@@ -41,6 +41,7 @@ from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
     write_test,
 )
 from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E402
+    DEFAULT_TIMEOUT_SEC,
     PhaseResult,
     compute_branch_changed_paths,
     extract_verification_commands,
@@ -166,6 +167,61 @@ def save_state(task_dir: Path, state: dict[str, Any]) -> None:
     tmp = task_dir / "state.json.tmp"
     tmp.write_text(payload, encoding="utf-8")
     tmp.replace(task_dir / "state.json")
+    # state.json is the source of truth and is now durably written. progress.md is
+    # a best-effort human-facing mirror (#49) — a rendering error must NEVER break a
+    # phase transition, so it runs after persistence and swallows everything.
+    try:
+        _write_progress(task_dir, state)
+    except Exception:  # noqa: BLE001 — progress.md is non-critical; never fail a transition
+        pass
+
+
+def _write_progress(task_dir: Path, state: dict[str, Any]) -> None:
+    """Render a per-task, human-facing `progress.md` from `state` (#49).
+
+    The operator's at-a-glance view during long phases and detached runs: current
+    phase + when THIS phase attempt started (a real per-phase timestamp, so it is
+    not skewed by retries/gates the way `updated_at` is) + the per-phase timeout,
+    plus next action / gate / deferral. Uses `last_failure_reason` ONLY — never
+    `last_failure_log`, which can carry credentials (cf. `cmd_status` / IR-002).
+    Defensive (`.get`, capped strings) and gitignored, so it neither crashes
+    persistence nor rides into a PR via pr-author's task-dir staging.
+    """
+    g = state.get
+    phase = g("phase") or g("next_phase") or "?"
+    lines = [
+        f"# redteam progress — {g('task_id') or task_dir.name}",
+        "",
+        f"- **phase:** {phase}  (this attempt started: {g('phase_started_at') or 'n/a'}; "
+        f"worker phases time out at {DEFAULT_TIMEOUT_SEC}s)",
+        f"- next_phase: {g('next_phase') or '?'}",
+        f"- phases completed: {len(g('phases_completed') or [])}",
+        f"- updated_at: {g('updated_at') or 'n/a'}",
+    ]
+    retries = g("retries")
+    if isinstance(retries, dict) and retries:
+        lines.append(f"- retries: {', '.join(f'{k}={v}' for k, v in retries.items())}")
+    items = g("review_items")
+    if isinstance(items, list):
+        open_items = [i for i in items if isinstance(i, dict) and i.get("status") == "open"]
+        if open_items:
+            lines.append(f"- open review items: {len(open_items)}")
+            summary = str(open_items[0].get("summary") or "").strip()
+            if summary:
+                lines.append(f"  - latest: {summary[:200]}")
+    action = g("next_action")
+    if isinstance(action, dict) and (action.get("who") or action.get("what")):
+        lines.append(f"- next action ({action.get('who')}): {str(action.get('what') or '')[:300]}")
+    nxt = g("next_phase")
+    if nxt in GATE_SENTINELS:
+        lines.append(f"- BLOCKED at human gate — touch `{GATE_SENTINELS[nxt]}`, then `resume`")
+    deferred = g("deferred_requirements")
+    if isinstance(deferred, list) and deferred:
+        lines.append(f"- DEFERRED ({len(deferred)}) — inspect state.json and resolve manually")
+    reason = g("last_failure_reason")
+    if reason:
+        lines.append(f"- last failure: {reason}  (full log kept in state.json, not shown here — it may carry secrets)")
+    (task_dir / "progress.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ---------- phase progression ----------
@@ -839,6 +895,10 @@ def process_task(task_dir: Path) -> TaskOutcome:
             return "error"
 
         state["phase"] = phase
+        # Real per-phase start timestamp (#49): set when a phase is about to RUN, so
+        # progress.md's "this attempt started" reflects the current runner invocation
+        # (re-stamped on each retry), not the per-save updated_at.
+        state["phase_started_at"] = utc_now()
         save_state(task_dir, state)
 
         # Fail-closed guard: in agent-pair mode, implement requires outcome.md
