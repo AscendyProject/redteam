@@ -45,52 +45,71 @@ def _remote_host(url: str) -> str | None:
     return urlparse(url).hostname
 
 
+# Short, bounded timeouts: the whole point of the preflight is to fail closed
+# FAST, so it must never hang itself (IR-001) — a stuck `gh`/network must not
+# out-wait the 900s worker timeout it is meant to pre-empt.
+_GIT_REMOTE_TIMEOUT_SEC = 10
+_GH_AUTH_TIMEOUT_SEC = 30
+
+
 def _preflight_pr_auth(cwd: Path) -> str | None:
     """Return an actionable error if a draft PR cannot be created here, else None.
 
     create_pr shells the pr-author — a headless `claude --print` worker — which runs
-    `gh pr create`. If `gh` is missing or not authenticated for the remote's host
+    `gh pr create`. If `gh` is missing or not authenticated for the PR target host
     (e.g. an enterprise host while gh is only logged into github.com), that command
     fails, and the headless agent has no way to ask the operator: it stalls until
     the worker's 900s timeout (#51). Fail closed HERE, before invoking the agent,
-    with the remedy — so the operator gets an immediate, actionable error.
+    with the remedy. Each subprocess is itself bounded by a short timeout so the
+    guard cannot become the new hang, and a timeout fails closed (IR-001). The
+    PUSH url is checked (not just the fetch url) so split fetch/push remotes or an
+    `origin.pushurl` cannot auth the wrong host (IR-002).
     """
-    try:
-        remote = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
+
+    def _run(argv: list[str], timeout_sec: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            argv,
             cwd=str(cwd),
             check=False,
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=timeout_sec,
         )
+
+    try:
+        remote = _run(["git", "remote", "get-url", "--push", "origin"], _GIT_REMOTE_TIMEOUT_SEC)
     except FileNotFoundError:
         return "git not found on PATH — cannot determine the PR remote for create_pr."
+    except subprocess.TimeoutExpired:
+        return (
+            f"`git remote get-url --push origin` timed out after {_GIT_REMOTE_TIMEOUT_SEC}s — "
+            "cannot resolve the PR remote. Re-run create_pr."
+        )
     if remote.returncode != 0:
         return (
             "could not resolve the `origin` remote for PR creation "
-            f"(`git remote get-url origin` failed: {(remote.stderr or '').strip()[:200]}). "
+            f"(`git remote get-url --push origin` failed: {(remote.stderr or '').strip()[:200]}). "
             "Add an `origin` remote, then re-run create_pr."
         )
     host = _remote_host(remote.stdout or "")
     if not host:
         return (
-            f"could not parse a host from the origin remote URL {(remote.stdout or '').strip()!r} "
+            f"could not parse a host from the origin push URL {(remote.stdout or '').strip()!r} "
             "— cannot verify PR auth. Fix the remote, then re-run create_pr."
         )
     try:
-        auth = subprocess.run(
-            ["gh", "auth", "status", "--hostname", host],
-            cwd=str(cwd),
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
+        auth = _run(["gh", "auth", "status", "--hostname", host], _GH_AUTH_TIMEOUT_SEC)
     except FileNotFoundError:
         return (
             f"`gh` (GitHub CLI) not found on PATH — cannot create the PR on {host}. Install gh "
             f"and run `gh auth login --hostname {host}`, then re-run create_pr."
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            f"`gh auth status --hostname {host}` timed out after {_GH_AUTH_TIMEOUT_SEC}s "
+            "(network / gh issue) — failing closed rather than letting create_pr hang. "
+            f"Check connectivity and `gh auth login --hostname {host}`, then re-run create_pr."
         )
     if auth.returncode != 0:
         return (

@@ -33,6 +33,8 @@ def test_remote_host_parses_https_and_enterprise_ssh():
     assert create_pr._remote_host("https://github.sec.samsung.net/bdp/x.git") == "github.sec.samsung.net"
     assert create_pr._remote_host("git@github.sec.samsung.net:bdp/x.git") == "github.sec.samsung.net"
     assert create_pr._remote_host("ssh://git@github.sec.samsung.net:22/bdp/x.git") == "github.sec.samsung.net"
+    # non-standard HTTPS port → bare host (gh --hostname wants no port)
+    assert create_pr._remote_host("https://github.sec.samsung.net:8443/bdp/x.git") == "github.sec.samsung.net"
     assert create_pr._remote_host("") is None
     assert create_pr._remote_host("not a url") is None
 
@@ -40,10 +42,11 @@ def test_remote_host_parses_https_and_enterprise_ssh():
 # ---- preflight in run() ----
 
 
-def _patch_git_remote(create_pr, monkeypatch, *, remote_url, remote_rc=0, gh_rc=0, gh_missing=False):
-    """Stub subprocess.run for the preflight: `git remote get-url origin` then
+def _patch_git_remote(create_pr, monkeypatch, *, remote_url, remote_rc=0, gh_rc=0, gh_missing=False, gh_timeout=False):
+    """Stub subprocess.run for the preflight: `git remote get-url --push origin` then
     `gh auth status --hostname <host>`. Anything else (compute_repo_diff's git)
     returns empty success."""
+    import subprocess as _sp
 
     def fake_run(argv, **kwargs):
         if argv[:3] == ["git", "remote", "get-url"]:
@@ -51,6 +54,8 @@ def _patch_git_remote(create_pr, monkeypatch, *, remote_url, remote_rc=0, gh_rc=
         if argv[:2] == ["gh", "auth"]:
             if gh_missing:
                 raise FileNotFoundError("gh")
+            if gh_timeout:
+                raise _sp.TimeoutExpired(argv, kwargs.get("timeout", 30))
             return SimpleNamespace(returncode=gh_rc, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -109,6 +114,22 @@ def test_unparseable_remote_fails_actionable(monkeypatch, tmp_path):
 
     assert result["status"] == "error"
     assert "origin" in result["feedback"]
+    assert calls["invoked"] is False
+
+
+def test_gh_auth_timeout_fails_closed_without_invoking_worker(monkeypatch, tmp_path):
+    """IR-001: the preflight must not become the new hang. A `gh auth status` that
+    hangs (TimeoutExpired) fails closed fast with guidance — never reaching the
+    worker, never out-waiting the 900s worker timeout it pre-empts."""
+    create_pr = _load_create_pr()
+    _patch_git_remote(create_pr, monkeypatch, remote_url="https://github.sec.samsung.net/bdp/x.git", gh_timeout=True)
+    calls, get = _worker_spy()
+    monkeypatch.setattr(create_pr, "get_worker_adapter", get)
+
+    result = create_pr.run(tmp_path / "task-001", {})
+
+    assert result["status"] == "error"
+    assert "timed out" in result["feedback"] and "github.sec.samsung.net" in result["feedback"]
     assert calls["invoked"] is False
 
 
