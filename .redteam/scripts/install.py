@@ -241,6 +241,56 @@ def _seed_dir(rel: str, target: Path, dry: bool) -> None:
     (dst / ".gitkeep").touch()
 
 
+# Seeded into the consumer's batches dir so the operator progress mirror (#49) is
+# never committed into a PR. pr-author stages the whole task dir (`git add
+# <task_dir>`), and progress.md is an operational surface, not part of the audit
+# trail. The source repo handles this via its own root .gitignore; consumers get
+# it from here (project-owned, seeded once, never overwritten).
+BATCHES_GITIGNORE_REL = ".redteam/batches/.gitignore"
+BATCHES_GITIGNORE_RULE = "**/progress.md"
+BATCHES_GITIGNORE_BLOCK = (
+    "# redteam run artifacts not meant for a PR (#49). The operator progress\n"
+    "# mirror is an operational surface, not part of the audit trail, and\n"
+    "# pr-author stages the whole task dir.\n"
+    f"{BATCHES_GITIGNORE_RULE}\n"
+)
+
+
+def _seed_batches_gitignore(target: Path, dry: bool) -> None:
+    """Ensure `.redteam/batches/.gitignore` ignores progress.md (#49), ADD-ONLY.
+
+    pr-author stages the whole task dir, so without this a consumer would commit
+    the operational progress mirror into the PR. Absent → create. Present but
+    missing the rule (e.g. an existing install, or the consumer's own .gitignore)
+    → APPEND the rule, preserving their content (never clobber project-owned
+    files). Already present → no-op (idempotent). Mirrors the settings.json
+    deny-merge discipline."""
+    dst = target / BATCHES_GITIGNORE_REL
+    if dst.exists():
+        try:
+            existing = dst.read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            # ValueError covers UnicodeDecodeError from a non-UTF-8 consumer file —
+            # skip with guidance rather than tracebacking, and never clobber it
+            # (mirrors the settings.json deny-merge's fail-safe).
+            print(f"WARN     {BATCHES_GITIGNORE_REL} unreadable — skipped progress.md ignore ({exc}).", file=sys.stderr)
+            return
+        if any(line.strip() == BATCHES_GITIGNORE_RULE for line in existing.splitlines()):
+            _log("keep", BATCHES_GITIGNORE_REL + "  (progress.md already ignored)", dry)
+            return
+        _log("merge", BATCHES_GITIGNORE_REL + "  (+progress.md ignore)", dry)
+        if dry:
+            return
+        sep = "" if existing == "" or existing.endswith("\n") else "\n"
+        dst.write_text(existing + sep + BATCHES_GITIGNORE_BLOCK, encoding="utf-8")
+        return
+    _log("seed", BATCHES_GITIGNORE_REL, dry)
+    if dry:
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(BATCHES_GITIGNORE_BLOCK, encoding="utf-8")
+
+
 def _merge_settings_deny(target: Path, dry: bool) -> None:
     """Merge the config.toml protection rules into the consumer's
     `.claude/settings.json`, ADD-ONLY.
@@ -344,6 +394,7 @@ def install(target: Path, overwrite: bool, dry: bool, protect_config: bool = Fal
         _seed_file(dst_rel, src_rel, target, dry)
     for rel in PROJECT_DIRS:
         _seed_dir(rel, target, dry)
+    _seed_batches_gitignore(target, dry)
     if protect_config:
         _merge_settings_deny(target, dry)
     _write_version_stamp(target, dry)

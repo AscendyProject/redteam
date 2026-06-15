@@ -144,6 +144,58 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, di
     _write_current_diff(task_dir, cwd)
 
 
+def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
+    """Source/test files still uncommitted AFTER the scoped commit (#50).
+
+    `_commit_agent_pair_diff` stages only the declared Affected files, so anything
+    the implementer changed OUTSIDE that set stays in the working tree — making the
+    committed range `git diff <base>...HEAD` the reviewer inspects STALE relative to
+    the tree verification just passed on (verify ran on the dirty worktree). Returns
+    the uncommitted *source/test* files across all three states that would diverge
+    the committed range from the worktree verification ran on:
+      - staged-but-uncommitted (`git diff --cached`): the commit did not land them
+        (a `git commit` failure / hook); `_commit_agent_pair_diff` ignores the
+        commit returncode, so this is reachable and MUST be caught here;
+      - tracked-but-unstaged modifications (`git diff`);
+      - untracked, non-ignored new files (`git ls-files --others`).
+    Restricted to the project's source_dirs / test_dir, so harness artifacts
+    (impl_diff.patch, verification.log) and gitignored files (e.g. __pycache__,
+    *.pyc) never trip it — only real code/test changes. After a SUCCESSFUL commit
+    the index equals HEAD, so the `--cached` probe is empty (no false positive).
+    """
+
+    def _names(args: list[str]) -> list[str]:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if proc.returncode != 0:
+            # Fail closed: a FAILED probe (index lock, repo corruption, bad cwd)
+            # must NOT be read as "no stray files = clean", which would hand a
+            # possibly-stale committed range to review (#50 review PR-001). stderr is
+            # omitted from the message (it can carry secrets, cf. IR-002).
+            raise RuntimeError(f"git {' '.join(args)} failed (exit {proc.returncode}) — cannot verify commit integrity")
+        return [n for n in (proc.stdout or "").split("\0") if n]
+
+    candidates = (
+        _names(["diff", "--cached", "--name-only", "-z"])
+        + _names(["diff", "--name-only", "-z"])
+        + _names(["ls-files", "--others", "--exclude-standard", "-z"])
+    )
+
+    def _root(r: str) -> str:
+        r = r.replace("\\", "/")  # normalize roots too, not just candidates (portability)
+        return r if r.endswith("/") else r + "/"
+
+    roots = [_root(r) for r in (*proj.source_dirs, proj.test_dir)]
+    stray = {path for path in candidates if any(path.replace("\\", "/").startswith(root) for root in roots)}
+    return sorted(stray)
+
+
 def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     proj = project_config()
     base = (
@@ -200,6 +252,28 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     verification["last_diff_sha256"] = diff_sha
 
     if rc == 0:
+        # Integrity gate (#50): verification passed on the WORKTREE, but review_code
+        # inspects the committed range. If the scoped commit left source/test changes
+        # uncommitted, that range is stale — fail closed (don't hand a stale range to
+        # the reviewer). status="error" routes through the generic retry, carrying the
+        # stray-file list back to the implementer; a repeat defers/escalates normally.
+        try:
+            stray = _uncommitted_scope_files(rr, proj)
+        except (OSError, RuntimeError) as exc:
+            # A git probe failed → can't confirm the committed range is fresh. Fail
+            # closed (don't approve a possibly-stale range); the generic retry path
+            # re-runs, a repeat defers (#50 review PR-001).
+            feedback = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+        if stray:
+            feedback = (
+                "implement left source/test changes uncommitted after the scoped commit, so the "
+                "reviewed range (git diff <base>...HEAD) would be STALE relative to the tree "
+                "verification just passed on. Uncommitted: " + ", ".join(stray) + ". Declare these "
+                "in outcome.md's Affected files so they are committed, or remove them — refusing to "
+                "hand a stale committed range to review."
+            )
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
         return PhaseResult(
             status="approved",
             feedback="",

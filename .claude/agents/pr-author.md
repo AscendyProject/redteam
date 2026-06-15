@@ -101,6 +101,12 @@ redteam / batch <batch-id> / task <task-id>
    `state` must be `OPEN`.
 
 ## Hard rules
+- **You run headless (non-interactive).** NEVER call `AskUserQuestion` or wait for
+  operator input — there is no operator to answer, so it stalls the run. If a step
+  fails (push rejected, `gh` not authenticated / wrong host, PR creation errors),
+  write the failure reason and remedy into `pr.md` and **stop** — do not prompt and
+  do not retry blindly. The orchestrator fails the phase closed on a missing
+  `pr_url.txt`.
 - **`--draft` is mandatory.** Never create a non-draft PR. The human will mark it
   ready-for-review after their gate-2 inspection.
 - **Never `git push --force`.** Not on this branch, not on any branch. If the push is

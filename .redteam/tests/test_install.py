@@ -237,3 +237,54 @@ def test_check_outdated_returns_one(tmp_path: Path, capsys) -> None:
 def test_check_unknown_returns_two(tmp_path: Path) -> None:
     """No stamp (pre-#34 install or never installed) → cannot determine → exit 2."""
     assert install_mod.cmd_check(tmp_path) == 2
+
+
+# ---- #49: batches/.gitignore so progress.md is never committed in a consumer ----
+
+
+def test_fresh_install_seeds_batches_gitignore(tmp_path: Path) -> None:
+    """A consumer install must exclude the operator progress mirror from PRs:
+    pr-author stages the whole task dir, so .redteam/batches/.gitignore ignores
+    progress.md."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    gi = tmp_path / ".redteam/batches/.gitignore"
+    assert gi.is_file()
+    assert "progress.md" in gi.read_text(encoding="utf-8")
+    # the dir is still kept and usable
+    assert (tmp_path / ".redteam/batches/.gitkeep").is_file()
+
+
+def test_existing_batches_gitignore_gets_progress_rule_added(tmp_path: Path) -> None:
+    """An existing install / consumer .gitignore that LACKS the rule must get it
+    ADDED (add-only), preserving their content — not skipped. Pins #49 round-2
+    IR-001: pre-change, install never touched the file, so the rule would be absent."""
+    batches = tmp_path / ".redteam/batches"
+    batches.mkdir(parents=True)
+    (batches / ".gitignore").write_text("# my own rule\n*.tmp\n", encoding="utf-8")
+
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+
+    text = (batches / ".gitignore").read_text(encoding="utf-8")
+    assert "**/progress.md" in text  # rule added
+    assert "# my own rule" in text and "*.tmp" in text  # consumer content preserved
+
+
+def test_batches_gitignore_merge_is_idempotent(tmp_path: Path) -> None:
+    """Re-running install never duplicates the progress.md rule."""
+    install_mod.install(tmp_path, overwrite=False, dry=False)
+    install_mod.install(tmp_path, overwrite=True, dry=False)
+    text = (tmp_path / ".redteam/batches/.gitignore").read_text(encoding="utf-8")
+    assert text.count("**/progress.md") == 1
+
+
+def test_batches_gitignore_non_utf8_is_skipped_not_clobbered(tmp_path: Path) -> None:
+    """#49 round-3 IR-003: a non-UTF-8 consumer .gitignore must be skipped with a
+    warning (fail-safe), not traceback the installer or get clobbered."""
+    batches = tmp_path / ".redteam/batches"
+    batches.mkdir(parents=True)
+    raw = b"\xff\xfe# latin-1 rule \xe9\n"  # invalid UTF-8
+    (batches / ".gitignore").write_bytes(raw)
+
+    install_mod.install(tmp_path, overwrite=False, dry=False)  # must not raise
+
+    assert (batches / ".gitignore").read_bytes() == raw  # untouched, not clobbered
