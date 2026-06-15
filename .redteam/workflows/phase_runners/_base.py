@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 # Default per-phase timeout in seconds. Halved from the original 1800s. With
@@ -39,7 +39,7 @@ def default_model_for_role(role: str) -> str | None:
     return getattr(load_config(repo_root()).models, role, None)
 
 
-PhaseStatus = Literal["approved", "changes_requested", "rescue_required", "ask_user", "error"]
+PhaseStatus = Literal["approved", "changes_requested", "rescue_required", "ask_user", "error", "manual_required"]
 ReviewDecision = Literal["APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER", "MISSING"]
 
 
@@ -50,6 +50,10 @@ class PhaseResult(TypedDict):
     feedback: str
     log: str
     diff: str
+    # Structured provenance: set ONLY by the engine (review_with_fallback → runner)
+    # when an automatic fallback produced this decision. Trusted for the audit
+    # trail so reviewer-controlled text can't spoof it (#37 review PR-002).
+    fallback_audit: NotRequired[str]
 
 
 class ClaudeRunResult(TypedDict):

@@ -66,6 +66,7 @@ class ClaudeReviewerAdapter:
     capabilities: ReviewerCapabilities = {
         "native_diff_review": False,
         "timeout_sec": _REVIEWER_TIMEOUT_SEC,
+        "read_only_enforced": True,  # claude -p --permission-mode plan + Edit/Write disallowed
     }
 
     def review(self, *, role: str, prompt: str, cwd: Path, target: ReviewTarget) -> ReviewResult:
