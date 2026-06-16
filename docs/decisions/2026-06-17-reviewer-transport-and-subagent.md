@@ -64,9 +64,20 @@ plan_review:
 
 - **Cross-provider** — a Claude sub-agent reviewing Claude-written code is the
   same self-review collapse #28 prevents. The sub-agent reviewer is for the
-  provider OPPOSITE the worker; the other side stays a headless CLI. The existing
-  `_adversarial_pairing_error` guard and `reviewer_provider`/`worker_provider`
-  resolvers apply unchanged.
+  provider OPPOSITE the worker; the other side stays a headless CLI.
+  **⚠️ PREREQUISITE (plan_review finding PR-001, HIGH):** the existing guard does
+  NOT apply unchanged if step 5 adds a new adapter key. `worker_provider()`
+  returns a provider *family* (`"claude"`/`"codex"`) while `reviewer_provider()`
+  returns the raw reviewer-adapter *key*, and both the in-pipeline guard
+  (`rp != wp`) and the fallback ladder (`fb == worker_provider(state)`) compare
+  those directly. So a new key like `"claude-subagent"` would compare
+  `"claude-subagent" != "claude"` → falsely read as cross-provider → **bypass the
+  self-review collapse guard** (Claude reviewing Claude). Step 5 MUST therefore
+  either (a) resolve the sub-agent through the EXISTING `claude`/`codex` family
+  key (introduce no new provider key), OR (b) first add explicit provider-family
+  *normalization* to `reviewer_provider` and the fallback `fb == worker_provider`
+  comparison — and no sub-agent result may satisfy an automatic review gate until
+  that normalization is in place. This is a build prerequisite, not optional.
 - **Read-only** — declare `read_only_enforced: True` only if the sub-agent truly
   cannot write (the Agent invocation must disallow Edit/Write). The fallback
   ladder already refuses to trust a non-read-only fallback's APPROVED.
@@ -84,6 +95,9 @@ plan_review:
   structured `fallback_audit`/`review_audit` shape?
 - Is the in-session visibility/steering benefit worth a second execution mode, or
   is the headless `claude` reviewer sufficient (option 3)?
+- Family-vs-key normalization (PR-001): if step 5 needs a distinct adapter key,
+  the `reviewer_provider`/fallback comparisons must normalize key → family first;
+  pin a regression that a same-family sub-agent reviewer is flagged as self-review.
 
 **Next action:** run this proposal through `plan_review` (cross-provider) and get
 the operator's call on options 1/2/3 before writing any adapter code.
