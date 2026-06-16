@@ -5,6 +5,27 @@ on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 releases may include behavior changes; breaking changes are called out).
 
+## [Unreleased]
+
+### Added
+- **Task-scaffolding command** (#55) — `orchestrator.py new <batch-dir> <slug>
+  [--title]` and `/redteam:redteam-new-task` create the next `task-NNN` directory
+  and seed `input.md` from a template, so the brief the planner reads can't be
+  subtly malformed.
+
+### Fixed
+- **`verify.sh` seeds from a generic, fail-closed template** (#43) — a consumer no
+  longer inherits redteam's own gate; an unconfigured `verify.sh` fails closed
+  until the consumer sets their stack's checks.
+- **Green test suite on a Windows/non-UTF-8 (cp949) host** (#48) — test-side
+  `read_text()` calls pin `encoding="utf-8"` and POSIX exec-bit assertions are
+  guarded for non-Windows. Tests only; no engine change.
+
+### Changed
+- **Reviewer-transport design decision** (#37) — documented rejection of a
+  terminal-multiplexer screen-scraping transport (step 6) and a gated proposal for
+  a sub-agent reviewer adapter (step 5). See `docs/decisions/`. No engine change.
+
 ## [0.3.0] - 2026-06-16
 
 A reliability-and-resilience release: the harness gets the fail-closed
@@ -95,6 +116,7 @@ Initial public release: the standalone, Apache-2.0 redteam harness extracted fro
 its origin monorepo — stdlib-only engine, prompts, agent skeletons, installer, and
 Claude Code plugin packaging, with tier-aware routing (#13).
 
+[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.3.0
 [0.2.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.2.0
 [0.1.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.1.0
