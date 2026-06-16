@@ -38,7 +38,16 @@ def test_fresh_install_vendors_and_seeds(tmp_path: Path) -> None:
         seeded = (tmp_path / ".redteam/docs" / doc).read_text()
         assert "Template." in seeded and "<Project name>" in seeded
         assert "dogfood" not in seeded  # redteam's filled docs say "dogfoods its own harness"
-    assert (tmp_path / ".redteam/scripts/verify.sh").is_file()
+    # verify.sh seeds from the GENERIC template (fail-closed until configured),
+    # NOT redteam's own ruff+pytest-over-.redteam gate, and stays executable (#43).
+    import os
+
+    verify = tmp_path / ".redteam/scripts/verify.sh"
+    assert verify.is_file()
+    assert os.access(verify, os.X_OK)  # executable bit preserved through the seed
+    vtext = verify.read_text()
+    assert "not configured yet" in vtext and "exit 1" in vtext  # fail-closed template
+    assert "ruff check .redteam/" not in vtext  # not redteam's own gate
     assert (tmp_path / ".redteam/batches/.gitkeep").is_file()
     # the harness's own tests are NOT shipped to a consumer
     assert not (tmp_path / ".redteam/tests").exists()
