@@ -79,16 +79,19 @@ all security boundaries — never loosen them inline; plan_review first.
 
 ## Project status
 
-`v0.2.0` is released and the repo is public. Extraction, the cross-stack
-validation that proved the engine generic on a non-Python stack, Claude Code
-plugin packaging, and tier-aware routing (#13) are all done. v0.2.0 adds the
-fail-closed same-provider self-review guard (#28), the `/redteam` slash commands
-+ standalone `review` subcommand (#29), the opt-in `--protect-config` installer
-flag (#30), and pipeline-mode validation/selection (#36). See `CHANGELOG.md`.
+`v0.3.0` is released and the repo is public. Extraction, cross-stack validation,
+Claude Code plugin packaging, and tier-aware routing (#13) are done. v0.2.0 added
+the self-review guard (#28), `/redteam` commands + `review` subcommand (#29),
+opt-in `--protect-config` (#30), and pipeline-mode validation (#36). v0.3.0 adds
+the reviewer fallback ladder (#37 step 4), install version-stamp + `--check`
+(#34), the dispatch-time pre-implement snapshot invariant (#39), the operator
+`progress.md` surface (#49), and a batch of fail-closed hardening (#40/#50/#51)
++ test-isolation fix (#54). See `CHANGELOG.md`.
 
-**Roadmap:** pluggable reviewer execution (#37, the review-latency root cause)
-and install version-stamping + `redteam-install --check` (#34). Both are
-security-boundary-adjacent and go through `plan_review` when picked up.
+**Roadmap:** pluggable reviewer execution steps 5–6 (#37 — sub-agent reviewer
+adapter / reject multiplexer screen-scraping), a task-scaffolding command (#55),
+a green cp949/Windows test suite (#48), and seeding `verify.sh` from a template
+(#43). Security-boundary changes go through `plan_review` when picked up.
 
 Coordination with downstream adopters of the harness is tracked **privately**,
 outside this public repo. For project work here, use GitHub issues / PRs /
