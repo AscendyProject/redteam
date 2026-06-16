@@ -1,22 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 
 def _load_orchestrator_module():
-    workflows_path = Path(__file__).resolve().parents[1] / "workflows"
-    if str(workflows_path) not in sys.path:
-        sys.path.insert(0, str(workflows_path))
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator_stash", workflows_path / "orchestrator.py")
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    import _engine
+
+    return _engine.orchestrator()
 
 
 def test_ensure_task_branch_stashes_before_checkout_and_pops(monkeypatch, tmp_path):

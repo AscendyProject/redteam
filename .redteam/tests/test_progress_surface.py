@@ -11,18 +11,13 @@ file for "where are we / since when / next action". It must:
 
 from __future__ import annotations
 
-import importlib.util
 import json
-from pathlib import Path
 
 
 def _load_orchestrator():
-    p = Path(__file__).resolve().parents[1] / "workflows" / "orchestrator.py"
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator", p)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    import _engine
+
+    return _engine.orchestrator()
 
 
 def test_write_progress_renders_and_is_defensive(tmp_path):

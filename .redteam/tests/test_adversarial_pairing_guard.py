@@ -15,7 +15,6 @@ which defeats the point of the harness. These tests pin:
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -28,12 +27,9 @@ from adapters import reviewer_provider, worker_provider  # noqa: E402
 
 
 def _load_orchestrator_module():
-    module_path = _WF / "orchestrator.py"
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    import _engine
+
+    return _engine.orchestrator()
 
 
 # ---- provider resolvers ----

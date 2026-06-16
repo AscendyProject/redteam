@@ -12,7 +12,6 @@ unparseable), the engine applies the reviewer_fallback ladder, FAIL-CLOSED:
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -29,11 +28,9 @@ from config import load_config  # noqa: E402
 
 
 def _load_orchestrator():
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator", _WF / "orchestrator.py")
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    import _engine
+
+    return _engine.orchestrator()
 
 
 _TARGET = {"kind": "branch_diff", "base": "main"}
