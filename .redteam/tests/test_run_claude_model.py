@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import io
 import sys
 from pathlib import Path
@@ -13,13 +12,9 @@ if str(_WF) not in sys.path:
 
 
 def _load_base_module():
-    module_path = Path(__file__).resolve().parents[1] / "workflows" / "phase_runners" / "_base.py"
-    spec = importlib.util.spec_from_file_location("redteam_phase_base", module_path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    import _engine
+
+    return _engine.base()
 
 
 class _FakeProc:

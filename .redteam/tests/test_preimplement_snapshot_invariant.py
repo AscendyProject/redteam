@@ -11,18 +11,14 @@ requires BOTH verify_command (str) and verify_allowlist (list).
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 
 def _load_orchestrator():
-    p = Path(__file__).resolve().parents[1] / "workflows" / "orchestrator.py"
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator", p)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    import _engine
+
+    return _engine.orchestrator()
 
 
 _OUTCOME = """# Outcome

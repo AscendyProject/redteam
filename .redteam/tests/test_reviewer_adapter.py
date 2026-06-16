@@ -12,7 +12,6 @@ manual Codex paste + sentinel. These tests pin:
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
@@ -29,12 +28,9 @@ from adapters.codex import CodexReviewerAdapter, CodexWorkerAdapter  # noqa: E40
 
 
 def _load_orchestrator_module():
-    module_path = _WF / "orchestrator.py"
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    import _engine
+
+    return _engine.orchestrator()
 
 
 # ---- resolver ----

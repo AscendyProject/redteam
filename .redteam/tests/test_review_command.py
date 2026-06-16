@@ -11,7 +11,6 @@ Pins the command's contract:
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -22,12 +21,9 @@ if str(_WF) not in sys.path:
 
 
 def _load_orchestrator_module():
-    module_path = _WF / "orchestrator.py"
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    import _engine
+
+    return _engine.orchestrator()
 
 
 def _fake_adapter(decision: str, parse_status: str = "ok", raw: str | None = None) -> MagicMock:

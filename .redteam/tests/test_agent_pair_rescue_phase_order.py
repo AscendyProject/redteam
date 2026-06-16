@@ -17,18 +17,11 @@ consults _next_phase).
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 
 def _load_orchestrator_module():
-    module_path = Path(__file__).resolve().parents[1] / "workflows" / "orchestrator.py"
-    spec = importlib.util.spec_from_file_location("redteam_orchestrator", module_path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    import _engine
+
+    return _engine.orchestrator()
 
 
 def test_agent_pair_rescue_advances_to_human_gate_not_done():

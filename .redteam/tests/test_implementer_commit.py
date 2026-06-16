@@ -1,21 +1,12 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 
 def _load_implement_module():
-    workflows_path = Path(__file__).resolve().parents[1] / "workflows"
-    if str(workflows_path) not in sys.path:
-        sys.path.insert(0, str(workflows_path))
-    spec = importlib.util.find_spec("phase_runners.implement")
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    import _engine
+
+    return _engine.implement()
 
 
 def test_agent_pair_implement_commits_patch_file_paths(monkeypatch, tmp_path):
