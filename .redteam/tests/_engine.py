@@ -46,3 +46,18 @@ def orchestrator() -> ModuleType:
 
 def base() -> ModuleType:
     return _load("redteam_phase_base", _WF / "phase_runners" / "_base.py")
+
+
+def implement() -> ModuleType:
+    # The phase_runners.* runners are normal package modules, so a plain import is
+    # the singleton the shared orchestrator's PHASE_RUNNERS also binds to — one
+    # object, not a per-test re-exec (#54).
+    import phase_runners.implement as m
+
+    return m
+
+
+def create_pr() -> ModuleType:
+    import phase_runners.create_pr as m
+
+    return m
