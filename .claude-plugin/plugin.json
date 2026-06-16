@@ -10,7 +10,8 @@
     "./commands/redteam-install.md",
     "./commands/redteam-review.md",
     "./commands/redteam-config.md",
-    "./commands/redteam-status.md"
+    "./commands/redteam-status.md",
+    "./commands/redteam-new-task.md"
   ],
   "agents": [
     "./.claude/agents/code-security-reviewer.md",

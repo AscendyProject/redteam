@@ -95,6 +95,7 @@ _EXPECTED_COMMANDS = {
     "redteam-review",
     "redteam-config",
     "redteam-status",
+    "redteam-new-task",
 }
 
 
