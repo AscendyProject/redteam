@@ -30,12 +30,12 @@ def test_fresh_install_vendors_and_seeds(tmp_path: Path) -> None:
     for name in install_mod.HARNESS_AGENTS:
         assert (tmp_path / f".claude/agents/{name}.md").is_file()
     # project-owned seeds: config from the template (placeholder, not redteam's own)
-    cfg = (tmp_path / ".redteam/config.toml").read_text()
+    cfg = (tmp_path / ".redteam/config.toml").read_text(encoding="utf-8")
     assert 'name = "my-project"' in cfg
     # docs seed from templates/docs/*, NOT this repo's filled-in redteam-specific
     # docs — a consumer must get the blank skeleton, not redteam's own rules (#31).
     for doc in ("project-context.md", "security-checklist.md", "test-conventions.md"):
-        seeded = (tmp_path / ".redteam/docs" / doc).read_text()
+        seeded = (tmp_path / ".redteam/docs" / doc).read_text(encoding="utf-8")
         assert "Template." in seeded and "<Project name>" in seeded
         assert "dogfood" not in seeded  # redteam's filled docs say "dogfoods its own harness"
     # verify.sh seeds from the GENERIC template (fail-closed until configured),
@@ -44,8 +44,9 @@ def test_fresh_install_vendors_and_seeds(tmp_path: Path) -> None:
 
     verify = tmp_path / ".redteam/scripts/verify.sh"
     assert verify.is_file()
-    assert os.access(verify, os.X_OK)  # executable bit preserved through the seed
-    vtext = verify.read_text()
+    if os.name != "nt":  # no POSIX exec bit on Windows
+        assert os.access(verify, os.X_OK)  # executable bit preserved through the seed
+    vtext = verify.read_text(encoding="utf-8")
     assert "not configured yet" in vtext and "exit 1" in vtext  # fail-closed template
     assert "ruff check .redteam/" not in vtext  # not redteam's own gate
     assert (tmp_path / ".redteam/batches/.gitkeep").is_file()
@@ -62,7 +63,7 @@ def test_overwrite_keeps_unrelated_consumer_agent(tmp_path: Path) -> None:
     install_mod.install(tmp_path, overwrite=True, dry=False)
 
     assert custom.is_file()
-    assert custom.read_text() == "consumer's own agent"
+    assert custom.read_text(encoding="utf-8") == "consumer's own agent"
     # harness agents still present alongside it
     assert (tmp_path / ".claude/agents/implementer.md").is_file()
 
@@ -76,8 +77,8 @@ def test_overwrite_never_clobbers_project_owned(tmp_path: Path) -> None:
 
     install_mod.install(tmp_path, overwrite=True, dry=False)
 
-    assert 'name = "edited-by-user"' in cfg.read_text()
-    assert verify.read_text() == "echo my own gate"
+    assert 'name = "edited-by-user"' in cfg.read_text(encoding="utf-8")
+    assert verify.read_text(encoding="utf-8") == "echo my own gate"
 
 
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:
@@ -227,7 +228,7 @@ def test_overwrite_refreshes_version_stamp(tmp_path: Path) -> None:
     stamp_path = tmp_path / install_mod.VERSION_STAMP_REL
     stamp_path.write_text(json.dumps({"version": "0.0.1"}), encoding="utf-8")
     install_mod.install(tmp_path, overwrite=True, dry=False)
-    assert json.loads(stamp_path.read_text())["version"] == install_mod._source_version()
+    assert json.loads(stamp_path.read_text(encoding="utf-8"))["version"] == install_mod._source_version()
 
 
 def test_check_up_to_date_returns_zero(tmp_path: Path) -> None:

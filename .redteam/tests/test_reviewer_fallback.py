@@ -209,7 +209,7 @@ def test_manual_required_blocks_without_seeding_review_items(monkeypatch, tmp_pa
     outcome = orch.process_task(task_dir)
 
     assert outcome == "blocked_on_human_gate"
-    st = json.loads((task_dir / "state.json").read_text())
+    st = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert "plan_review" in st.get("manual_review_required", {})
     assert st.get("review_items", []) == []  # NOT seeded from the failed body
     assert st.get("review_audit")  # audit recorded
@@ -223,7 +223,7 @@ def test_pasted_manual_review_clears_flag_and_syncs_items(monkeypatch, tmp_path)
     orch = _load_orchestrator()
     task_dir = _task(tmp_path)
     # pre-flag the phase + provide the pasted review + sentinel (operator action)
-    st = json.loads((task_dir / "state.json").read_text())
+    st = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     st["manual_review_required"] = {"plan_review": "reviewer fallback exhausted to manual"}
     (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
     (task_dir / "plan_review.md").write_text(
@@ -240,7 +240,7 @@ def test_pasted_manual_review_clears_flag_and_syncs_items(monkeypatch, tmp_path)
 
     orch.process_task(task_dir)
 
-    st = json.loads((task_dir / "state.json").read_text())
+    st = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert "plan_review" not in st.get("manual_review_required", {})  # flag cleared
     ids = [it.get("id") for it in st.get("review_items", [])]
     assert "PR-007" in ids  # synced from the genuine pasted review
@@ -274,7 +274,7 @@ def test_successful_fallback_records_state_audit(monkeypatch, tmp_path):
 
     orch.process_task(task_dir)
 
-    st = json.loads((task_dir / "state.json").read_text())
+    st = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     audit = st.get("review_audit", [])
     assert any(a.get("phase") == "plan_review" and "Fell back" in a.get("reason", "") for a in audit)
 
@@ -300,7 +300,7 @@ def test_fallback_ask_user_records_state_audit(monkeypatch, tmp_path):
 
     orch.process_task(task_dir)
 
-    st = json.loads((task_dir / "state.json").read_text())
+    st = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert any(
         a.get("phase") == "plan_review" and "Fell back" in a.get("reason", "") for a in st.get("review_audit", [])
     )
@@ -329,5 +329,5 @@ def test_genuine_review_text_cannot_spoof_fallback_audit(monkeypatch, tmp_path):
 
     orch.process_task(task_dir)
 
-    st = json.loads((task_dir / "state.json").read_text())
+    st = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert st.get("review_audit", []) == []  # spoofed marker did not create an audit entry

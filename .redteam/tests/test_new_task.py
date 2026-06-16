@@ -59,4 +59,4 @@ def test_new_task_does_not_clobber_existing(tmp_path, capsys):
     rc = orch.cmd_new_task(batch, ["dup"])  # would be task-003-dup → no clobber, succeeds
     assert rc == 0
     assert (batch / "tasks" / "task-003-dup").is_dir()
-    assert (existing / "input.md").read_text() == "MINE"  # untouched
+    assert (existing / "input.md").read_text(encoding="utf-8") == "MINE"  # untouched

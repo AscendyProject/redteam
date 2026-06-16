@@ -82,7 +82,7 @@ def test_existing_snapshot_is_not_overwritten(monkeypatch, tmp_path):
     orch = _load_orchestrator()
     task_dir = _setup(tmp_path, "REVISE_IMPLEMENTATION")
     # pre-existing snapshot with a distinct value
-    state = json.loads((task_dir / "state.json").read_text())
+    state = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     state["verification"] = {"verify_command": "PRESET", "verify_allowlist": ["pytest"], "commands": ["PRESET"]}
     (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
     monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
