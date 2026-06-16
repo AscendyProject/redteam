@@ -60,7 +60,7 @@ plan_review:
    headless `claude -p` reviewer already covers the "Claude reviewer" case; the
    only thing the sub-agent adds is in-session visibility/steering.
 
-### Hard constraints (already enforced by the engine; the adapter must comply)
+### Hard constraints (enforced by the engine for today's adapters; the adapter must comply — but see the cross-provider PREREQUISITE below)
 
 - **Cross-provider** — a Claude sub-agent reviewing Claude-written code is the
   same self-review collapse #28 prevents. The sub-agent reviewer is for the
