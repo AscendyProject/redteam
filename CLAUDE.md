@@ -88,10 +88,16 @@ the reviewer fallback ladder (#37 step 4), install version-stamp + `--check`
 `progress.md` surface (#49), and a batch of fail-closed hardening (#40/#50/#51)
 + test-isolation fix (#54). See `CHANGELOG.md`.
 
-**Roadmap:** pluggable reviewer execution steps 5–6 (#37 — sub-agent reviewer
-adapter / reject multiplexer screen-scraping), a task-scaffolding command (#55),
-a green cp949/Windows test suite (#48), and seeding `verify.sh` from a template
-(#43). Security-boundary changes go through `plan_review` when picked up.
+Post-0.3.0 (unreleased, → 0.4.0): a `verify.sh` template seed (#43), the
+task-scaffolding command (#55, `orchestrator new` + `/redteam:redteam-new-task`),
+a green cp949/Windows test suite (#48), and the #37 transport decision doc (step 6
+multiplexer transport rejected; see `docs/decisions/`).
+
+**Roadmap:** the only open item is **#37 step 5** — a sub-agent reviewer adapter.
+It is design-gated: the CLI orchestrator can't call Claude Code's Agent tool, so it
+needs a new in-session execution mode, and the self-review guard's family-vs-key
+comparison must be normalized first (see `docs/decisions/2026-06-17-reviewer-transport-and-subagent.md`).
+Security-boundary changes go through `plan_review` when picked up.
 
 Coordination with downstream adopters of the harness is tracked **privately**,
 outside this public repo. For project work here, use GitHub issues / PRs /

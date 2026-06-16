@@ -179,6 +179,7 @@ project root to vendor the harness in, then use the others as needed:
 
 ```text
 /redteam:redteam-install        # vendor .redteam/ into the current repo
+/redteam:redteam-new-task       # scaffold the next task-NNN dir + input.md from the template
 /redteam:redteam-review         # one-shot cross-model review of the current branch diff
 /redteam:redteam-config         # choose the per-role models (writer / reviewer / rescue)
 /redteam:redteam-status         # show the pipeline status for a batch
@@ -237,12 +238,15 @@ Vue + Vitest).
 ## Run
 
 ```bash
+python3 .redteam/workflows/orchestrator.py new    .redteam/batches/<batch> <slug> [--title "..."]
 python3 .redteam/workflows/orchestrator.py start  .redteam/batches/<batch>
 python3 .redteam/workflows/orchestrator.py resume .redteam/batches/<batch>
 python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
 ```
 
-A batch is a directory of `tasks/<task-id>/input.md` briefs. The orchestrator
+A batch is a directory of `tasks/<task-id>/input.md` briefs. `new` scaffolds the
+next `task-NNN` directory with a template `input.md` (or use
+`/redteam:redteam-new-task`); fill in the brief, then `start`. The orchestrator
 creates a per-task branch (`<branch_prefix>/<task-id>`), runs the pipeline, and
 stops at each human gate until you touch the sentinel file it names.
 
