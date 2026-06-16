@@ -153,7 +153,10 @@ PROJECT_SEEDS = (
     (".redteam/docs/project-context.md", ".redteam/templates/docs/project-context.md"),
     (".redteam/docs/security-checklist.md", ".redteam/templates/docs/security-checklist.md"),
     (".redteam/docs/test-conventions.md", ".redteam/templates/docs/test-conventions.md"),
-    (".redteam/scripts/verify.sh", ".redteam/scripts/verify.sh"),
+    # verify.sh seeds from the GENERIC template (fail-closed until configured), NOT
+    # from this repo's own redteam-specific gate (ruff + pytest over .redteam/) —
+    # a consumer must define their own stack's gate, not inherit redteam's (#43).
+    (".redteam/scripts/verify.sh", ".redteam/templates/verify.sh"),
 )
 
 # Directories created empty if absent (project-owned run state).
