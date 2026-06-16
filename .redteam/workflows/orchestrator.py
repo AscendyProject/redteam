@@ -1559,8 +1559,81 @@ def cmd_review(repo: Path | None = None) -> int:
     return 0 if result["decision"] == "APPROVED" else 1
 
 
+def _slugify(text: str) -> str:
+    """Lowercase kebab slug: alnum runs joined by single hyphens, trimmed."""
+    out = []
+    prev_dash = False
+    for ch in text.strip().lower():
+        if ch.isalnum():
+            out.append(ch)
+            prev_dash = False
+        elif not prev_dash:
+            out.append("-")
+            prev_dash = True
+    return "".join(out).strip("-")
+
+
+def _next_task_number(tasks_dir: Path) -> int:
+    """Next `task-NNN` number in a batch: max existing NNN + 1 (else 1)."""
+    highest = 0
+    if tasks_dir.is_dir():
+        for child in tasks_dir.iterdir():
+            m = re.match(r"task-(\d+)", child.name)
+            if child.is_dir() and m:
+                highest = max(highest, int(m.group(1)))
+    return highest + 1
+
+
+def cmd_new_task(batch_dir: Path, args: list[str]) -> int:
+    """Scaffold a new task: pick the next task-NNN, create its dir, and seed an
+    input.md from the template (#55). Does NOT clobber an existing task dir; the
+    state.json is seeded by `start` from state.template.json, so this writes only
+    input.md (the human brief the outcome-planner reads)."""
+    slug = None
+    title = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--title" and i + 1 < len(args):
+            title = args[i + 1]
+            i += 2
+        elif slug is None and not args[i].startswith("-"):
+            slug = args[i]
+            i += 1
+        else:
+            print(f"error: unexpected argument {args[i]!r}\n\n{USAGE}", file=sys.stderr)
+            return 2
+    slug = _slugify(slug or title or "")
+    if not slug:
+        print(
+            "error: a task slug is required: orchestrator.py new <batch-dir> <slug> [--title <text>]", file=sys.stderr
+        )
+        return 2
+
+    tasks_dir = batch_dir / "tasks"
+    task_id = f"task-{_next_task_number(tasks_dir):03d}-{slug}"
+    task_dir = tasks_dir / task_id
+    if task_dir.exists():
+        print(f"error: task dir already exists: {task_dir}", file=sys.stderr)
+        return 2
+
+    template = repo_root() / ".redteam" / "templates" / "input.md"
+    try:
+        body = template.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: could not read the input.md template ({exc}).", file=sys.stderr)
+        return 2
+    body = body.replace("__TITLE__", title or slug)
+
+    task_dir.mkdir(parents=True)
+    (task_dir / "input.md").write_text(body, encoding="utf-8")
+    print(f"created {task_dir / 'input.md'}")
+    print(f"  1) edit it with the task brief, then: orchestrator.py start {batch_dir}")
+    return 0
+
+
 USAGE = (
     "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
+    "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
     "       orchestrator.py review\n"
     "  start            — process every task from its current next_phase\n"
     "  resume           — same as start; convenient name to re-enter after a human gate\n"
@@ -1568,6 +1641,7 @@ USAGE = (
     "                     and auto-touch the `pr.reviewed` sentinel once the PR is merged\n"
     "                     or closed; then run resume\n"
     "  status           — print per-task summary without running anything\n"
+    "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
     "  review           — one-shot adversarial review of the current branch diff with the\n"
     "                     configured reviewer (a different provider than the worker); no batch"
 )
@@ -1589,6 +1663,8 @@ def main(argv: list[str]) -> int:
         return 2
     batch_dir = Path(argv[2]).resolve()
 
+    if command == "new":
+        return cmd_new_task(batch_dir, argv[3:])
     if command == "start":
         return cmd_start(batch_dir)
     if command == "resume":
