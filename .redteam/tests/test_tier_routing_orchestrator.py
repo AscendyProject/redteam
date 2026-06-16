@@ -128,7 +128,7 @@ def test_routing_off_when_no_tiers(monkeypatch, tmp_path):
     _common_mocks(orch, monkeypatch, tmp_path)
     monkeypatch.setitem(orch.PHASE_RUNNERS, "plan_outcome", _ask)
     orch.process_task(task_dir)
-    saved = json.loads((task_dir / "state.json").read_text())
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert "tier" not in saved
     assert "tier_phases" not in saved
 
@@ -157,7 +157,7 @@ def test_tier0_review_false_is_single_agent_with_model_override(monkeypatch, tmp
         )
 
     outcome = orch.process_task(task_dir)
-    saved = json.loads((task_dir / "state.json").read_text())
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
 
     assert saved["tier"] == 0
     assert saved["tier_phases"] == ["plan_outcome", "implement", "create_pr", "done"]
@@ -177,7 +177,7 @@ def test_auth_trigger_floors_to_full_review_tier(monkeypatch, tmp_path):
     monkeypatch.setitem(orch.PHASE_RUNNERS, "plan_outcome", _ask)
 
     orch.process_task(task_dir)
-    saved = json.loads((task_dir / "state.json").read_text())
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
 
     assert saved["tier"] == 4  # floored up by the auth trigger, not lowered to 0
     assert "plan_review" in saved["tier_phases"]
@@ -232,7 +232,7 @@ def test_downgrade_detected_when_real_diff_floors_higher(monkeypatch, tmp_path):
     task_dir = _setup_at_create_pr(orch, monkeypatch, tmp_path, tier=0, changed_paths=["app/auth/login.py"])
 
     outcome = orch.process_task(task_dir)
-    saved = json.loads((task_dir / "state.json").read_text())
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
 
     assert outcome == "deferred"
     assert saved["last_failure_reason"] == "tier_downgrade_detected"
@@ -245,7 +245,7 @@ def test_no_downgrade_when_real_diff_matches_tier(monkeypatch, tmp_path):
     task_dir = _setup_at_create_pr(orch, monkeypatch, tmp_path, tier=4, changed_paths=["app/auth/login.py"])
 
     outcome = orch.process_task(task_dir)
-    saved = json.loads((task_dir / "state.json").read_text())
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
 
     assert outcome == "done"
     assert "create_pr" in saved["phases_completed"]
@@ -257,7 +257,7 @@ def test_no_downgrade_when_diff_is_below_declared(monkeypatch, tmp_path):
     task_dir = _setup_at_create_pr(orch, monkeypatch, tmp_path, tier=0, changed_paths=["app/util/helpers.py"])
 
     outcome = orch.process_task(task_dir)
-    saved = json.loads((task_dir / "state.json").read_text())
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
 
     assert outcome == "done"
     assert "create_pr" in saved["phases_completed"]
