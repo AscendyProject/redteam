@@ -1,9 +1,10 @@
 # Reviewer transport & the sub-agent adapter (#37 steps 5–6)
 
-Status: **mixed** — the multiplexer-transport decision (step 6) is **ACCEPTED**;
-the sub-agent reviewer adapter (step 5) is **PROPOSED** (needs `plan_review` +
-operator decision before any build).
-Date: 2026-06-17. Context: #37. Supersedes nothing.
+Status: **both steps DECIDED** — the multiplexer-transport (step 6) is
+**REJECTED**, and the sub-agent reviewer adapter (step 5) is **REJECTED** too
+(operator call, 2026-06-17; closes #67). Neither will be built; this note records
+why and the guard rails should either ever be revisited.
+Date: 2026-06-17. Context: #37, #67. Supersedes nothing.
 
 Background: redteam drives the adversarial reviewer through the `ReviewerAdapter`
 seam — headless CLIs today (`codex exec --sandbox read-only`,
@@ -34,20 +35,34 @@ review gate.
 
 ---
 
-## Proposal (step 5): a sub-agent reviewer adapter — PROPOSED, needs plan_review
+## Decision (step 5): do NOT build a sub-agent reviewer adapter
 
-Goal: when the harness runs **inside a Claude Code session**, get a reviewer with
+**Rejected** (operator call, 2026-06-17; closes #67). The idea was: when the
+harness runs **inside a Claude Code session**, get a reviewer with
 visibility/steering (and no screen-scraping) by spawning the bundled
 `code-security-reviewer` sub-agent via the Agent/Task tool, returning a normal
 `ReviewResult` so the orchestrator stays transport-agnostic.
 
-### The feasibility constraint (the crux — resolve before building)
+**Why rejected.** The headless `claude -p --permission-mode plan` reviewer
+**already** covers the "Claude is the reviewer" case cross-provider. The only
+thing a sub-agent adapter adds is *in-session visibility/steering* — a marginal
+benefit that does not justify (a) a second execution surface that strains the
+project-agnostic-engine and zero-runtime-deps invariants, and (b) the hard
+security prerequisite below (family-vs-key normalization) that must land first
+before any sub-agent result could ever satisfy an automatic review gate. The cost
+outweighs the gain; the headless adapter is sufficient.
+
+The analysis that led here is kept below as the guard rail for any future
+revisit — the feasibility constraint and the self-review-bypass prerequisite are
+exactly what a revived step 5 would have to clear.
+
+### The feasibility constraint (why it needed a whole new execution mode)
 
 The **CLI orchestrator is a bare Python subprocess**: it has no access to Claude
 Code's Agent/Task tool, so it *cannot* spawn a sub-agent. A sub-agent reviewer is
 therefore only meaningful in a **new execution mode where the pipeline is driven
-from inside a Claude Code session** that owns the Agent tool. Options to weigh in
-plan_review:
+from inside a Claude Code session** that owns the Agent tool. The options that
+were weighed (and that a future revisit would weigh again) were:
 
 1. **A Claude-Code-hosted entrypoint** (e.g. a slash command / SDK harness) that
    runs the pipeline and, for the reviewer phase, calls the Agent tool. The CLI
@@ -56,9 +71,10 @@ plan_review:
 2. **A capability probe**: the engine detects whether an Agent-tool callback was
    injected at startup; if present, the sub-agent adapter is eligible, else it
    resolves to the headless adapter. Keeps one orchestrator, two runtimes.
-3. **Reject step 5 too** if neither path is worth the new execution surface — the
+3. **Reject step 5** if neither path is worth the new execution surface — the
    headless `claude -p` reviewer already covers the "Claude reviewer" case; the
-   only thing the sub-agent adds is in-session visibility/steering.
+   only thing the sub-agent adds is in-session visibility/steering. **← this is
+   the option taken.**
 
 ### Hard constraints (enforced by the engine for today's adapters; the adapter must comply — but see the cross-provider PREREQUISITE below)
 
@@ -85,7 +101,7 @@ plan_review:
   treated as `MISSING`, never approval (same contract as the CLI adapters; the
   fallback ladder + manual_required handling already cover it).
 
-### Open questions for plan_review
+### Open questions a revisit would have to answer (left unresolved by the rejection)
 
 - How does the hosted mode inject the Agent-tool callback into the engine without
   the engine importing a Claude-Code-only dependency (zero-runtime-deps rule)?
@@ -99,5 +115,7 @@ plan_review:
   the `reviewer_provider`/fallback comparisons must normalize key → family first;
   pin a regression that a same-family sub-agent reviewer is flagged as self-review.
 
-**Next action:** run this proposal through `plan_review` (cross-provider) and get
-the operator's call on options 1/2/3 before writing any adapter code.
+**Outcome:** option 3 (reject) taken on 2026-06-17; #67 closed. If step 5 is ever
+revived, it MUST start from a fresh cross-provider `plan_review` and clear the
+family-vs-key prerequisite (PR-001) before any sub-agent result can satisfy an
+automatic review gate.

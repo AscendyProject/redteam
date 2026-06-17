@@ -22,9 +22,13 @@ releases may include behavior changes; breaking changes are called out).
   guarded for non-Windows. Tests only; no engine change.
 
 ### Changed
-- **Reviewer-transport design decision** (#37) — documented rejection of a
-  terminal-multiplexer screen-scraping transport (step 6) and a gated proposal for
-  a sub-agent reviewer adapter (step 5). See `docs/decisions/`. No engine change.
+- **Reviewer-transport design decisions** (#37, #67) — documented rejection of a
+  terminal-multiplexer screen-scraping transport (step 6) and, after weighing the
+  options, rejection of the sub-agent reviewer adapter (step 5) as well: the
+  headless `claude -p` reviewer already covers the Claude-reviewer case
+  cross-provider, so the marginal in-session-steering gain does not justify a
+  second execution surface plus the family-vs-key normalization prerequisite. #67
+  closed. See `docs/decisions/`. No engine change.
 
 ## [0.3.0] - 2026-06-16
 
