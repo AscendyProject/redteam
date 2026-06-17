@@ -116,7 +116,8 @@ Operationally:
   `ascendy-blog/docs/requests/from-redteam/YYYY-MM-DD-<kebab-topic>.md` — never
   into this public repo. A pre-redaction raw committed to a public repo is exposed
   permanently in git history (force-push can't fully erase it). That drop path is
-  in the blog repo's `.gitignore` (verified), so the file never gets committed.
+  in the blog repo's `.gitignore` (verified), so a normal `git add` won't commit
+  it (a forced `git add -f` still would — don't).
 - **Format.** Copy `ascendy-blog/docs/intake-template.md` verbatim. `team:
   redteam`; `suggestedCategory` is usually `meta` (project/pattern posts).
 - **Canon honesty — the public repo is the source of truth.** Before writing any
