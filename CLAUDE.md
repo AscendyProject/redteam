@@ -79,20 +79,19 @@ all security boundaries — never loosen them inline; plan_review first.
 
 ## Project status
 
-`v0.3.0` is released and the repo is public. Extraction, cross-stack validation,
+`v0.4.0` is released and the repo is public. Extraction, cross-stack validation,
 Claude Code plugin packaging, and tier-aware routing (#13) are done. v0.2.0 added
 the self-review guard (#28), `/redteam` commands + `review` subcommand (#29),
-opt-in `--protect-config` (#30), and pipeline-mode validation (#36). v0.3.0 adds
+opt-in `--protect-config` (#30), and pipeline-mode validation (#36). v0.3.0 added
 the reviewer fallback ladder (#37 step 4), install version-stamp + `--check`
 (#34), the dispatch-time pre-implement snapshot invariant (#39), the operator
 `progress.md` surface (#49), and a batch of fail-closed hardening (#40/#50/#51)
-+ test-isolation fix (#54). See `CHANGELOG.md`.
-
-Post-0.3.0 (unreleased, → 0.4.0): a `verify.sh` template seed (#43), the
-task-scaffolding command (#55, `orchestrator new` + `/redteam:redteam-new-task`),
-a green cp949/Windows test suite (#48), and the #37/#67 reviewer-transport
-decision doc — **both** step 6 (multiplexer transport) and step 5 (sub-agent
-reviewer adapter) rejected; see `docs/decisions/`.
++ test-isolation fix (#54). v0.4.0 adds the task-scaffolding command (#55,
+`orchestrator new` + `/redteam:redteam-new-task`), seeds a consumer's `verify.sh`
+from a generic fail-closed template (#43), greens the cp949/Windows test suite
+(#48), and records the #37/#67 reviewer-transport decisions — **both** step 6
+(multiplexer transport) and step 5 (sub-agent reviewer adapter) rejected; see
+`docs/decisions/`. See `CHANGELOG.md`.
 
 **Roadmap:** no open issues. The reviewer-transport work (#37, umbrella) is fully
 resolved — step 4 (fallback ladder) shipped in 0.3.0; steps 5 and 6 were rejected
