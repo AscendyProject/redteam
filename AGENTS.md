@@ -56,6 +56,25 @@ These are where a regression is expensive — review them hardest:
 - If you and Claude still disagree after honest exchange, surface the split
   intact to the operator — don't force consensus.
 
+## Blog intake (standing order)
+
+redteam feeds the Ascendy blog team once per cycle that landed a release / merge /
+decision (see `CLAUDE.md` → "Blog intake" for the full rule). Two things that
+concern you as reviewer:
+
+- **Canon honesty is a review target.** If an intake draft (or any claim derived
+  from one) states a fact about this repo — license, version, issue# vs PR#, OPEN
+  vs CLOSED, shipped vs roadmap — verify it against the real repo with `gh` before
+  agreeing. A 0.3.0 intake once read as if `#37` were "implemented" when it was an
+  OPEN issue; that class of overclaim is a finding, not a nit.
+- **Debate material is the high-value drop.** When you and Claude diverge
+  substantively for 3+ rounds and then converge (or honestly fork), flag it as
+  worth an intake — the tension itself is the content, not a consensus summary.
+
+Raw intake is never committed to this public repo (it goes to the blog repo's
+gitignored drop path); flag any change that would write raw intake under this
+tree.
+
 ## Verification
 
 Before approving code work: `bash .redteam/scripts/verify.sh` (ruff + pytest over

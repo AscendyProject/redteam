@@ -103,6 +103,40 @@ Coordination with downstream adopters of the harness is tracked **privately**,
 outside this public repo. For project work here, use GitHub issues / PRs /
 discussions.
 
+## Blog intake (standing order)
+
+The Ascendy blog team sources posts from project agents. redteam adopts the OSS
+variant of their standing order (`ascendy-blog/docs/intake-standing-order-oss.md`).
+Operationally:
+
+- **When.** Once per cycle in which a release, a merge, or a decision landed, drop
+  one blog-intake. No real material that cycle → a one-line `urgency: backlog`
+  note. Never manufacture an angle. Pure chores (dep bumps, typos) don't count.
+- **Where — NOT this repo.** Raw intake goes to the blog repo's gitignored path
+  `ascendy-blog/docs/requests/from-redteam/YYYY-MM-DD-<kebab-topic>.md` — never
+  into this public repo. A pre-redaction raw committed to a public repo is exposed
+  permanently in git history (force-push can't fully erase it). That drop path is
+  in the blog repo's `.gitignore` (verified), so the file never gets committed.
+- **Format.** Copy `ascendy-blog/docs/intake-template.md` verbatim. `team:
+  redteam`; `suggestedCategory` is usually `meta` (project/pattern posts).
+- **Canon honesty — the public repo is the source of truth.** Before writing any
+  fact, verify it against the real repo with `gh`: license, version, issue# vs
+  PR#, OPEN vs CLOSED, **shipped vs roadmap**. Precedent to avoid: a 0.3.0 intake
+  once read as if `#37` were "implemented" when it was an OPEN issue (only the
+  fallback-ladder step had shipped). When unsure, mark "검증 필요" in the body for
+  the blog team's pre-publish fact-check rather than asserting.
+- **Special trigger — actively drop Claude↔Codex debates.** When the pair diverged
+  substantively for 3+ rounds and then converged (or honestly forked), that is the
+  highest-value material. Write the *tension itself* (each side steelmanned, the
+  crux of the split, the convergence path) — not a "we agreed" summary. Use the
+  template's debate body structure.
+- **Sensitive content** that creeps in (unreleased business decisions, customer
+  identifiers, un-remediated security gaps) goes in the "공유하면 안 되는 부분"
+  section — flagged, not hidden, so the blog team can redact.
+
+The blog team pulls from the drop path on its own cadence; ping their cmux surface
+only for `urgency: urgent`. Intake ≠ publication.
+
 ## AGENTS.md
 
 `AGENTS.md` is Codex's guide for reviewing/working in this repo (the adversarial
