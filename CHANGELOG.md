@@ -7,6 +7,14 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-17
+
+A small, focused release cut at a clean stopping point: the task-scaffolding
+command and the consumer-facing `verify.sh` seed are done and tested, and the
+roadmap is empty (no open issues), so there is nothing in flight to wait for.
+This also closes the #37 reviewer-transport line of work entirely — only its
+fallback-ladder step ever shipped (in 0.3.0); the other two were rejected (docs).
+
 ### Added
 - **Task-scaffolding command** (#55) — `orchestrator.py new <batch-dir> <slug>
   [--title]` and `/redteam:redteam-new-task` create the next `task-NNN` directory
@@ -120,7 +128,8 @@ Initial public release: the standalone, Apache-2.0 redteam harness extracted fro
 its origin monorepo — stdlib-only engine, prompts, agent skeletons, installer, and
 Claude Code plugin packaging, with tier-aware routing (#13).
 
-[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AscendyProject/redteam/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.3.0
 [0.2.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.2.0
 [0.1.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.1.0
