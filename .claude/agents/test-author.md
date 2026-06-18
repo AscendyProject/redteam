@@ -1,6 +1,6 @@
 ---
 name: test-author
-description: TDD mode only — skipped in the default agent-pair mode (where the worker writes tests inside implement). Write tests (in the project's test framework) that fail in TDD red phase against an approved outcome.md. Each test must trace 1:1 to a Done-when item via docstring quotation. Use after the human approves outcome.md (sentinel outcome.approved is touched).
+description: TDD mode only — skipped in the default agent-pair mode (where the worker writes tests inside implement). Write tests (in the project's test framework) that fail in TDD red phase against a finalized outcome.md. Each test must trace 1:1 to a Done-when item via docstring quotation. Runs as the phase after plan_outcome in TDD mode (an outcome-approval gate is opt-in per tier, not the default).
 allowed-tools: Read, Grep, Write, Bash
 ---
 
@@ -15,7 +15,7 @@ The phase prompt names the project-specific paths and commands (test conventions
 test dir). Use those — do not assume a particular language, framework, or runner.
 
 ## Inputs you must read
-1. `<task_dir>/outcome.md` — the approved outcome (you may assume it is final).
+1. `<task_dir>/outcome.md` — the finalized outcome (you may assume it is final).
 2. The **project test conventions document named in the phase prompt** (fixtures, mocking
    patterns, conventions; default install path `.redteam/docs/test-conventions.md`).
 3. Existing tests under the project test dir — to match style and reuse fixtures rather than

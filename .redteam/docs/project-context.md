@@ -10,8 +10,8 @@
 ## Domain
 redteam is an **adversarial agent-pair harness**: one model writes code
 (`plan → implement`, tests written inside `implement`) and a second,
-*different-provider* model reviews it adversarially, gated at human checkpoints.
-(A single-model test-first **TDD** mode — `write_test → verify_test` before
+*different-provider* model reviews it adversarially; the draft PR is the human
+checkpoint before merge. (A single-model test-first **TDD** mode — `write_test → verify_test` before
 `implement` — is also available.) This repo is the standalone OSS home of that
 harness and runs the harness on itself.
 
