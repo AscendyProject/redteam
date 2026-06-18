@@ -221,6 +221,55 @@ engine's. The vendored `.redteam/` engine follows the harness's own style, so
 - The model CLIs you configure, installed and authenticated:
   [`claude`](https://claude.com/claude-code) and/or `codex`.
 
+## Updating
+
+A vendored install is a *copy* of the engine in your repo, so it doesn't update
+itself — you re-vendor when a new version ships. Updating never touches your
+project-owned files: `--overwrite` refreshes only harness-owned trees
+(`workflows/`, `prompts/`, `templates/`, `scripts/install.py`, and the six agent
+skeletons) and leaves `config.toml`, `docs/*`, `verify.sh`, and `batches/` (your
+edits and task state) untouched.
+
+First check whether you're behind — read-only, writes nothing:
+
+```bash
+python3 .redteam/scripts/install.py . --check   # exit 0 up-to-date · 1 outdated · 2 cannot determine
+```
+
+### Plugin installs (Claude Code)
+
+The plugin ships the engine and puts `redteam-install` on PATH, so updating is
+two layers — refresh the plugin first, then re-vendor the engine it carries:
+
+```text
+/plugin marketplace update ascendy-redteam   # refresh the cached marketplace
+/plugin update redteam@ascendy-redteam       # update the plugin to the latest
+/plugin list                                 # confirm the new version
+/reload-plugins                              # apply updated commands/agents (no restart needed)
+```
+
+Then re-vendor the engine into your repo and confirm:
+
+```bash
+redteam-install . --overwrite
+redteam-install . --check        # expect "verdict: up-to-date."
+bash .redteam/scripts/verify.sh  # your gate still passes
+```
+
+### Direct (vendored) installs
+
+Pull the latest of this repo (your clone), then re-run the installer with
+`--overwrite` against your project:
+
+```bash
+python3 .redteam/scripts/install.py /path/to/your/project --overwrite
+python3 .redteam/scripts/install.py /path/to/your/project --check
+```
+
+Do the update on a branch and open a PR (don't push the engine bump straight to
+your default branch), and keep `.redteam/` excluded from your linter as in
+[Install](#install).
+
 ## Configure
 
 Edit `.redteam/config.toml` for your stack (paths, `verify_command`,
