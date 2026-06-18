@@ -6,10 +6,12 @@
 ![Runtime deps: 0](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)
 
 An adversarial **agent-pair** harness for shipping code with AI. One model
-drives a task through a test-first pipeline (plan → test → implement); a
+drives a task through a pipeline (plan → implement → review); a
 **different** model reviews the work adversarially; humans gate the
 irreversible steps. The collision of two independent model perspectives is the
-point — automatic self-agreement is what it exists to prevent.
+point — automatic self-agreement is what it exists to prevent. (A single-model
+**TDD** mode that front-loads `write_test → verify_test` is also available — see
+[Phases by mode](#phases-by-mode).)
 
 > Status: early. redteam was built as one project's internal harness and then
 > extracted into this standalone repo, which owns it going forward — it has
@@ -54,15 +56,35 @@ This is the default **agent-pair** flow. By design it runs with **no human gates
 in the common path** — the adversarial pair plus verification *is* the trust, and
 the output is a **draft PR** (your existing human checkpoint before merge), not an
 auto-merge. Human gates are something you **add back for risky changes**, not the
-default tax on every change — see [When to use it](#when-to-use-it). (The
-alternative single-model **TDD** mode replaces `plan_review` with a
-`write_test → verify_test` pair before `implement`.)
+default tax on every change — see [When to use it](#when-to-use-it).
+
+### Phases by mode
+
+`mode` (`agent-pair` by default, or `tdd`) decides which phases run. The
+authority is `PHASE_ORDER` in `orchestrator.py` — driving the pipeline manually
+must follow the row for the declared mode, not the prose:
+
+| Mode | Core phases |
+|------|-------------|
+| `agent-pair` *(default)* | `plan_outcome → plan_review → implement → review_code → create_pr` |
+| `tdd` | `plan_outcome → write_test → verify_test → implement → review_code → create_pr` |
+
+The **agent-pair** worker writes its tests **inside `implement`** — there is no
+separate test-authoring phase; the second perspective is the adversarial
+**reviewer** (`review_code`), and the plan is independently checked by
+`plan_review`. The **TDD** mode instead drops `plan_review` and front-loads a
+`write_test → verify_test` pair before `implement`. So `write_test` /
+`verify_test` (the test-author / test-verifier sub-agents) run in **TDD mode
+only** — inserting them into an agent-pair task runs a phase the mode excludes.
+
+(The conditional `rescue` escalation slot and any human gates are added per the
+[tier profile](#when-to-use-it); the table shows the common path.)
 
 Each phase is run by a focused sub-agent with its own prompt and tool scope
-(`.claude/agents/*.md`): an outcome-planner, test-author/verifier, implementer,
-code-security-reviewer, and pr-author. The reviewer is a *fresh* agent that only
-sees the diff and the project's security checklist — it never sees the
-implementer's reasoning.
+(`.claude/agents/*.md`): an outcome-planner, implementer, code-security-reviewer,
+and pr-author — plus a test-author / test-verifier pair used **only in TDD mode**.
+The reviewer is a *fresh* agent that only sees the diff and the project's
+security checklist — it never sees the implementer's reasoning.
 
 ## How it's different
 
