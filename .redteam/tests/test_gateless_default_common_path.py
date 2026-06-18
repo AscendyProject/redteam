@@ -122,12 +122,54 @@ def test_legacy_parked_tdd_task_migrates_to_write_test(monkeypatch, tmp_path):
     assert outcome != "done"
 
 
-def test_parked_task_does_not_silently_finish(monkeypatch, tmp_path):
-    """Regression for the dispatch hazard: without the migration, _next_phase
-    returns "done" for the absent gate and the task finishes having run no
-    implement/create_pr. Assert it does NOT reach "done" with implement stubbed
-    to halt."""
+def test_migration_persists_next_phase_off_the_gate(monkeypatch, tmp_path):
+    """The migration rewrites and persists `next_phase` forward, off the removed
+    gate — so a subsequent resume starts from the real work, never re-parks at the
+    vanished gate and never falls through to "done"."""
     orch = _load_orchestrator()
     task_dir = _setup_parked(tmp_path, "agent-pair")
-    outcome, _ = _run_to_first_phase(orch, monkeypatch, tmp_path, task_dir, "implement")
-    assert outcome != "done"
+    _run_to_first_phase(orch, monkeypatch, tmp_path, task_dir, "implement")
+    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["next_phase"] not in ("human_gate_outcome", "done")
+
+
+# ---- 3. an opted-in tier gate is NOT migrated away — it still blocks ----
+
+
+def test_tier_optin_outcome_gate_still_blocks(monkeypatch, tmp_path):
+    """A tier that opts the outcome gate back in (`gates=["outcome"]`) keeps
+    `human_gate_outcome` in its persisted `tier_phases`, so the migration must NOT
+    fire and the task blocks until the sentinel is touched."""
+    orch = _load_orchestrator()
+    from config import TierProfile  # type: ignore
+
+    tier_order = orch._build_tier_phase_order(TierProfile(review=True, gates=("outcome",)))
+    assert "human_gate_outcome" in tier_order  # opted in
+
+    task_dir = tmp_path / "batch" / "tasks" / "task-001"
+    task_dir.mkdir(parents=True)
+    state = {
+        "task_id": "task-001",
+        "mode": "agent-pair",
+        "phase": "human_gate_outcome",
+        "phases_completed": ["plan_outcome", "plan_review"],
+        "next_phase": "human_gate_outcome",
+        "tier": 4,
+        "tier_phases": tier_order,
+        "retries": {},
+        "max_retries_per_phase": 2,
+    }
+    (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
+
+    ran = {"implement": False}
+    monkeypatch.setitem(
+        orch.PHASE_RUNNERS,
+        "implement",
+        lambda td, st: ran.__setitem__("implement", True) or {"status": "ask_user", "feedback": "h", "log": "", "diff": ""},
+    )
+    outcome = orch.process_task(task_dir)
+
+    assert outcome == "blocked_on_human_gate"  # gate still gates
+    assert ran["implement"] is False  # migration did NOT skip the opted-in gate
