@@ -233,10 +233,11 @@ under `batches/` are never overwritten (the installer only ensures an add-only
 
 > `--check` compares the **source** side against your vendored stamp, so it's only
 > meaningful when the source is the *newer* one — run it from an updated plugin
-> (`redteam-install …`) or a fresh clone, **not** from the vendored
-> `.redteam/scripts/install.py`, which would just compare the copy to itself
-> (always "up-to-date"). Exit codes: `0` current/ahead · `1` outdated · `2` cannot
-> determine. It writes nothing.
+> (`redteam-install …`) or a fresh clone. Running your repo's own vendored
+> `.redteam/scripts/install.py` against that same repo compares the stamp to
+> itself, so it can't reveal an upstream release (it just echoes the vendored
+> version, or `unknown` if the stamp is missing). Exit codes: `0` current/ahead ·
+> `1` outdated · `2` cannot determine. It writes nothing.
 
 ### Plugin installs (Claude Code)
 
