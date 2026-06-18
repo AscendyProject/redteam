@@ -224,17 +224,19 @@ engine's. The vendored `.redteam/` engine follows the harness's own style, so
 ## Updating
 
 A vendored install is a *copy* of the engine in your repo, so it doesn't update
-itself — you re-vendor when a new version ships. Updating never touches your
-project-owned files: `--overwrite` refreshes only harness-owned trees
-(`workflows/`, `prompts/`, `templates/`, `scripts/install.py`, and the six agent
-skeletons) and leaves `config.toml`, `docs/*`, `verify.sh`, and `batches/` (your
-edits and task state) untouched.
+itself — you re-vendor when a new version ships. `--overwrite` refreshes only
+harness-owned trees (`workflows/`, `prompts/`, `templates/`, `scripts/install.py`,
+the six agent skeletons, and the `.redteam/.redteam-version` stamp); your existing
+project-owned files (`config.toml`, `docs/*`, `verify.sh`) and your task content
+under `batches/` are never overwritten (the installer only ensures an add-only
+`batches/.gitignore` rule there, leaving your files intact).
 
-First check whether you're behind — read-only, writes nothing:
-
-```bash
-python3 .redteam/scripts/install.py . --check   # exit 0 up-to-date · 1 outdated · 2 cannot determine
-```
+> `--check` compares the **source** side against your vendored stamp, so it's only
+> meaningful when the source is the *newer* one — run it from an updated plugin
+> (`redteam-install …`) or a fresh clone, **not** from the vendored
+> `.redteam/scripts/install.py`, which would just compare the copy to itself
+> (always "up-to-date"). Exit codes: `0` current/ahead · `1` outdated · `2` cannot
+> determine. It writes nothing.
 
 ### Plugin installs (Claude Code)
 
@@ -248,22 +250,26 @@ two layers — refresh the plugin first, then re-vendor the engine it carries:
 /reload-plugins                              # apply updated commands/agents (no restart needed)
 ```
 
-Then re-vendor the engine into your repo and confirm:
+Then re-vendor the engine into your repo and confirm. Because `redteam-install`
+self-locates the *plugin's* (now-updated) source, its `--check` meaningfully
+compares that against your repo's vendored stamp:
 
 ```bash
-redteam-install . --overwrite
+redteam-install . --check        # plugin source vs your vendored stamp: 1 = outdated
+redteam-install . --overwrite    # re-vendor the new engine into .redteam/
 redteam-install . --check        # expect "verdict: up-to-date."
 bash .redteam/scripts/verify.sh  # your gate still passes
 ```
 
 ### Direct (vendored) installs
 
-Pull the latest of this repo (your clone), then re-run the installer with
-`--overwrite` against your project:
+Pull the latest of this repo (your clone), then run the **clone's** installer
+against your project so the source side is the updated one:
 
 ```bash
-python3 .redteam/scripts/install.py /path/to/your/project --overwrite
-python3 .redteam/scripts/install.py /path/to/your/project --check
+# from your refreshed clone of this repo:
+python3 /path/to/redteam-clone/.redteam/scripts/install.py /path/to/your/project --check
+python3 /path/to/redteam-clone/.redteam/scripts/install.py /path/to/your/project --overwrite
 ```
 
 Do the update on a branch and open a PR (don't push the engine bump straight to
