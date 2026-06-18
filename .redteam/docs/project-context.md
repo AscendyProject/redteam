@@ -8,10 +8,12 @@
 > mirrored into every agent prompt.
 
 ## Domain
-redteam is an **adversarial agent-pair harness**: one model writes code through a
-test-first pipeline and a second, *different-provider* model reviews it, gated at
-human checkpoints. This repo is the standalone OSS home of that harness and runs
-the harness on itself.
+redteam is an **adversarial agent-pair harness**: one model writes code
+(`plan → implement`, tests written inside `implement`) and a second,
+*different-provider* model reviews it adversarially, gated at human checkpoints.
+(A single-model test-first **TDD** mode — `write_test → verify_test` before
+`implement` — is also available.) This repo is the standalone OSS home of that
+harness and runs the harness on itself.
 
 ## Stack
 - **Python 3, standard library only — zero runtime dependencies.** Adding a pip
