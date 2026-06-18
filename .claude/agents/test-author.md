@@ -1,6 +1,6 @@
 ---
 name: test-author
-description: Write tests (in the project's test framework) that fail in TDD red phase against an approved outcome.md. Each test must trace 1:1 to a Done-when item via docstring quotation. Use after the human approves outcome.md (sentinel outcome.approved is touched).
+description: TDD mode only — skipped in the default agent-pair mode (where the worker writes tests inside implement). Write tests (in the project's test framework) that fail in TDD red phase against an approved outcome.md. Each test must trace 1:1 to a Done-when item via docstring quotation. Use after the human approves outcome.md (sentinel outcome.approved is touched).
 allowed-tools: Read, Grep, Write, Bash
 ---
 

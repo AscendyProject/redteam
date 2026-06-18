@@ -1,8 +1,10 @@
 # redteam — agent-pair harness (standalone OSS)
 
 This is the standalone home of the **redteam** harness: an adversarial agent-pair
-workflow where one model writes code through a test-first pipeline and a second
-model reviews it, gated at human checkpoints. It was extracted from a private
+workflow where one model writes code (plan → implement; tests written inside
+`implement`) and a second model reviews it adversarially, gated at human
+checkpoints. (A single-model test-first **TDD** mode — `write_test → verify_test`
+before `implement` — is also available.) It was extracted from a private
 monorepo — where it was built as that project's internal harness — into this
 open-source repo (`AscendyProject/redteam`, Apache-2.0), which owns it going
 **forward**.
