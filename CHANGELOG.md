@@ -7,6 +7,18 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+### Changed
+- **The default common path is gateless, matching the documented design** (#71
+  follow-up). The static `agent-pair` and `tdd` phase orders no longer carry the
+  `human_gate_outcome` (plan-approval) gate — the adversarial pair + verify is the
+  automated trust and the draft PR is the human checkpoint, exactly as the README
+  describes ("no human gates in the common path"). Previously the static orders
+  blocked at `human_gate_outcome`, contradicting the docs. A plan-approval gate is
+  still **opt-in per tier profile** (`gates = ["outcome"]`), unchanged. **Behavior
+  change** (removes a default gate) → released as a minor. A task persisted while
+  parked at the old gate migrates forward on resume (agent-pair → `implement`, tdd
+  → `write_test`) instead of silently finishing.
+
 ## [0.4.0] - 2026-06-17
 
 A small, focused release cut at a clean stopping point: the task-scaffolding

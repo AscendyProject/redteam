@@ -60,9 +60,14 @@ from config import load_config, resolve_tier  # type: ignore[import-not-found]  
 
 # ---------- phase order & runner registry ----------
 
+# The default common path is GATELESS by design: the adversarial pair + verify is
+# the automated trust and the output is a draft PR (the human checkpoint before
+# merge), so neither static order carries `human_gate_outcome`. A plan-approval
+# gate is opt-in per tier profile (`gates = ["outcome", ...]` → _build_tier_phase_order
+# inserts it). `human_gate_outcome` stays a known sentinel (GATE_SENTINELS) for that
+# opt-in path and for migrating legacy tasks parked at it (see process_task).
 TDD_PHASE_ORDER: list[str] = [
     "plan_outcome",
-    "human_gate_outcome",
     "write_test",
     "verify_test",
     "implement",
@@ -76,7 +81,6 @@ TDD_PHASE_ORDER: list[str] = [
 AGENT_PAIR_PHASE_ORDER: list[str] = [
     "plan_outcome",
     "plan_review",
-    "human_gate_outcome",
     "implement",
     "review_code",
     # rescue + its human gate must be in the order so that a rescue
@@ -830,6 +834,19 @@ def process_task(task_dir: Path) -> TaskOutcome:
 
     while True:
         phase = state.get("next_phase") or _phase_order(state)[0]
+
+        # Compat migration: the default common path used to block at
+        # `human_gate_outcome` and is now gateless. A task persisted (parked or
+        # mid-flight) while pointed at that gate would otherwise fall through to
+        # "done" — `_next_phase` returns "done" for a phase absent from the order,
+        # silently skipping implement + create_pr. If the resolved order no longer
+        # contains the gate (untiered default, or a tier that didn't opt it in),
+        # route to the phase that used to follow it. A tier that DID opt the gate
+        # back in keeps it (it stays in tier_phases), so this never bypasses an
+        # opted-in gate.
+        if phase == "human_gate_outcome" and phase not in _phase_order(state):
+            phase = "write_test" if _mode(state) == "tdd" else "implement"
+            state["next_phase"] = phase
 
         if phase == "done":
             state["phase"] = "done"
