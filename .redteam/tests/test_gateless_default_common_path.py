@@ -167,7 +167,9 @@ def test_tier_optin_outcome_gate_still_blocks(monkeypatch, tmp_path):
     monkeypatch.setitem(
         orch.PHASE_RUNNERS,
         "implement",
-        lambda td, st: ran.__setitem__("implement", True) or {"status": "ask_user", "feedback": "h", "log": "", "diff": ""},
+        lambda td, st: (
+            ran.__setitem__("implement", True) or {"status": "ask_user", "feedback": "h", "log": "", "diff": ""}
+        ),
     )
     outcome = orch.process_task(task_dir)
 
