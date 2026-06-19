@@ -17,10 +17,11 @@ _AGENTS_DIR = Path(__file__).resolve().parents[2] / ".claude" / "agents"
 # Each agent's pinned tool set = exactly what its body/runner contract needs.
 # Writers of an output artifact need Write: outcome-planner (outcome.md),
 # test-author (tests), the reviewers (their *_review.md), pr-author (pr.md).
-# Bash is for agents that run a command (tests / scanner / git+gh). The real
-# read-only enforcement for the live pipeline is the headless adapter sandbox
-# (`codex --sandbox read-only` / `claude --permission-mode plan`); this frontmatter
-# is the restriction for the in-session sub-agent path.
+# Bash is for agents that run a command (tests / scanner / git+gh). Sandbox-enforced
+# read-only applies specifically to the headless REVIEWER-adapter path (`codex
+# --sandbox read-only` / `claude --permission-mode plan`) — worker phases run
+# workspace-write. This frontmatter is the tool restriction for the in-session
+# sub-agent path; it is not, by itself, an airtight read-only boundary.
 _EXPECTED_TOOLS = {
     "outcome-planner.md": {"Read", "Grep", "Glob", "Write"},
     "test-author.md": {"Read", "Grep", "Write", "Bash"},
