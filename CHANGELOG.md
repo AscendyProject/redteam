@@ -12,7 +12,7 @@ releases may include behavior changes; breaking changes are called out).
 The default common path is now genuinely gateless — the code matches what the docs
 always promised — and the agent-pair/TDD flow is described accurately throughout.
 Surfaced by a downstream consumer (the `portfolio` project) and driven through the
-harness's own cross-provider review (plan_review + code_review).
+harness's own cross-provider review (`plan_review` + `review_code`).
 
 ### Changed
 - **The default common path is gateless, matching the documented design** (#71,
