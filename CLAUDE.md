@@ -81,7 +81,7 @@ all security boundaries — never loosen them inline; plan_review first.
 
 ## Project status
 
-`v0.5.0` is released and the repo is public. Extraction, cross-stack validation,
+`v0.5.1` is released and the repo is public. Extraction, cross-stack validation,
 Claude Code plugin packaging, and tier-aware routing (#13) are done. v0.2.0 added
 the self-review guard (#28), `/redteam` commands + `review` subcommand (#29),
 opt-in `--protect-config` (#30), and pipeline-mode validation (#36). v0.3.0 added
@@ -96,7 +96,9 @@ from a generic fail-closed template (#43), greened the cp949/Windows test suite
 `docs/decisions/`. v0.5.0 makes the default common path **gateless** (#71/#75 —
 removes `human_gate_outcome` from the static orders, opt-in per tier; the draft PR
 is the human checkpoint) and realigns the agent-pair/TDD docs so the default flow
-is no longer mislabeled "test-first" (#72/#77). See `CHANGELOG.md`.
+is no longer mislabeled "test-first" (#72/#77). v0.5.1 fixes the subagent tool
+restriction (#76 — the skeletons used the ignored `allowed-tools:` key instead of
+`tools:`, so per-agent tool limits were silently dropped). See `CHANGELOG.md`.
 
 **Roadmap:** no open issues. The reviewer-transport work (#37, umbrella) is fully
 resolved — step 4 (fallback ladder) shipped in 0.3.0; steps 5 and 6 were rejected
