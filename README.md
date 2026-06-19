@@ -129,6 +129,25 @@ isn't an adapter (e.g. `"human"`) falls back to the manual flow (you paste the
 review and touch the sentinel). Adding another provider is one adapter file plus
 one registry line.
 
+The default ships Claude as the worker and Codex as the reviewer. To **reverse
+it** — Codex writes the code, Claude reviews it adversarially ("Codex main, Claude
+sub") — flip the four roles:
+
+```toml
+[models]
+planner     = "codex"     # worker: Codex plans + writes the code
+implementer = "codex"
+reviewer    = "claude"    # reviewer: Claude, read-only, adversarial
+rescue      = "claude"
+```
+
+The orchestrator is a plain Python CLI, so this runs from **any shell** with the
+`codex` and `claude` CLIs installed and authenticated — you don't need Claude
+Code. (The Claude Code plugin is just one delivery surface for Claude-Code users;
+the cross-provider pairing itself is engine-level config, and the same
+`.claude/agents/*.md` skeletons drive both providers.) The self-review guard still
+applies: worker and reviewer must resolve to *different* providers.
+
 ## When to use it
 
 The goal is **minimal human intervention, without losing trust** — the
