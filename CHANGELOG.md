@@ -7,17 +7,30 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-19
+
+The default common path is now genuinely gateless — the code matches what the docs
+always promised — and the agent-pair/TDD flow is described accurately throughout.
+Surfaced by a downstream consumer (the `portfolio` project) and driven through the
+harness's own cross-provider review (plan_review + code_review).
+
 ### Changed
-- **The default common path is gateless, matching the documented design** (#71
-  follow-up). The static `agent-pair` and `tdd` phase orders no longer carry the
+- **The default common path is gateless, matching the documented design** (#71,
+  #75). The static `agent-pair` and `tdd` phase orders no longer carry the
   `human_gate_outcome` (plan-approval) gate — the adversarial pair + verify is the
   automated trust and the draft PR is the human checkpoint, exactly as the README
   describes ("no human gates in the common path"). Previously the static orders
   blocked at `human_gate_outcome`, contradicting the docs. A plan-approval gate is
   still **opt-in per tier profile** (`gates = ["outcome"]`), unchanged. **Behavior
-  change** (removes a default gate) → released as a minor. A task persisted while
+  change** (removes a default gate) → this minor release. A task persisted while
   parked at the old gate migrates forward on resume (agent-pair → `implement`, tdd
   → `write_test`) instead of silently finishing.
+- **Docs no longer call the default agent-pair flow "test-first"** (#71, #72, #77).
+  Agent-pair is `plan → implement → review` (the worker writes tests inside
+  `implement`); `write_test`/`verify_test` and the test-author / test-verifier
+  sub-agents are **TDD-mode only**. Adds a "Phases by mode" table, fixes the
+  Mermaid and the role/gate descriptions, and labels the TDD-only skeletons — so a
+  manual pipeline driver can't be led into running a phase the mode excludes.
 
 ## [0.4.0] - 2026-06-17
 
@@ -140,7 +153,8 @@ Initial public release: the standalone, Apache-2.0 redteam harness extracted fro
 its origin monorepo — stdlib-only engine, prompts, agent skeletons, installer, and
 Claude Code plugin packaging, with tier-aware routing (#13).
 
-[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AscendyProject/redteam/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AscendyProject/redteam/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.3.0
 [0.2.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.2.0
