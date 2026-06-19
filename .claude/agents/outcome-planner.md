@@ -38,16 +38,16 @@ A single file: `<task_dir>/outcome.md`. No other files. No code edits.
 
 ## Affected files
 - `path/to/file` — <one-line reason>
-- `(new) <test file under the project test dir, named to match the project's test-file pattern>` — <one-line reason — the test-author writes here at the canonical test location named in the phase prompt, NOT under `<task_dir>/>`
+- `(new) <test file under the project test dir, named to match the project's test-file pattern>` — <one-line reason — the tests are written here at the canonical test location named in the phase prompt, NOT under `<task_dir>/`; the pipeline's test-writing phase (the test-author in tdd, or the implementer in agent-pair) creates this>`
 
 ## Verification hooks
 ### Existing (must continue to pass)
 - `<the project verify command given in the phase prompt>` — full suite must pass
 - `<other already-runnable command, e.g. a specific existing test path>`
 
-### To be created (test-author will define exact test names)
+### To be created (the test-writing phase will define exact test names)
 - tests under the project test dir covering: <behavior 1>, <behavior 2>
-- <other testing scope you expect the test-author to encode, in plain English>
+- <other testing scope to be encoded as tests, in plain English>
 
 ## Risks
 - <Decision the human must make, or unknown that could expand scope>
@@ -72,8 +72,8 @@ A single file: `<task_dir>/outcome.md`. No other files. No code edits.
   document it in Risks.
 - **Verification hooks `To be created` items describe scope, not commands.** State the
   test directory and the behaviors to cover; do **not** invent test function names — that
-  is the test-author's job. Inventing names here creates a fake contract that the test
-  verifier will reject.
+  is the test-writing phase's job (the test-author in tdd, the implementer in agent-pair).
+  Inventing names here creates a fake contract the downstream phase would have to honor.
 - **No vendor / framework assumptions** that aren't in the project context document or the
   actual code. If the task implies a library not in the project's dependency manifest, surface
   it in Risks.

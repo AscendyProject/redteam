@@ -124,6 +124,29 @@ def _preflight_pr_auth(cwd: Path) -> str | None:
     return None
 
 
+def _pr_author_prompt(task_id: str, task_dir: Path, branch: str, proj: Any) -> str:
+    """The pr-author prompt is mode/tier-neutral: it names only always-present
+    artifacts and treats the review/test artifacts as optional, because which of
+    plan_review.md / code_review.md / test_review.md exist depends on the pipeline
+    mode (agent-pair vs tdd) AND the tier (a review=false tier produces none). The
+    implementation AND its tests are in impl_diff.patch either way — in tdd the
+    test-author wrote the test file, in agent-pair the implementer did — so the
+    pr-author reads the diff rather than assuming a separate test-author artifact."""
+    return (
+        f"Create the draft PR for task: {task_id}\n"
+        f"Inputs: the artifacts present under {task_dir} — always input.md, outcome.md, "
+        "impl_diff.patch, state.json, plus whichever of plan_review.md, code_review.md and "
+        "test_review.md were produced (which exist depends on the pipeline mode and tier). "
+        "The implementation AND its tests are in impl_diff.patch / the branch diff — read "
+        "that for the actual change rather than assuming where the files live.\n"
+        f"Push to branch `{branch}` against base branch `{proj.base_branch}` (use "
+        f"`gh pr create --base {proj.base_branch}`), write {task_dir}/pr.md, and save the "
+        f"PR URL to {task_dir}/pr_url.txt.\n"
+        "ALWAYS pass `--draft`. Never `git push --force`. Follow your agent definition "
+        "exactly."
+    )
+
+
 def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     task_id = task_dir.name
     rr = repo_root()
@@ -139,19 +162,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     branch = _pr_branch(state, task_id, cfg.project.branch_prefix)
     proj = cfg.project
 
-    prompt = (
-        f"Create the draft PR for task: {task_id}\n"
-        f"Inputs: every artifact under {task_dir} (outcome.md, test_review.md, "
-        "impl_diff.patch, code_review.md, input.md, state.json) PLUS the new test "
-        f"file the test-author created at the canonical path under `{proj.test_dir}` "
-        f"(declared in outcome.md's Affected files) and the implementer's changes under "
-        f"{', '.join(proj.source_dirs)}.\n"
-        f"Push to branch `{branch}` against base branch `{proj.base_branch}` (use "
-        f"`gh pr create --base {proj.base_branch}`), write {task_dir}/pr.md, and save the "
-        f"PR URL to {task_dir}/pr_url.txt.\n"
-        "ALWAYS pass `--draft`. Never `git push --force`. Follow your agent definition "
-        "exactly."
-    )
+    prompt = _pr_author_prompt(task_id, task_dir, branch, proj)
 
     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)
