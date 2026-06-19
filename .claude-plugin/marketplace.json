@@ -8,7 +8,7 @@
     {
       "name": "redteam",
       "source": ".",
-      "description": "Adversarial agent-pair harness (TDD pipeline + adversarial review, human-gated).",
+      "description": "Adversarial agent-pair harness: one model writes code (plan → implement), a second reviews it adversarially; the draft PR is the human checkpoint (a single-model test-first TDD mode is also available).",
       "commands": [
         "./commands/redteam-install.md",
         "./commands/redteam-review.md",
