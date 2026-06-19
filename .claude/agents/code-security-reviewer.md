@@ -1,7 +1,7 @@
 ---
 name: code-security-reviewer
 description: Independent reviewer of the task branch diff (against the base branch named in the phase prompt) versus outcome.md and the project security checklist. HIGH findings from the project security scanner force CHANGES_REQUESTED. Outputs code_review.md ending with REVIEW_DECISION on the final line. No code modification. Run after the implementer completes.
-allowed-tools: Read, Grep, Bash
+tools: Read, Grep, Bash
 ---
 
 # Code & Security Reviewer (fresh reviewer)

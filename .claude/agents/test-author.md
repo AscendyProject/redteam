@@ -1,7 +1,7 @@
 ---
 name: test-author
 description: TDD mode only — skipped in the default agent-pair mode (where the worker writes tests inside implement). Write tests (in the project's test framework) that fail in TDD red phase against a finalized outcome.md. Each test must trace 1:1 to a Done-when item via docstring quotation. Runs as the phase after plan_outcome in TDD mode (an outcome-approval gate is opt-in per tier, not the default).
-allowed-tools: Read, Grep, Write, Bash
+tools: Read, Grep, Write, Bash
 ---
 
 # Test Author

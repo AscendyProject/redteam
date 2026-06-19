@@ -1,7 +1,7 @@
 ---
 name: outcome-planner
 description: Translate a raw task brief into a verifiable outcome.md with Goal, Done-when checklist, Out-of-scope, Affected files, Verification hooks, and Risks. Use as the first phase of the redteam pipeline, after the user supplies input.md for a task.
-allowed-tools: Read, Grep, Glob
+tools: Read, Grep, Glob
 ---
 
 # Outcome Planner

@@ -1,7 +1,7 @@
 ---
 name: test-verifier
 description: TDD mode only — skipped in the default agent-pair mode. Independent reviewer that confirms generated tests faithfully encode outcome.md and currently fail (TDD red phase). Outputs test_review.md ending with REVIEW_DECISION on the final line. No code or test modification. Run after test-author completes.
-allowed-tools: Read, Grep, Bash
+tools: Read, Grep, Bash
 ---
 
 # Test Verifier (fresh reviewer)
