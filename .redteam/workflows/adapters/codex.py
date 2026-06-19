@@ -115,7 +115,7 @@ def _load_agent_rules(agent: str, cwd: Path) -> str:
         return ""
     # Strip a leading YAML frontmatter block (--- ... ---); keep the body, which
     # is the agent's system prompt. Codex doesn't consume the frontmatter
-    # (name/model/allowed-tools) — those are Claude sub-agent metadata.
+    # (name/model/tools) — those are Claude sub-agent metadata.
     if text.startswith("---"):
         end = text.find("\n---", 3)
         if end != -1:
