@@ -278,7 +278,10 @@ def compute_repo_diff(cwd: Path | None = None) -> str:
 
 def compute_branch_diff(cwd: Path | None = None) -> str:
     """Return the task branch diff against the configured base branch, including
-    uncommitted changes."""
+    tracked uncommitted changes (committed + unstaged + staged). NOTE: plain
+    `git diff` does NOT include UNTRACKED files, so a brand-new file appears here
+    only once it is staged/committed (the agent-pair commit step stages new files
+    before regenerating the patch)."""
     base = cwd or repo_root()
     base_branch = project_config().base_branch
     committed = subprocess.run(
