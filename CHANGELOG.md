@@ -7,6 +7,22 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-19
+
+### Fixed
+- **Subagent tool restrictions now actually apply** (#76). All six bundled
+  `.claude/agents/*.md` declared their tool allowlist with `allowed-tools:` — the
+  slash-command/settings key, which Claude Code **silently ignores** on a
+  subagent, so each agent inherited the parent's full tool set (a read-only
+  reviewer could Edit/Write). Switched to the documented subagent key `tools:`,
+  and corrected the lists to what each role needs (added `Write` to
+  `outcome-planner` and the two reviewers, which produce an output file — a bare
+  rename would otherwise have broken them). Pinned in a new test. Consumers should
+  re-vendor (`redteam-install . --overwrite`). Sandbox-enforced read-only for the
+  live adversarial reviewer remains the headless adapter path
+  (`codex --sandbox read-only` / `claude --permission-mode plan`); this is the
+  restriction for the in-session sub-agent path.
+
 ## [0.5.0] - 2026-06-19
 
 The default common path is now genuinely gateless — the code matches what the docs
@@ -153,7 +169,8 @@ Initial public release: the standalone, Apache-2.0 redteam harness extracted fro
 its origin monorepo — stdlib-only engine, prompts, agent skeletons, installer, and
 Claude Code plugin packaging, with tier-aware routing (#13).
 
-[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/AscendyProject/redteam/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AscendyProject/redteam/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AscendyProject/redteam/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AscendyProject/redteam/releases/tag/v0.3.0
