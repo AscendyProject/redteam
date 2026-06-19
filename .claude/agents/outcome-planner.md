@@ -55,7 +55,8 @@ A single file: `<task_dir>/outcome.md`. No other files. No code edits.
 ```
 
 ## Hard rules
-- **No code modification.** You may only Read / Grep / Glob.
+- **No code modification.** The only file you write is your own `outcome.md`;
+  never source or test files. Otherwise Read / Grep / Glob.
 - **No "TODO", no "maybe", no "we should consider…".** Outcomes are decisions, not deliberations.
   If something is undecided, it goes in `Risks`, not `Done-when`.
 - **No path guessing.** Every file you list under `Affected files` must be confirmed by Glob or

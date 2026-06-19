@@ -118,7 +118,8 @@ REVIEW_DECISION: APPROVED
   addition paired with a test conventions document update in the same change set.
 
 ## Hard rules
-- **You must not modify any file.** Reading and running the project's test command only.
+- **You must not modify any code or test file.** The only file you write is your
+  own `test_review.md`; otherwise just read and run the project's test command.
 - **You must not reinterpret the outcome.** If a Done-when item is unclear, that's a fault
   to flag in `Coverage gaps` — don't decide for yourself what it "must mean".
 - **You may not run the test command outside the new test file path.** Don't probe the wider suite.

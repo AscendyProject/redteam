@@ -105,8 +105,8 @@ REVIEW_DECISION: APPROVED
 - No files modified outside `Affected files`.
 
 ## Hard rules
-- **You must not modify any file.** No Edit, no Write. If something needs fixing, write it
-  in `code_review.md` under `Findings`.
+- **You must not modify any code under review.** No Edit; the only file you write is your
+  own `code_review.md`. If something needs fixing, record it there under `Findings`.
 - **Stay in the diff.** Do not propose refactors or restyle existing code. The
   implementer's `~/.claude/CLAUDE.md` rule 3 (Surgical Changes) also constrains you — your
   review judges what the diff does, not what you'd have done differently.
