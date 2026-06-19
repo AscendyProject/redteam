@@ -7,8 +7,8 @@
 
 An adversarial **agent-pair** harness for shipping code with AI. One model
 drives a task through a pipeline (plan → implement → review); a
-**different** model reviews the work adversarially; humans gate the
-irreversible steps. The collision of two independent model perspectives is the
+**different** model reviews the work adversarially; the output is a draft PR you
+review before merge. The collision of two independent model perspectives is the
 point — automatic self-agreement is what it exists to prevent. (A single-model
 **TDD** mode that front-loads `write_test → verify_test` is also available — see
 [Phases by mode](#phases-by-mode).)
@@ -42,7 +42,7 @@ flowchart TD
     RC -->|APPROVED| CPR[create_pr → draft PR]:::worker
     RC -->|CHANGES_REQUESTED| IMPL
     RC -. blocker persists .-> RES[rescue]:::rev
-    RES --> CPR
+    RES --> HGR[human_gate_rescue] --> CPR
     CPR --> DONE([done]):::done
 
     classDef worker fill:#e3f2fd,stroke:#1976d2,color:#0d47a1;
@@ -61,8 +61,9 @@ default tax on every change — see [When to use it](#when-to-use-it).
 ### Phases by mode
 
 `mode` (`agent-pair` by default, or `tdd`) decides which phases run. The
-authority is `PHASE_ORDER` in `orchestrator.py` — driving the pipeline manually
-must follow the row for the declared mode, not the prose:
+authority is `_phase_order()` in `orchestrator.py` (`AGENT_PAIR_PHASE_ORDER` /
+`TDD_PHASE_ORDER`) — driving the pipeline manually must follow the row for the
+declared mode, not the prose:
 
 | Mode | Core phases |
 |------|-------------|
@@ -77,8 +78,10 @@ separate test-authoring phase; the second perspective is the adversarial
 `verify_test` (the test-author / test-verifier sub-agents) run in **TDD mode
 only** — inserting them into an agent-pair task runs a phase the mode excludes.
 
-(The conditional `rescue` escalation slot and any human gates are added per the
-[tier profile](#when-to-use-it); the table shows the common path.)
+(The table shows the worker + reviewer phases. A `rescue` slot is entered only if
+a blocker persists across review rounds — in the untiered default a rescue is then
+human-reviewed (`human_gate_rescue`) before the PR. A plan-approval gate is opt-in
+per [tier profile](#when-to-use-it).)
 
 Each phase is run by a focused sub-agent with its own prompt and tool scope
 (`.claude/agents/*.md`): an outcome-planner, implementer, code-security-reviewer,
@@ -103,8 +106,11 @@ makes that separation structural and then acts on it:
   configurably *different* model — that sees only the diff and the security
   checklist, never the implementer's reasoning, so self-justification can't
   cross the boundary.
-- **Humans gate the irreversible steps** (plan approval, PR creation). It never
-  autonomously merges.
+- **The draft PR is the human checkpoint; the default common path has no gates.**
+  The pair plus verification is the automated trust, so the output is a **draft
+  PR** you review before merge — it never autonomously merges. Blocking human
+  gates (plan approval, etc.) are **opt-in per tier** for risky changes, not the
+  default.
 - **Either model on either side, zero runtime deps.** See
   [Model freedom](#model-freedom) and [Install](#install).
 

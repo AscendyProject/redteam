@@ -1,6 +1,6 @@
 {
   "name": "redteam",
-  "description": "Adversarial agent-pair harness: one model writes code (plan → implement), a second model reviews it adversarially, gated at human checkpoints (a single-model test-first TDD mode is also available).",
+  "description": "Adversarial agent-pair harness: one model writes code (plan → implement), a second model reviews it adversarially; the draft PR is the human checkpoint before merge (a single-model test-first TDD mode is also available).",
   "version": "0.4.0",
   "author": { "name": "AscendyProject" },
   "homepage": "https://github.com/AscendyProject/redteam",
