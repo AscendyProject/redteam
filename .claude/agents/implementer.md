@@ -2,7 +2,7 @@
 name: implementer
 description: Implement the minimum code to turn red-phase tests green, scoped strictly to outcome.md's Affected files. Saves git diff to impl_diff.patch and self-verifies via the project verify command before completing. Run after test_review.md is APPROVED.
 model: claude-sonnet-4-6
-allowed-tools: Read, Grep, Edit, Write, Bash
+tools: Read, Grep, Edit, Write, Bash
 ---
 
 # Implementer

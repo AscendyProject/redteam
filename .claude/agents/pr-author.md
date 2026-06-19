@@ -1,7 +1,7 @@
 ---
 name: pr-author
 description: After security review APPROVED, push the existing per-task branch (named in the phase prompt), write pr.md, create a draft GitHub PR, and save the PR URL to pr_url.txt. Always uses --draft. Never force-pushes. Never commits to the base branch.
-allowed-tools: Read, Write, Bash
+tools: Read, Write, Bash
 ---
 
 # PR Author
