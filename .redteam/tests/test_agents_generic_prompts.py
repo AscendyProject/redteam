@@ -131,7 +131,22 @@ def test_write_test_prompt_injects_foreign_config(tmp_path) -> None:
 def test_implement_agent_pair_prompt_injects_foreign_config(tmp_path) -> None:
     from phase_runners import implement
 
-    prompt = _capture(implement, {"mode": "agent-pair"}, tmp_path)
+    # _run_agent_pair now touches git (untracked snapshot + commit) around the
+    # worker invoke; stub that layer so this test isolates the PROMPT the agent gets.
+    rec = _Recorder()
+    with (
+        patch("config.load_config", return_value=_foreign()),
+        patch("phase_runners.implement.get_worker_adapter", return_value=rec),
+        patch("phase_runners.implement.repo_root", return_value=tmp_path),
+        patch("phase_runners.implement.compute_repo_diff", return_value=""),
+        patch("phase_runners.implement._untracked_files", return_value=set()),
+        patch("phase_runners.implement._commit_agent_pair_diff", lambda *a, **k: None),
+        patch("phase_runners.implement._uncommitted_scope_files", return_value=[]),
+        patch("phase_runners.implement._write_current_diff", return_value=("", "sha")),
+        patch("phase_runners.implement._run_verification_commands", return_value=(0, "ok")),
+    ):
+        implement.run(tmp_path, {"mode": "agent-pair"})
+    prompt = rec.prompt
     assert ".rt/ctx.md" in prompt and "src/" in prompt and "spec/" in prompt
     assert "app/" not in prompt
 
