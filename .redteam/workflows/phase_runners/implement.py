@@ -156,6 +156,14 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, be
     so a filename with pathspec magic (`:(...)`) or special characters can't match
     unintended files. Fail-closed: any git failure raises (the caller turns it into a
     phase error) rather than proceeding to review on a stale/incomplete range.
+
+    Known limitation: a snapshot diffs by NAME, so a file that was ALREADY untracked
+    before the worker ran and is then *modified* in place (not created) is not
+    detected — it stays in `before`, so `current - before` excludes it. This is a
+    pathological case (the implementer is scoped to outcome.md's Affected files; a
+    pre-existing untracked file is the user's own scratch, not task scope) and such a
+    change would not be in the PR anyway; closing it would require content-hashing the
+    whole untracked set, which is disproportionate here.
     """
     state["implement_round_count"] = int(state.get("implement_round_count") or 0) + 1
     round_n = int(state["implement_round_count"])
@@ -172,11 +180,11 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, be
     def _in_task_dir(p: str) -> bool:
         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
 
-    new_untracked = {p for p in (_untracked_files(cwd) - before_untracked) if not _in_task_dir(p)}
+    new_untracked = _untracked_files(cwd) - before_untracked
     seen: set[str] = set()
     to_stage: list[str] = []
     for path in _tracked_changed_paths(cwd) + sorted(new_untracked):
-        if path not in seen:
+        if path not in seen and not _in_task_dir(path):  # filter BOTH tracked + new untracked
             seen.add(path)
             to_stage.append(path)
     if not to_stage:

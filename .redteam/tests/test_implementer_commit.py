@@ -403,6 +403,10 @@ def test_real_git_commits_new_untracked_and_excludes_task_artifacts(monkeypatch,
     def invoke(**kwargs):
         (repo / "tests" / "test_new.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
         (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
+        # a NEW file outside source_dirs/test_dir (e.g. a migration) must still commit —
+        # the snapshot stages new files anywhere, not just within scoped roots.
+        (repo / "migrations").mkdir()
+        (repo / "migrations" / "0001_init.sql").write_text("-- up\n", encoding="utf-8")
         return {"returncode": 0, "stdout": "done", "stderr": ""}
 
     monkeypatch.setattr(implement, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
@@ -420,5 +424,6 @@ def test_real_git_commits_new_untracked_and_excludes_task_artifacts(monkeypatch,
     ).stdout.split("\n")
     assert "tests/test_new.py" in committed  # the NEW untracked file is in the reviewed range
     assert "app/existing.py" in committed  # the tracked modification too
+    assert "migrations/0001_init.sql" in committed  # a new file OUTSIDE source/test scope, too
     # the harness's own scratch artifacts were NOT swept into the task commit
     assert not any(c.startswith(".redteam/batches/") for c in committed if c)
