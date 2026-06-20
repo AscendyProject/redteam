@@ -273,17 +273,30 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     return sorted(stray)
 
 
-def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
-    proj = project_config()
-    base = (
-        f"Implement the approved plan for the task at: {task_dir}\n"
-        f"Inputs: {task_dir}/input.md, {task_dir}/outcome.md, "
-        f"{task_dir}/plan_review.md, and any previous {task_dir}/code_review.md.\n"
+def _agent_pair_base_prompt(task_dir: Path, proj: Any) -> str:
+    """Agent-pair implement prompt. plan_review.md / code_review.md are OPTIONAL —
+    a review=false tier runs plan_outcome→implement with neither — so they are
+    named as "if present", never hard-required. The implementer writes the planned
+    tests itself (no test-author phase in agent-pair) and must not touch pre-existing
+    tests."""
+    return (
+        f"Mode: agent-pair. Implement the approved plan for the task at: {task_dir}\n"
+        f"Inputs: {task_dir}/input.md, {task_dir}/outcome.md, and any "
+        f"{task_dir}/plan_review.md and previous {task_dir}/code_review.md that are present "
+        "(a lighter tier may run without a plan review).\n"
         f"Respect the project hard rules in {proj.context_file}. Source dirs: "
         f"{', '.join(proj.source_dirs)}; test dir: {proj.test_dir}.\n"
-        "Stay within the approved plan. If the work needs new scope, stop and update outcome.md instead. "
+        "In agent-pair mode YOU write the tests the approved plan calls for "
+        "(outcome.md's 'Verification hooks > To be created') together with the implementation. "
+        "Do not modify, delete, or rename any pre-existing test. "
+        "Stay within the approved plan; if the work needs new scope, stop and update outcome.md instead. "
         "Do not create a PR. After editing, stop; the orchestrator will run verification."
     )
+
+
+def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+    proj = project_config()
+    base = _agent_pair_base_prompt(task_dir, proj)
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()
@@ -381,13 +394,11 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     return PhaseResult(status="changes_requested", feedback=feedback, log=feedback, diff=diff)
 
 
-def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
-    if state.get("mode") == "agent-pair":
-        return _run_agent_pair(task_dir, state)
-
-    proj = project_config()
-    base = (
-        "Implement the minimum code to make the new test file (the canonical path "
+def _tdd_base_prompt(task_dir: Path, proj: Any) -> str:
+    """TDD implement prompt. The test file + test_review.md were authored upstream
+    and are read-only here — the implementer only turns the red tests green."""
+    return (
+        "Mode: tdd. Implement the minimum code to make the new test file (the canonical path "
         "declared in outcome.md's Affected files) pass.\n"
         f"Inputs: {task_dir}/outcome.md, the new test file under `{proj.test_dir}`, "
         f"{task_dir}/test_review.md. Respect the project hard rules in {proj.context_file}; "
@@ -397,6 +408,14 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         f"diff to {task_dir}/impl_diff.patch via "
         f"`git diff > {task_dir}/impl_diff.patch`. Follow your agent definition exactly."
     )
+
+
+def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+    if state.get("mode") == "agent-pair":
+        return _run_agent_pair(task_dir, state)
+
+    proj = project_config()
+    base = _tdd_base_prompt(task_dir, proj)
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()

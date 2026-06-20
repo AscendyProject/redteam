@@ -167,7 +167,10 @@ def test_create_pr_prompt_injects_foreign_config(tmp_path) -> None:
     ):
         create_pr.run(tmp_path, {})
     prompt = rec.prompt
-    assert "spec/" in prompt and "src/" in prompt and "task/" in prompt  # branch_prefix=task
+    # The pr-author prompt is diff-based (reads impl_diff.patch) and mode/tier-neutral (#73),
+    # so it no longer injects source/test dirs — but it must still inject the configured
+    # branch_prefix and base branch (used by the git/gh commands), not redteam's own.
+    assert "task/" in prompt  # branch_prefix=task
     assert "develop" in prompt  # configured base branch, not hardcoded main
     assert "under `tests/`" not in prompt and "app/ changes" not in prompt and "against main" not in prompt
 
