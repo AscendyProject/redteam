@@ -235,6 +235,10 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     (impl_diff.patch, verification.log) and gitignored files (e.g. __pycache__,
     *.pyc) never trip it — only real code/test changes. After a SUCCESSFUL commit
     the index equals HEAD, so the `--cached` probe is empty (no false positive).
+    Trade-off (#50): the scope is deliberately source/test only — checking ALL paths
+    would flag the user's own untracked scratch as "stray" (false positives), the
+    exact noise #50 scoping avoids. The residual gap (a commit hook mutating a tracked
+    file OUTSIDE source/test after staging) is pathological and accepted, not widened.
     """
 
     def _names(args: list[str]) -> list[str]:

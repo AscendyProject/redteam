@@ -336,6 +336,39 @@ def test_uncommitted_scope_files_ignores_artifacts_outside_source_dirs(monkeypat
     assert stray == ["app/new_module.py"]
 
 
+def test_task_dir_artifacts_are_excluded_from_the_commit(monkeypatch, tmp_path):
+    """Harness artifacts under the task dir must never be staged — even a TRACKED
+    one (the filter applies to the whole stage set, tracked + new untracked)."""
+    implement = _load_implement_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    task_dir = repo / ".redteam" / "batches" / "b" / "tasks" / "task-001"
+    task_dir.mkdir(parents=True)
+    phase = {"invoked": False, "staged_stdin": None}
+    _wire(implement, monkeypatch, repo, on_invoke=lambda phase=phase: phase.__setitem__("invoked", True))
+
+    def fake_run(argv, **kwargs):
+        if _untracked_probe(argv):
+            # after invoke: a new source file AND a new task-dir artifact (impl_diff.patch)
+            return _ok("app/new.py\0.redteam/batches/b/tasks/task-001/impl_diff.patch\0" if phase["invoked"] else "")
+        if _tracked_probe(argv):
+            # a tracked source change AND a tracked task-dir artifact
+            return _ok("app/x.py\0.redteam/batches/b/tasks/task-001/outcome.md\0")
+        if _is(argv, "--literal-pathspecs", "add"):
+            phase["staged_stdin"] = kwargs.get("input")
+            return _ok()
+        if _is(argv, "diff", "--cached", "--quiet"):
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return _ok()
+
+    monkeypatch.setattr(implement.subprocess, "run", fake_run)
+    result = implement._run_agent_pair(task_dir, _state())
+
+    assert result["status"] == "approved"
+    staged = set((phase["staged_stdin"] or "").split("\0")) - {""}
+    assert staged == {"app/x.py", "app/new.py"}  # both task-dir artifacts excluded
+
+
 def test_fails_closed_when_pre_invoke_snapshot_raises_oserror(monkeypatch, tmp_path):
     """A process-launch failure (git missing) raises OSError, not RuntimeError — the
     pre-invoke snapshot must fail closed and never invoke the worker."""
