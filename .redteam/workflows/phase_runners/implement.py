@@ -13,7 +13,6 @@ from adapters import get_worker_adapter
 from ._base import (
     PhaseResult,
     build_prompt_with_feedback,
-    compute_branch_diff,
     compute_repo_diff,
     project_config,
     validate_verification_commands,
@@ -73,8 +72,20 @@ def _run_verification_commands(
     return 0, "".join(chunks)
 
 
+def _branch_diff_checked(cwd: Path) -> str:
+    """Full branch diff (committed + unstaged + staged), FAIL-CLOSED — raises on a
+    git error instead of returning a silently empty/partial diff. impl_diff.patch is
+    what the reviewer reads; a partial patch behind a green status would let an
+    incomplete change be approved."""
+    base_branch = project_config().base_branch
+    return "".join(
+        _run_git_checked(args, cwd).stdout
+        for args in (["diff", f"{base_branch}...HEAD"], ["diff"], ["diff", "--cached"])
+    )
+
+
 def _write_current_diff(task_dir: Path, cwd: Path) -> tuple[str, str]:
-    diff = compute_branch_diff(cwd=cwd)
+    diff = _branch_diff_checked(cwd)
     patch_path = task_dir / "impl_diff.patch"
     patch_path.write_text(diff, encoding="utf-8")
     digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
@@ -134,20 +145,34 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, be
     then refresh impl_diff.patch from the committed range.
 
     `before_untracked` is the untracked set captured BEFORE the worker ran; `current -
-    before` is exactly what the implementer created (a new test/source/migration/
-    fixture, anywhere), so a pre-existing untracked file the user left in the tree is
-    never swept into the task commit. Plain `git diff` (and so the old patch-header
-    file list) does NOT include untracked files — without this an agent-pair task that
-    creates a new file would leave it uncommitted and the integrity gate would reject
-    it. Staged via a NUL-delimited, LITERAL pathspec list so a filename with pathspec
-    magic (`:(...)`) or special characters can't match unintended files. Fail-closed:
-    any git failure raises (the caller turns it into a phase error) rather than
-    proceeding to review on a stale/incomplete range.
+    before` is exactly the files the implementer newly created (a new test / source /
+    migration / fixture in any non-ignored location), so a pre-existing untracked file
+    the user left in the tree is never swept into the task commit. GITIGNORED files are
+    intentionally excluded (both snapshots use `--exclude-standard`, matching the
+    integrity gate) — they are not committed, by design. Plain `git diff` (and so the
+    old patch-header file list) does NOT include untracked files — without this an
+    agent-pair task that creates a new file would leave it uncommitted and the
+    integrity gate would reject it. Staged via a NUL-delimited, LITERAL pathspec list
+    so a filename with pathspec magic (`:(...)`) or special characters can't match
+    unintended files. Fail-closed: any git failure raises (the caller turns it into a
+    phase error) rather than proceeding to review on a stale/incomplete range.
     """
     state["implement_round_count"] = int(state.get("implement_round_count") or 0) + 1
     round_n = int(state["implement_round_count"])
 
-    new_untracked = _untracked_files(cwd) - before_untracked
+    # Exclude the task dir from the staged NEW files: the harness writes its own
+    # scratch artifacts there during the run (impl_diff.patch, verification.log, the
+    # *_review.md / outcome.md trail) — those are not the implementer's code and the
+    # pr-author stages them deliberately at PR time, not the WIP commit.
+    try:
+        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
+    except ValueError:
+        task_rel = None
+
+    def _in_task_dir(p: str) -> bool:
+        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
+
+    new_untracked = {p for p in (_untracked_files(cwd) - before_untracked) if not _in_task_dir(p)}
     seen: set[str] = set()
     to_stage: list[str] = []
     for path in _tracked_changed_paths(cwd) + sorted(new_untracked):
@@ -193,9 +218,9 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     verification just passed on (verify ran on the dirty worktree). Returns
     the uncommitted *source/test* files across all three states that would diverge
     the committed range from the worktree verification ran on:
-      - staged-but-uncommitted (`git diff --cached`): the commit did not land them
-        (a `git commit` failure / hook); `_commit_agent_pair_diff` ignores the
-        commit returncode, so this is reachable and MUST be caught here;
+      - staged-but-uncommitted (`git diff --cached`): defense-in-depth — the commit
+        is fail-closed now, but a hook or partial commit could still leave staged
+        changes out of HEAD, so this stays caught here;
       - tracked-but-unstaged modifications (`git diff`);
       - untracked, non-ignored new files (`git ls-files --others`).
     Restricted to the project's source_dirs / test_dir, so harness artifacts
@@ -258,7 +283,11 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         fb = f"could not snapshot the working tree before implement ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
     result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
-    diff, diff_sha = _write_current_diff(task_dir, rr)
+    try:
+        diff, diff_sha = _write_current_diff(task_dir, rr)
+    except (RuntimeError, OSError) as exc:
+        fb = f"could not capture the implementation diff ({exc})."
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
 
     verification = state.setdefault("verification", {})
     verification["last_diff_sha256"] = diff_sha
@@ -298,9 +327,12 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         _commit_agent_pair_diff(task_dir, state, rr, before_untracked)
     except (RuntimeError, OSError) as exc:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
-        diff = _write_current_diff(task_dir, rr)[0]
-        return PhaseResult(status="error", feedback=fb, log=fb, diff=diff)
-    diff, diff_sha = _write_current_diff(task_dir, rr)
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+    try:
+        diff, diff_sha = _write_current_diff(task_dir, rr)
+    except (RuntimeError, OSError) as exc:
+        fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
     verification["last_diff_sha256"] = diff_sha
 
     if rc == 0:

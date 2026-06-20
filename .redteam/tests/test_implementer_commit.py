@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 
 
@@ -17,7 +18,8 @@ def _wire(implement, monkeypatch, repo, *, on_invoke=None):
     whose invoke() may simulate the implementer creating files, and a passing verify."""
     monkeypatch.setattr(implement, "repo_root", lambda: repo)
     monkeypatch.setattr(implement, "project_config", lambda: _PROJ)
-    monkeypatch.setattr(implement, "compute_branch_diff", lambda cwd: "diff --git a/app/x.py b/app/x.py\n")
+    # impl_diff.patch is regenerated via _branch_diff_checked → git (fake_run handles
+    # the `git diff …` calls through its fall-through).
 
     def invoke(**kwargs):
         if on_invoke is not None:
@@ -61,7 +63,7 @@ def test_agent_pair_commits_tracked_and_new_untracked(monkeypatch, tmp_path):
     task_dir.mkdir()
     repo = tmp_path / "repo"
     repo.mkdir()
-    phase = {"invoked": False, "staged_stdin": None}
+    phase = {"invoked": False, "staged_stdin": None, "add_argv": None}
 
     _wire(implement, monkeypatch, repo, on_invoke=lambda phase=phase: phase.__setitem__("invoked", True))
 
@@ -73,6 +75,7 @@ def test_agent_pair_commits_tracked_and_new_untracked(monkeypatch, tmp_path):
             return _ok("app/x.py\0")  # one tracked change
         if _is(argv, "--literal-pathspecs", "add"):
             phase["staged_stdin"] = kwargs.get("input")
+            phase["add_argv"] = argv
             return _ok()
         if _is(argv, "diff", "--cached", "--quiet"):
             return SimpleNamespace(returncode=1, stdout="", stderr="")  # staged → commit proceeds
@@ -86,6 +89,10 @@ def test_agent_pair_commits_tracked_and_new_untracked(monkeypatch, tmp_path):
     assert result["status"] == "approved"
     staged = set((phase["staged_stdin"] or "").split("\0")) - {""}
     assert staged == {"app/x.py", "app/new.py"}  # tracked change + the new untracked file
+    # staged via the literal, NUL-delimited pathspec interface (not `add -- <paths>`)
+    assert "--literal-pathspecs" in phase["add_argv"]
+    assert "--pathspec-from-file=-" in phase["add_argv"]
+    assert "--pathspec-file-nul" in phase["add_argv"]
 
 
 def test_pre_existing_untracked_is_not_swept_into_the_commit(monkeypatch, tmp_path):
@@ -327,3 +334,91 @@ def test_uncommitted_scope_files_ignores_artifacts_outside_source_dirs(monkeypat
     proj = SimpleNamespace(source_dirs=["app/"], test_dir="tests/")
     stray = implement._uncommitted_scope_files(repo, proj)
     assert stray == ["app/new_module.py"]
+
+
+def test_fails_closed_when_pre_invoke_snapshot_raises_oserror(monkeypatch, tmp_path):
+    """A process-launch failure (git missing) raises OSError, not RuntimeError — the
+    pre-invoke snapshot must fail closed and never invoke the worker."""
+    implement = _load_implement_module()
+    task_dir = tmp_path / "t"
+    task_dir.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    invoked = {"yes": False}
+    monkeypatch.setattr(implement, "repo_root", lambda: repo)
+    monkeypatch.setattr(implement, "project_config", lambda: _PROJ)
+
+    def invoke(**kwargs):
+        invoked["yes"] = True
+        return {"returncode": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(implement, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
+
+    def boom(argv, **kwargs):
+        raise OSError("git: command not found")
+
+    monkeypatch.setattr(implement.subprocess, "run", boom)
+    result = implement._run_agent_pair(task_dir, _state())
+
+    assert result["status"] == "error"
+    assert invoked["yes"] is False  # fail closed BEFORE running the worker
+
+
+# ---- real-git integration (not mocked) ----
+
+
+def _git(repo, *args):
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def test_real_git_commits_new_untracked_and_excludes_task_artifacts(monkeypatch, tmp_path):
+    """End-to-end against a REAL git repo (no subprocess mocking): the implementer
+    creates a NEW untracked test file and modifies a tracked file; both must land in
+    the committed range `base...HEAD`, while the harness's own task-dir artifacts
+    (impl_diff.patch, verification.log) must NOT be committed."""
+    implement = _load_implement_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@e")
+    _git(repo, "config", "user.name", "t")
+    (repo / "app").mkdir()
+    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / ".gitkeep").write_text("", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "init")
+    _git(repo, "checkout", "-b", "redteam/task-001")
+
+    task_dir = repo / ".redteam" / "batches" / "b" / "tasks" / "task-001"
+    task_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(implement, "repo_root", lambda: repo)
+    monkeypatch.setattr(
+        implement,
+        "project_config",
+        lambda: SimpleNamespace(source_dirs=["app/"], test_dir="tests/", context_file="c", base_branch="main"),
+    )
+
+    def invoke(**kwargs):
+        (repo / "tests" / "test_new.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+        (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
+        return {"returncode": 0, "stdout": "done", "stderr": ""}
+
+    monkeypatch.setattr(implement, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
+    monkeypatch.setattr(
+        implement,
+        "_run_verification_commands",
+        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
+    )
+
+    result = implement._run_agent_pair(task_dir, _state())
+    assert result["status"] == "approved", result["feedback"]
+
+    committed = subprocess.run(
+        ["git", "diff", "--name-only", "main...HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.split("\n")
+    assert "tests/test_new.py" in committed  # the NEW untracked file is in the reviewed range
+    assert "app/existing.py" in committed  # the tracked modification too
+    # the harness's own scratch artifacts were NOT swept into the task commit
+    assert not any(c.startswith(".redteam/batches/") for c in committed if c)
