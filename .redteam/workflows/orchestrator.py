@@ -468,6 +468,22 @@ def _clear_manual_sentinel(task_dir: Path, phase: str) -> None:
         path.unlink()
 
 
+def _archive_review_round(task_dir: Path, filename: str) -> None:
+    """Move the current review file to the next round-numbered slot, preserving
+    every round's full prose (#86): `code_review.md` -> `code_review.round1.md`,
+    then `code_review.round2.md`, ... The latest round always vacates `filename`
+    so the next round writes a fresh file. Round numbers are derived from the
+    files already on disk, so this is resume-safe and threads no state."""
+    path = task_dir / filename
+    if not path.exists():
+        return
+    stem, _, suffix = filename.partition(".")
+    n = 1
+    while (task_dir / f"{stem}.round{n}.{suffix}").exists():
+        n += 1
+    path.replace(task_dir / f"{stem}.round{n}.{suffix}")
+
+
 def _clear_manual_phase_artifacts(task_dir: Path, phase: str) -> None:
     _clear_manual_sentinel(task_dir, phase)
     review_files = {
@@ -477,10 +493,7 @@ def _clear_manual_phase_artifacts(task_dir: Path, phase: str) -> None:
     }
     filename = review_files.get(phase)
     if filename:
-        path = task_dir / filename
-        if path.exists():
-            previous = task_dir / f"{filename}.previous"
-            path.replace(previous)
+        _archive_review_round(task_dir, filename)
 
 
 def _clear_ask_user_sentinel(task_dir: Path) -> None:
