@@ -84,6 +84,38 @@ def _branch_diff_checked(cwd: Path) -> str:
     )
 
 
+def _tdd_review_patch(cwd: Path, proj: Any) -> str:
+    """The tdd review/PR patch: tracked working-tree changes PLUS new UNTRACKED files
+    under the project's source/test roots, each rendered as a new-file diff
+    (non-mutating). Plain `git diff` excludes untracked, so in tdd — which commits
+    nothing — the new test (from write_test) and any new source would be invisible to
+    review_code (it reviews this) and pr-author. Scoped to source/test roots so a
+    user's unrelated untracked scratch is NOT swept into the patch the reviewer +
+    pr-author consume (#82). FAIL-CLOSED: any git error raises. Interim fix: review
+    visibility + task-code PR inclusion; full cross-phase commit discipline (#82) is
+    the complete answer — new files OUTSIDE source/test (e.g. migrations) still need it."""
+    # tracked changes = unstaged + staged (vs HEAD); `git diff` alone omits staged.
+    parts = [_run_git_checked(["diff"], cwd).stdout, _run_git_checked(["diff", "--cached"], cwd).stdout]
+    roots = [r for r in (*proj.source_dirs, proj.test_dir) if r]
+    if roots:
+        listed = _run_git_checked(
+            ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "-z", "--", *roots], cwd
+        ).stdout
+        for path in (p for p in listed.split("\0") if p):
+            proc = subprocess.run(
+                ["git", "--no-pager", "diff", "--no-index", "--binary", "--", "/dev/null", path],
+                cwd=str(cwd),
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            if proc.returncode not in (0, 1):  # 0 = identical (n/a), 1 = new-file diff; >1 = git error
+                raise RuntimeError(f"git diff --no-index failed (exit {proc.returncode})")
+            parts.append(proc.stdout)
+    return "".join(parts)
+
+
 def _write_current_diff(task_dir: Path, cwd: Path) -> tuple[str, str]:
     diff = _branch_diff_checked(cwd)
     patch_path = task_dir / "impl_diff.patch"
@@ -404,9 +436,8 @@ def _tdd_base_prompt(task_dir: Path, proj: Any) -> str:
         f"{task_dir}/test_review.md. Respect the project hard rules in {proj.context_file}; "
         f"source dirs: {', '.join(proj.source_dirs)}.\n"
         "Stay strictly within the Affected files listed in outcome.md. Do NOT modify "
-        "the test file the test-author created. After implementing, save your full "
-        f"diff to {task_dir}/impl_diff.patch via "
-        f"`git diff > {task_dir}/impl_diff.patch`. Follow your agent definition exactly."
+        "the test file the test-author created. After implementing, stop — the "
+        "orchestrator runs verification and saves the diff. Follow your agent definition exactly."
     )
 
 
@@ -447,16 +478,17 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         )
         return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
 
-    patch_path = task_dir / "impl_diff.patch"
-    if not patch_path.exists():
-        feedback = (
-            f"impl_diff.patch missing — implementer didn't save the diff.\n"
-            "Re-run after instructing the agent to write `git diff > "
-            f"{task_dir}/impl_diff.patch` before exiting."
-        )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
-
     rc, verify_output = _run_verify_sh(rr, verify_argv)
+    # The HARNESS writes impl_diff.patch (not the agent), AFTER verify — a verify
+    # script may generate/modify files, so the patch must match the tree that passed.
+    # It includes new UNTRACKED files under the source/test roots so review_code and
+    # pr-author can see the new test (write_test) + source; fail-closed (#82).
+    try:
+        diff = _tdd_review_patch(rr, proj)  # pre-invoke proj (IR-001: not a worker-edited reload)
+        (task_dir / "impl_diff.patch").write_text(diff, encoding="utf-8")
+    except (RuntimeError, OSError) as exc:
+        fb = f"could not build the tdd review diff ({exc})."
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
     if rc == 0:
         return PhaseResult(
             status="approved",

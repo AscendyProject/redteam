@@ -167,7 +167,11 @@ def test_legacy_run_snapshots_verify_before_implementer() -> None:
             return {"returncode": 0, "stdout": "", "stderr": ""}
 
     def _fake_run(argv, **kwargs):
-        captured["argv"] = argv
+        # Capture the VERIFY invocation only — the harness now also runs `git` calls
+        # (building the tdd review patch, #82) after verify, which would otherwise
+        # overwrite the captured argv.
+        if argv and argv[0] != "git":
+            captured["argv"] = argv
 
         class _P:
             returncode = 0
