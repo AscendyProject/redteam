@@ -97,8 +97,11 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     # Like the test verifier, this is a fresh reviewer; no prior feedback is forwarded.
     proj = project_config()
+    # tdd commits nothing, so `git diff base...HEAD` is empty here — review the
+    # implementation via the harness-written `impl_diff.patch`, which includes the new
+    # (untracked) test + source under the project's source/test roots (#82).
     prompt = (
-        f"Review `git diff {proj.base_branch}...HEAD` for the implementation of the task at: {task_dir}\n"
+        f"Review the implementation in `{task_dir}/impl_diff.patch` for the task at: {task_dir}\n"
         f"Apply the project security checklist at {proj.security_checklist}, the project hard "
         f"rules at {proj.context_file}, and {task_dir}/outcome.md.\n"
         f"Produce {task_dir}/code_review.md ending with `REVIEW_DECISION: APPROVED` or "
