@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: Implement the minimum code for outcome.md's approved plan, scoped to its Affected files; saves git diff to impl_diff.patch and self-verifies via the project verify command. Test handling depends on the Mode named in the phase prompt — TDD: turn the test-author's red tests green (after test_review.md is APPROVED); agent-pair: write the planned tests yourself alongside the implementation.
+description: Implement the minimum code for outcome.md's approved plan, scoped to its Affected files; self-verifies via the project verify command (the orchestrator captures the diff for the reviewer). Test handling depends on the Mode named in the phase prompt — TDD: turn the test-author's red tests green (after test_review.md is APPROVED); agent-pair: write the planned tests yourself alongside the implementation.
 model: claude-sonnet-4-6
 tools: Read, Grep, Edit, Write, Bash
 ---
@@ -44,8 +44,8 @@ The phase prompt states the **Mode**:
 ## Output
 - Code changes under the project source dirs, **only within files listed in outcome.md's
   `Affected files`**. New files are allowed if they're listed (with a `(new)` marker is fine).
-- `<task_dir>/impl_diff.patch` — the result of `git diff` after your implementation, saved
-  for the security reviewer.
+- You do NOT write `impl_diff.patch` — the orchestrator captures the diff for the reviewer
+  after you stop. Just make the changes and self-verify.
 - Tests under the project test dir: in **agent-pair** mode you create the new tests the plan
   calls for (and must not touch pre-existing ones); in **tdd** mode the test-author already
   wrote them and you make no test edits at all.
@@ -84,8 +84,8 @@ The phase prompt states the **Mode**:
 5. Run the project's verify command (from the project config / context document) — it must
    pass in full. If it fails on a test you did NOT write (a regression elsewhere), stop and
    report; do not "fix" the unrelated test.
-6. `git diff > <task_dir>/impl_diff.patch` — save the diff for the security reviewer.
-7. Summarize what you changed and where in your final response.
+6. Summarize what you changed and where in your final response. (The orchestrator captures
+   the diff into `impl_diff.patch` for the reviewer after you stop — you don't write it.)
 
 ## Self-verification gate
 You may only declare the task done when **all** of these hold:

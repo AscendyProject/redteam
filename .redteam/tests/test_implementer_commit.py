@@ -474,19 +474,23 @@ def test_tdd_review_patch_includes_untracked_test_and_source_but_not_scratch(tmp
     _git(repo, "config", "user.name", "t")
     (repo / "src").mkdir()
     (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "src" / "util.py").write_text("y = 1\n", encoding="utf-8")
     (repo / "tests").mkdir()
     (repo / "tests" / ".gitkeep").write_text("", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "init")
 
-    # tracked modification + new untracked test + untracked scratch OUTSIDE the roots
-    (repo / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")
+    # unstaged tracked mod + STAGED tracked mod + new untracked test + scratch OUTSIDE roots
+    (repo / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")  # unstaged
+    (repo / "src" / "util.py").write_text("y = 2\n", encoding="utf-8")
+    _git(repo, "add", "src/util.py")  # staged
     (repo / "tests" / "test_new.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
     (repo / "scratch.txt").write_text("user scratch\n", encoding="utf-8")
 
     proj = SimpleNamespace(source_dirs=["src/"], test_dir="tests/")
     patch = implement._tdd_review_patch(repo, proj)
 
-    assert "src/app.py" in patch and "x = 2" in patch  # tracked source change visible
+    assert "src/app.py" in patch and "x = 2" in patch  # unstaged tracked change visible
+    assert "src/util.py" in patch and "y = 2" in patch  # STAGED tracked change visible too
     assert "tests/test_new.py" in patch  # NEW untracked test included
     assert "scratch.txt" not in patch  # untracked OUTSIDE source/test NOT swept in

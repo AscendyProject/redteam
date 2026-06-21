@@ -94,7 +94,8 @@ def _tdd_review_patch(cwd: Path, proj: Any) -> str:
     pr-author consume (#82). FAIL-CLOSED: any git error raises. Interim fix: review
     visibility + task-code PR inclusion; full cross-phase commit discipline (#82) is
     the complete answer — new files OUTSIDE source/test (e.g. migrations) still need it."""
-    parts = [_run_git_checked(["diff"], cwd).stdout]
+    # tracked changes = unstaged + staged (vs HEAD); `git diff` alone omits staged.
+    parts = [_run_git_checked(["diff"], cwd).stdout, _run_git_checked(["diff", "--cached"], cwd).stdout]
     roots = [r for r in (*proj.source_dirs, proj.test_dir) if r]
     if roots:
         listed = _run_git_checked(
@@ -484,10 +485,10 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     # pr-author can see the new test (write_test) + source; fail-closed (#82).
     try:
         diff = _tdd_review_patch(rr, project_config())
+        (task_dir / "impl_diff.patch").write_text(diff, encoding="utf-8")
     except (RuntimeError, OSError) as exc:
         fb = f"could not build the tdd review diff ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
-    (task_dir / "impl_diff.patch").write_text(diff, encoding="utf-8")
     if rc == 0:
         return PhaseResult(
             status="approved",

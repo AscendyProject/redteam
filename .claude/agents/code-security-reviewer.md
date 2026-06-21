@@ -17,14 +17,15 @@ project's security scanner and its sections; apply whatever it specifies.
 
 ## Inputs you must read
 1. `<task_dir>/outcome.md`
-2. `git diff <base>...HEAD` (the base branch is named in the phase prompt) — your primary
-   review surface. Do NOT read full files unless the
-   diff is genuinely ambiguous; reviewing full files invites scope creep into your review.
+2. **The change surface named in the phase prompt** — your primary review surface. The phase
+   prompt names exactly what to review: a committed range (`git diff <base>...HEAD`, the base
+   branch named there) or a patch file (`<task_dir>/impl_diff.patch`). Review that. Do NOT
+   read full files unless the diff is genuinely ambiguous; reviewing full files invites scope
+   creep into your review.
 3. The **project security checklist named in the phase prompt** — apply every section to the
    diff (default install path `.redteam/docs/security-checklist.md`).
 4. The **project context document named in the phase prompt** — hard rules and architecture
    boundaries (default install path `.redteam/docs/project-context.md`).
-5. `<task_dir>/impl_diff.patch` — same as `git diff` but archived; use as fallback.
 
 ## Output you must produce
 A single file: `<task_dir>/code_review.md`. The **last line** of this file must be exactly
@@ -72,9 +73,10 @@ REVIEW_DECISION: APPROVED
 ```
 
 ## Process
-1. `git diff --name-only <base>...HEAD` (base from the phase prompt) — list changed files. If
-   any are outside `outcome.md`'s `Affected files`, that's an immediate HIT (architecture invariant).
-2. `git diff <base>...HEAD` — read the diff, end to end.
+1. From the change surface the phase prompt names (a `git diff <base>...HEAD` range, or
+   `impl_diff.patch`) — list the changed files. If any are outside `outcome.md`'s `Affected
+   files`, that's an immediate HIT (architecture invariant).
+2. Read that change surface, end to end.
 3. For each Done-when item in `outcome.md`, find the diff lines that satisfy it. If you
    can't find any, that's a HIT under "Outcome adequacy".
 4. Apply every section of the project security checklist to the diff. Cite file:line for HITs.
