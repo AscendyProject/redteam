@@ -632,6 +632,52 @@ def _is_stalled(state: dict[str, Any], result: PhaseResult, retries: int) -> boo
     return result["log"] == prev_log and result["diff"] == prev_diff
 
 
+def _route_to_rescue_or_defer(
+    task_dir: Path,
+    state: dict[str, Any],
+    phase: str,
+    result: PhaseResult,
+    *,
+    escalation_record: dict[str, Any] | None = None,
+) -> TaskOutcome | None:
+    """Bound the rescue-ENTRY route, then route to rescue (or defer at the ceiling).
+
+    The agent-pair escalation branches (rescue_required; review_code blocker carried
+    over; review_code still rejecting after implement retries) all route to `rescue`
+    and `continue` BEFORE the generic retry/stall accounting — so without this they
+    have NO ceiling. In particular `retries["implement"] >= 2` is sticky (the rescue
+    route never increments it), so every subsequent review_code CHANGES_REQUESTED
+    re-routes to rescue forever and the task never defers (#87, ~1h52m runaway
+    observed). A dedicated persisted `rescue_entry_count` (kept separate from
+    `retries["rescue"]`, which generic accounting uses for rescue-RUNNER error
+    retries) caps the number of rescue entries: it allows `max_retries` entries and
+    DEFERS to a human on the next one. Returns "deferred" when it defers (caller must
+    return it), else None (caller continues to the rescue phase).
+    """
+    max_retries = int(state.get("max_retries_per_phase", 3))
+    count = int(state.get("rescue_entry_count", 0)) + 1
+    state["rescue_entry_count"] = count
+    _record_failure(state, result)
+    if count > max_retries:
+        deferred: list[dict[str, Any]] = state.setdefault("deferred_requirements", [])
+        deferred.append(
+            {
+                "phase": phase,
+                "reason": "rescue_cycle_exceeded",
+                "attempts": count,
+                "feedback": result["feedback"][:4000],
+            }
+        )
+        state["next_phase"] = "deferred"
+        save_state(task_dir, state)
+        return "deferred"
+    if escalation_record is not None:
+        state.setdefault("deferred_requirements", []).append(escalation_record)
+    state["next_phase"] = "rescue"
+    save_state(task_dir, state)
+    return None
+
+
 # ---------- per-task driver ----------
 
 TaskOutcome = Literal[
@@ -1098,6 +1144,7 @@ def process_task(task_dir: Path) -> TaskOutcome:
                 # entered via the explicit `next_phase = "rescue"` branches.
                 if _mode(state) == "agent-pair":
                     state["review_items"] = _close_phase_review_items(state, phase)
+                state["rescue_entry_count"] = 0  # converged → reset the rescue-entry budget
                 state["next_phase"] = "create_pr"
             else:
                 state["next_phase"] = _next_phase(state, phase)
@@ -1116,17 +1163,13 @@ def process_task(task_dir: Path) -> TaskOutcome:
             continue
 
         if result["status"] == "rescue_required":
-            _record_failure(state, result)
-            deferred = state.setdefault("deferred_requirements", [])
-            deferred.append(
-                {
-                    "phase": phase,
-                    "reason": "rescue_required",
-                    "feedback": result["feedback"][:4000],
-                }
-            )
-            state["next_phase"] = "rescue"
-            save_state(task_dir, state)
+            escalation = {
+                "phase": phase,
+                "reason": "rescue_required",
+                "feedback": result["feedback"][:4000],
+            }
+            if _route_to_rescue_or_defer(task_dir, state, phase, result, escalation_record=escalation) == "deferred":
+                return "deferred"
             continue
 
         if (
@@ -1150,9 +1193,8 @@ def process_task(task_dir: Path) -> TaskOutcome:
             and result["status"] == "changes_requested"
             and _has_open_blocker_at_or_above(state, phase, 3)
         ):
-            _record_failure(state, result)
-            state["next_phase"] = "rescue"
-            save_state(task_dir, state)
+            if _route_to_rescue_or_defer(task_dir, state, phase, result) == "deferred":
+                return "deferred"
             continue
 
         if (
@@ -1161,9 +1203,8 @@ def process_task(task_dir: Path) -> TaskOutcome:
             and result["status"] == "changes_requested"
             and int(retries_map.get("implement", 0)) >= 2
         ):
-            _record_failure(state, result)
-            state["next_phase"] = "rescue"
-            save_state(task_dir, state)
+            if _route_to_rescue_or_defer(task_dir, state, phase, result) == "deferred":
+                return "deferred"
             continue
 
         # CHANGES_REQUESTED or error path.
