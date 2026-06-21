@@ -1,6 +1,6 @@
 ---
 name: code-security-reviewer
-description: Independent reviewer of the task branch diff (against the base branch named in the phase prompt) versus outcome.md and the project security checklist. HIGH findings from the project security scanner force CHANGES_REQUESTED. Outputs code_review.md ending with REVIEW_DECISION on the final line. No code modification. Run after the implementer completes.
+description: Independent reviewer of the task's changes (the review surface named in the phase prompt — a `git diff <base>...HEAD` range or an `impl_diff.patch`) versus outcome.md and the project security checklist. HIGH findings from the project security scanner force CHANGES_REQUESTED. Outputs code_review.md ending with REVIEW_DECISION on the final line. No code modification. Run after the implementer completes.
 tools: Read, Grep, Bash, Write
 ---
 

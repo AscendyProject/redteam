@@ -484,7 +484,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     # It includes new UNTRACKED files under the source/test roots so review_code and
     # pr-author can see the new test (write_test) + source; fail-closed (#82).
     try:
-        diff = _tdd_review_patch(rr, project_config())
+        diff = _tdd_review_patch(rr, proj)  # pre-invoke proj (IR-001: not a worker-edited reload)
         (task_dir / "impl_diff.patch").write_text(diff, encoding="utf-8")
     except (RuntimeError, OSError) as exc:
         fb = f"could not build the tdd review diff ({exc})."
