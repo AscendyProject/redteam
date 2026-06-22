@@ -13,8 +13,11 @@ from adapters import get_worker_adapter
 from ._base import (
     PhaseResult,
     build_prompt_with_feedback,
+    commit_paths,
     compute_repo_diff,
     project_config,
+    run_git_checked,
+    untracked_files,
     validate_verification_commands,
     repo_root,
 )
@@ -76,80 +79,33 @@ def _branch_diff_checked(cwd: Path) -> str:
     """Full branch diff (committed + unstaged + staged), FAIL-CLOSED — raises on a
     git error instead of returning a silently empty/partial diff. impl_diff.patch is
     what the reviewer reads; a partial patch behind a green status would let an
-    incomplete change be approved."""
+    incomplete change be approved. (agent-pair path.)"""
     base_branch = project_config().base_branch
     return "".join(
-        _run_git_checked(args, cwd).stdout
+        run_git_checked(args, cwd).stdout
         for args in (["diff", f"{base_branch}...HEAD"], ["diff"], ["diff", "--cached"])
     )
 
 
-def _tdd_review_patch(cwd: Path, proj: Any) -> str:
-    """The tdd review/PR patch: tracked working-tree changes PLUS new UNTRACKED files
-    under the project's source/test roots, each rendered as a new-file diff
-    (non-mutating). Plain `git diff` excludes untracked, so in tdd — which commits
-    nothing — the new test (from write_test) and any new source would be invisible to
-    review_code (it reviews this) and pr-author. Scoped to source/test roots so a
-    user's unrelated untracked scratch is NOT swept into the patch the reviewer +
-    pr-author consume (#82). FAIL-CLOSED: any git error raises. Interim fix: review
-    visibility + task-code PR inclusion; full cross-phase commit discipline (#82) is
-    the complete answer — new files OUTSIDE source/test (e.g. migrations) still need it."""
-    # tracked changes = unstaged + staged (vs HEAD); `git diff` alone omits staged.
-    parts = [_run_git_checked(["diff"], cwd).stdout, _run_git_checked(["diff", "--cached"], cwd).stdout]
-    roots = [r for r in (*proj.source_dirs, proj.test_dir) if r]
-    if roots:
-        listed = _run_git_checked(
-            ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "-z", "--", *roots], cwd
-        ).stdout
-        for path in (p for p in listed.split("\0") if p):
-            proc = subprocess.run(
-                ["git", "--no-pager", "diff", "--no-index", "--binary", "--", "/dev/null", path],
-                cwd=str(cwd),
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
-            if proc.returncode not in (0, 1):  # 0 = identical (n/a), 1 = new-file diff; >1 = git error
-                raise RuntimeError(f"git diff --no-index failed (exit {proc.returncode})")
-            parts.append(proc.stdout)
-    return "".join(parts)
+def _committed_range_diff(cwd: Path) -> str:
+    """The COMMITTED range only, `git diff <base>...HEAD`, FAIL-CLOSED. Used to
+    regenerate impl_diff.patch in the tdd path (#82): tdd now truly commits (write_test
+    commits the test, implement commits the rest), so the committed range IS the work —
+    and a committed-only patch equals EXACTLY what the PR will contain (reviewer-input
+    integrity). Anything left uncommitted in scope is caught by the integrity gate; out
+    of scope is the operator's, not the task's. `<base>` = live config base_branch, the
+    same source agent-pair's helpers use today (base-pinning is #91)."""
+    base_branch = project_config().base_branch
+    return run_git_checked(["diff", f"{base_branch}...HEAD"], cwd).stdout
 
 
-def _write_current_diff(task_dir: Path, cwd: Path) -> tuple[str, str]:
-    diff = _branch_diff_checked(cwd)
+def _write_current_diff(task_dir: Path, cwd: Path, diff: str | None = None) -> tuple[str, str]:
+    if diff is None:
+        diff = _branch_diff_checked(cwd)
     patch_path = task_dir / "impl_diff.patch"
     patch_path.write_text(diff, encoding="utf-8")
     digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
     return diff, digest
-
-
-def _run_git_checked(args: list[str], cwd: Path, *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a git command and FAIL CLOSED on a non-zero exit. stderr is omitted from
-    the error (it can carry a credentialed remote URL, IR-002). The commit/stage path
-    must never proceed on a silently-failed git op — that would hand review a stale or
-    incomplete committed range."""
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        input=stdin,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"git invocation failed (exit {proc.returncode})")
-    return proc
-
-
-def _untracked_files(cwd: Path) -> set[str]:
-    """Non-ignored untracked paths, NUL-delimited so special-character names are
-    exact. Fail-closed (raises) on a git failure."""
-    out = _run_git_checked(
-        ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "-z"], cwd
-    ).stdout
-    return {p for p in out.split("\0") if p}
 
 
 def _tracked_changed_paths(cwd: Path) -> list[str]:
@@ -164,7 +120,7 @@ def _tracked_changed_paths(cwd: Path) -> list[str]:
         ["diff", "-z", "--name-only"],
         ["diff", "-z", "--name-only", "--cached"],
     ):
-        out = _run_git_checked(["-c", "core.quotepath=false", *args], cwd).stdout
+        out = run_git_checked(["-c", "core.quotepath=false", *args], cwd).stdout
         for p in out.split("\0"):
             if p and p not in seen:
                 seen.add(p)
@@ -172,9 +128,10 @@ def _tracked_changed_paths(cwd: Path) -> list[str]:
     return paths
 
 
-def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before_untracked: set[str]) -> None:
+def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before_untracked: set[str]) -> None:
     """Commit the implementer's work — tracked changes PLUS files it newly created —
-    then refresh impl_diff.patch from the committed range.
+    then refresh impl_diff.patch from the committed range. Mode-generic (used by BOTH
+    the agent-pair and tdd implement paths, #82).
 
     `before_untracked` is the untracked set captured BEFORE the worker ran; `current -
     before` is exactly the files the implementer newly created (a new test / source /
@@ -212,45 +169,23 @@ def _commit_agent_pair_diff(task_dir: Path, state: dict[str, Any], cwd: Path, be
     def _in_task_dir(p: str) -> bool:
         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
 
-    new_untracked = _untracked_files(cwd) - before_untracked
+    new_untracked = untracked_files(cwd) - before_untracked
     seen: set[str] = set()
     to_stage: list[str] = []
     for path in _tracked_changed_paths(cwd) + sorted(new_untracked):
         if path not in seen and not _in_task_dir(path):  # filter BOTH tracked + new untracked
             seen.add(path)
             to_stage.append(path)
-    if not to_stage:
-        return
-
-    _run_git_checked(
-        ["--literal-pathspecs", "add", "--pathspec-from-file=-", "--pathspec-file-nul"],
-        cwd,
-        stdin="\0".join(to_stage),
-    )
-
-    cached = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
-        cwd=str(cwd),
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if cached.returncode == 0:
-        return  # nothing actually staged (e.g. all paths already committed this round)
-    if cached.returncode != 1:
-        # 0 = no diff, 1 = diff present; anything else is a real git error → fail closed.
-        raise RuntimeError(f"git diff --cached --quiet failed (exit {cached.returncode})")
 
     task_id = str(state.get("task_id") or task_dir.name)
-    _run_git_checked(["commit", "-m", f"wip({task_id}): implement round {round_n}"], cwd)
-    _write_current_diff(task_dir, cwd)
+    if commit_paths(cwd, to_stage, f"wip({task_id}): implement round {round_n}"):
+        _write_current_diff(task_dir, cwd)
 
 
 def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     """Source/test files still uncommitted AFTER the WIP commit (#50).
 
-    `_commit_agent_pair_diff` stages the implementer's tracked changes PLUS the files
+    `_commit_worker_diff` stages the implementer's tracked changes PLUS the files
     it newly created, so after it runs the worktree should be clean within scope.
     This is defense-in-depth: if anything source/test still shows uncommitted (a
     failed commit, a file changed after the snapshot), the committed range
@@ -335,7 +270,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     # Snapshot untracked files BEFORE the worker runs so the commit step can stage
     # exactly what it creates (current − before), never a pre-existing untracked file.
     try:
-        before_untracked = _untracked_files(rr)
+        before_untracked = untracked_files(rr)
     except (RuntimeError, OSError) as exc:
         fb = f"could not snapshot the working tree before implement ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -381,7 +316,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     verification["last_run_at"] = datetime.now(timezone.utc).isoformat()
     (task_dir / "verification.log").write_text(verify_output, encoding="utf-8")
     try:
-        _commit_agent_pair_diff(task_dir, state, rr, before_untracked)
+        _commit_worker_diff(task_dir, state, rr, before_untracked)
     except (RuntimeError, OSError) as exc:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -467,6 +402,15 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         msg = f"invalid project.verify_command in config: {exc}"
         return PhaseResult(status="error", feedback=msg, log=msg, diff="")
 
+    # Snapshot untracked files BEFORE the worker runs so the commit step stages
+    # exactly what implement creates (current − before); the test was already committed
+    # by write_test, so it is not in `before` and is not re-handled here (#82).
+    try:
+        before_untracked = untracked_files(rr)
+    except (RuntimeError, OSError) as exc:
+        fb = f"could not snapshot the working tree before implement ({exc})."
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+
     result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)
 
@@ -479,17 +423,41 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
 
     rc, verify_output = _run_verify_sh(rr, verify_argv)
-    # The HARNESS writes impl_diff.patch (not the agent), AFTER verify — a verify
-    # script may generate/modify files, so the patch must match the tree that passed.
-    # It includes new UNTRACKED files under the source/test roots so review_code and
-    # pr-author can see the new test (write_test) + source; fail-closed (#82).
+
+    # tdd now truly COMMITS (#82): commit implement's work (source + any new file
+    # anywhere, incl. out-of-root migrations/config — current − before), then
+    # regenerate impl_diff.patch from the COMMITTED range only, so the patch the
+    # reviewer reads equals EXACTLY what the PR will contain. The verify ran on the
+    # worktree; commit/regen happen AFTER it so the patch matches the tree that passed.
     try:
-        diff = _tdd_review_patch(rr, proj)  # pre-invoke proj (IR-001: not a worker-edited reload)
-        (task_dir / "impl_diff.patch").write_text(diff, encoding="utf-8")
+        _commit_worker_diff(task_dir, state, rr, before_untracked)
     except (RuntimeError, OSError) as exc:
-        fb = f"could not build the tdd review diff ({exc})."
+        fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+    try:
+        diff, _ = _write_current_diff(task_dir, rr, _committed_range_diff(rr))
+    except (RuntimeError, OSError) as exc:
+        fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+
     if rc == 0:
+        # Integrity gate (#50): verify passed on the WORKTREE, but review_code inspects
+        # the committed range. If anything source/test is left uncommitted, that range
+        # is stale — fail closed. Also the safety net for a legacy in-flight tdd task
+        # whose test was never committed (its untracked test trips this).
+        try:
+            stray = _uncommitted_scope_files(rr, proj)
+        except (OSError, RuntimeError) as exc:
+            fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
+            return PhaseResult(status="error", feedback=fb, log=fb, diff=diff)
+        if stray:
+            feedback = (
+                "implement left source/test changes uncommitted after the commit, so the reviewed "
+                "range (git diff <base>...HEAD) would be STALE relative to the tree verify just "
+                "passed on. Uncommitted: " + ", ".join(stray) + ". Commit these (they belong in the "
+                "implementation diff), or remove them — refusing to hand a stale range to review."
+            )
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
         return PhaseResult(
             status="approved",
             feedback="",

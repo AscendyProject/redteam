@@ -97,9 +97,10 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     # Like the test verifier, this is a fresh reviewer; no prior feedback is forwarded.
     proj = project_config()
-    # tdd commits nothing, so `git diff base...HEAD` is empty here — review the
-    # implementation via the harness-written `impl_diff.patch`, which includes the new
-    # (untracked) test + source under the project's source/test roots (#82).
+    # tdd now truly commits (write_test commits the test, implement commits the rest),
+    # so the harness writes `impl_diff.patch` from the COMMITTED range `git diff
+    # base...HEAD` — a complete, faithful view of what the PR will contain, incl. new
+    # files anywhere (not just under source/test roots). The reviewer reads that (#82).
     prompt = (
         f"Review the implementation in `{task_dir}/impl_diff.patch` for the task at: {task_dir}\n"
         f"Apply the project security checklist at {proj.security_checklist}, the project hard "
