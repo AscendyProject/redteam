@@ -5,6 +5,8 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Runtime deps: 0](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)
 
+> 🌐 한국어: [README.ko.md](README.ko.md). This English document is canonical.
+
 An adversarial **agent-pair** harness for shipping code with AI. One model
 drives a task through a pipeline (plan → implement → review); a
 **different** model reviews the work adversarially; the output is a draft PR you
