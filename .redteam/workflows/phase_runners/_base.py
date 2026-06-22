@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 # Default per-phase timeout in seconds. Halved from the original 1800s. With
@@ -497,6 +497,139 @@ def project_config():
     from config import load_config
 
     return load_config(repo_root()).project
+
+
+# ---------- shared git primitives (fail-closed) ----------
+#
+# Both `implement` (agent-pair + tdd) and `write_test` (tdd) commit worker output to
+# the task branch, so the low-level git plumbing lives here as ONE implementation —
+# every call checks the return code and OMITS stderr from any error (a git error
+# message can carry a credentialed remote URL, IR-002). The commit/stage path must
+# never proceed on a silently-failed git op: that would hand review (and the PR) a
+# stale or incomplete committed range.
+
+
+def run_git_checked(args: list[str], cwd: Path, *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run a git command and FAIL CLOSED on a non-zero exit (stderr omitted, IR-002)."""
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        input=stdin,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git invocation failed (exit {proc.returncode})")
+    return proc
+
+
+def untracked_files(cwd: Path) -> set[str]:
+    """Non-ignored untracked paths, NUL-delimited so special-character names are exact.
+    Fail-closed (raises) on a git failure."""
+    out = run_git_checked(
+        ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "-z"], cwd
+    ).stdout
+    return {p for p in out.split("\0") if p}
+
+
+def commit_paths(cwd: Path, paths: list[str], message: str) -> bool:
+    """Stage and commit EXACTLY `paths` and nothing else. Returns whether a commit was
+    made. Fail-closed: any git error raises. A `path` that no longer exists stages as a
+    deletion (the caller may pass an owned-but-deleted test path on purpose).
+
+    Scope discipline (#82): the commit is `--only` the named paths, and the
+    "anything to commit?" probe is `git diff --cached -- <paths>` scoped to them — so a
+    pre-existing STAGED operator change elsewhere in the index is neither mistaken for
+    our change nor swept into our commit. Paths are passed as a LITERAL, NUL-delimited
+    pathspec list (stage/commit) so pathspec magic `:(...)` or special chars can't match
+    unintended files; the scoped probe passes them as literal argv after `--` (safe —
+    `valid_tdd_test_files` already rejects NUL/control chars, and the implement caller's
+    paths come from git itself)."""
+    if not paths:
+        return False
+    nul = "\0".join(paths)
+    run_git_checked(["--literal-pathspecs", "add", "--pathspec-from-file=-", "--pathspec-file-nul"], cwd, stdin=nul)
+    cached = subprocess.run(
+        ["git", "--literal-pathspecs", "diff", "--cached", "--quiet", "--", *paths],
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if cached.returncode == 0:
+        return False  # nothing staged FOR OUR PATHS (already committed / unchanged)
+    if cached.returncode != 1:
+        # 0 = no diff, 1 = diff present; anything else is a real git error → fail closed.
+        raise RuntimeError(f"git diff --cached --quiet failed (exit {cached.returncode})")
+    # `--only` commits just the named paths, leaving any unrelated staged index intact.
+    run_git_checked(
+        ["--literal-pathspecs", "commit", "-m", message, "--only", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        cwd,
+        stdin=nul,
+    )
+    return True
+
+
+def normalized_test_root(proj: Any) -> str:
+    """The project's test dir as a canonical, trailing-slash POSIX prefix. The single
+    source of truth for "is this path a test file?" — manifest validation AND write_test
+    discovery use it, so a non-canonical config test_dir can't make them disagree (#82)."""
+    import posixpath
+
+    root = posixpath.normpath(proj.test_dir.replace("\\", "/"))
+    return root if root.endswith("/") else root + "/"
+
+
+def valid_tdd_test_files(value: Any, proj: Any) -> list[str]:
+    """Shape/ownership validation of the `tdd_test_files` manifest (#82), applied on
+    EVERY read and INDEPENDENT of whether the path currently exists (a worker may have
+    deleted an owned test — existence/symlink is filtered separately, at persist/stage
+    time). A malformed or hand-edited state can therefore never smuggle an arbitrary
+    path into `commit_paths`.
+
+    Cross-platform explicit (the repo supports cp949/Windows hosts): each entry must be
+    a string, contain no backslash, be repo-relative (not absolute), have no `..`
+    segment, sit under the once-normalized POSIX `test_dir`, and have a basename
+    matching `test_file_glob`. Returns the de-duplicated, sorted, validated list.
+    Raises ValueError on any violation (fail closed)."""
+    import posixpath
+    from fnmatch import fnmatch
+
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        raise ValueError("tdd_test_files must be a list of strings")
+
+    test_root = normalized_test_root(proj)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        if any(ord(c) < 0x20 for c in raw):
+            # A NUL (or other control char) would split into extra pathspecs at the
+            # `--pathspec-file-nul` staging boundary — reject so a crafted entry can't
+            # smuggle a second, out-of-scope path into the commit.
+            raise ValueError(f"tdd_test_files entry has a control character: {raw!r}")
+        if "\\" in raw:
+            raise ValueError(f"tdd_test_files entry has a backslash (use forward slashes): {raw!r}")
+        if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+            raise ValueError(f"tdd_test_files entry is not repo-relative: {raw!r}")
+        if ".." in raw.split("/"):
+            raise ValueError(f"tdd_test_files entry has a '..' segment: {raw!r}")
+        norm = posixpath.normpath(raw)
+        if norm.startswith("../") or norm == ".." or norm.startswith("/"):
+            raise ValueError(f"tdd_test_files entry escapes the repo: {raw!r}")
+        if not (norm + "/").startswith(test_root):
+            raise ValueError(f"tdd_test_files entry is not under {test_root!r}: {raw!r}")
+        if not fnmatch(posixpath.basename(norm), proj.test_file_glob):
+            raise ValueError(f"tdd_test_files entry does not match {proj.test_file_glob!r}: {raw!r}")
+        if norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return sorted(out)
 
 
 def claude_model_for_role(state: dict, role: str) -> str | None:

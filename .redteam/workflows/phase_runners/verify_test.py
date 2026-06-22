@@ -14,6 +14,7 @@ from ._base import (
     project_config,
     read_text_if_exists,
     repo_root,
+    valid_tdd_test_files,
 )
 
 
@@ -22,13 +23,28 @@ AGENT_NAME = "test-verifier"
 
 def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     proj = project_config()
-    td = proj.test_dir
+    # write_test commits the test(s) and records them in the validated `tdd_test_files`
+    # manifest (#82), so the worktree is clean here — name the committed paths
+    # explicitly rather than inferring identity from `git status` (which is now empty).
+    try:
+        manifest = valid_tdd_test_files(state.get("tdd_test_files"), proj)
+    except ValueError as exc:
+        msg = f"invalid tdd_test_files manifest in state: {exc}"
+        return PhaseResult(status="error", feedback=msg, log=msg, diff=compute_repo_diff(cwd=repo_root()))
+    if not manifest:
+        # Fail closed: no heuristic fallback. A legacy in-flight tdd task predating the
+        # commit-discipline change has no manifest — it must be restarted.
+        msg = (
+            "tdd_test_files manifest is missing/empty — write_test did not record the test files. "
+            "If this is a tdd task started before the commit-discipline change (#82), restart it."
+        )
+        return PhaseResult(status="error", feedback=msg, log=msg, diff=compute_repo_diff(cwd=repo_root()))
+
     # The verifier is a fresh reviewer; it does not see prior failure feedback.
     prompt = (
-        f"Review the new test file(s) under `{td}` (the canonical path from "
-        f"outcome.md's Affected files) against {task_dir}/outcome.md, applying the "
-        f"project's test conventions at {proj.test_conventions_file}. Use "
-        f"`git status --short {td}` to identify which file(s) the test-author added.\n"
+        f"Review the test file(s) the test-author committed for this task — "
+        f"{', '.join(manifest)} — against {task_dir}/outcome.md, applying the "
+        f"project's test conventions at {proj.test_conventions_file}.\n"
         f"Produce {task_dir}/test_review.md ending with `REVIEW_DECISION: APPROVED` or "
         "`REVIEW_DECISION: CHANGES_REQUESTED`. Follow your agent definition exactly."
     )

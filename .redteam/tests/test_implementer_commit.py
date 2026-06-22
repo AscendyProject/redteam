@@ -42,6 +42,17 @@ def _is(argv, *parts):
     return argv[: len(parts) + 1] == ["git", *parts]
 
 
+def _cached_quiet_probe(argv):
+    # commit_paths now scopes the staged-changes probe to the named paths (#82):
+    # `git --literal-pathspecs diff --cached --quiet -- <paths>`.
+    return argv[:6] == ["git", "--literal-pathspecs", "diff", "--cached", "--quiet", "--"]
+
+
+def _commit_cmd(argv):
+    # commit_paths commits ONLY the named paths: `git --literal-pathspecs commit ... --only ...`.
+    return _is(argv, "--literal-pathspecs", "commit")
+
+
 def _untracked_probe(argv):
     return "-c" in argv and "ls-files" in argv and "--others" in argv
 
@@ -77,9 +88,9 @@ def test_agent_pair_commits_tracked_and_new_untracked(monkeypatch, tmp_path):
             phase["staged_stdin"] = kwargs.get("input")
             phase["add_argv"] = argv
             return _ok()
-        if _is(argv, "diff", "--cached", "--quiet"):
+        if _cached_quiet_probe(argv):
             return SimpleNamespace(returncode=1, stdout="", stderr="")  # staged → commit proceeds
-        if _is(argv, "commit"):
+        if _commit_cmd(argv):
             return _ok()
         return _ok()  # integrity-gate probes: clean
 
@@ -114,7 +125,7 @@ def test_pre_existing_untracked_is_not_swept_into_the_commit(monkeypatch, tmp_pa
         if _is(argv, "--literal-pathspecs", "add"):
             phase["staged_stdin"] = kwargs.get("input")
             return _ok()
-        if _is(argv, "diff", "--cached", "--quiet"):
+        if _cached_quiet_probe(argv):
             return SimpleNamespace(returncode=1, stdout="", stderr="")
         return _ok()
 
@@ -145,9 +156,9 @@ def test_pure_new_file_change_still_commits(monkeypatch, tmp_path):
             return _ok("")  # NO tracked changes
         if _is(argv, "--literal-pathspecs", "add"):
             return _ok()
-        if _is(argv, "diff", "--cached", "--quiet"):
+        if _cached_quiet_probe(argv):
             return SimpleNamespace(returncode=1, stdout="", stderr="")
-        if _is(argv, "commit"):
+        if _commit_cmd(argv):
             phase["committed"] = True
             return _ok()
         return _ok()
@@ -230,7 +241,7 @@ def test_fails_closed_when_cached_quiet_returns_error(monkeypatch, tmp_path):
             return _ok("app/x.py\0")
         if _is(argv, "--literal-pathspecs", "add"):
             return _ok()
-        if _is(argv, "diff", "--cached", "--quiet"):
+        if _cached_quiet_probe(argv):
             return SimpleNamespace(returncode=128, stdout="", stderr="fatal")  # neither 0 nor 1
         return _ok()
 
@@ -262,9 +273,9 @@ def test_integrity_gate_fails_closed_on_uncommitted_source_after_commit(monkeypa
             return _ok("app/x.py\0")
         if _is(argv, "--literal-pathspecs", "add"):
             return _ok()
-        if _is(argv, "diff", "--cached", "--quiet"):
+        if _cached_quiet_probe(argv):
             return SimpleNamespace(returncode=1, stdout="", stderr="")
-        if _is(argv, "commit"):
+        if _commit_cmd(argv):
             return _ok()
         # integrity gate probes (no -c prefix): a tracked source file left unstaged
         if _is(argv, "diff", "--cached", "--name-only"):
@@ -300,9 +311,9 @@ def test_integrity_gate_fails_closed_when_a_probe_fails(monkeypatch, tmp_path):
             return _ok("app/x.py\0")
         if _is(argv, "--literal-pathspecs", "add"):
             return _ok()
-        if _is(argv, "diff", "--cached", "--quiet"):
+        if _cached_quiet_probe(argv):
             return SimpleNamespace(returncode=1, stdout="", stderr="")
-        if _is(argv, "commit"):
+        if _commit_cmd(argv):
             return _ok()
         if _is(argv, "diff", "--name-only") and "--cached" not in argv:
             return SimpleNamespace(returncode=128, stdout="", stderr="fatal: index.lock exists")
@@ -357,7 +368,7 @@ def test_task_dir_artifacts_are_excluded_from_the_commit(monkeypatch, tmp_path):
         if _is(argv, "--literal-pathspecs", "add"):
             phase["staged_stdin"] = kwargs.get("input")
             return _ok()
-        if _is(argv, "diff", "--cached", "--quiet"):
+        if _cached_quiet_probe(argv):
             return SimpleNamespace(returncode=1, stdout="", stderr="")
         return _ok()
 
@@ -462,35 +473,65 @@ def test_real_git_commits_new_untracked_and_excludes_task_artifacts(monkeypatch,
     assert not any(c.startswith(".redteam/batches/") for c in committed if c)
 
 
-def test_tdd_review_patch_includes_untracked_test_and_source_but_not_scratch(tmp_path):
-    """#82: the tdd review patch must include the new UNTRACKED test (write_test) and
-    source under the project's source/test roots — `git diff` alone excludes them —
-    while NOT sweeping the user's untracked scratch outside those roots."""
+def test_real_git_tdd_implement_commits_out_of_root_file_into_committed_range(monkeypatch, tmp_path):
+    """#82 full fix: tdd `implement` now truly COMMITS. Against a REAL git repo: with
+    the test already committed by write_test, the implementer creates source AND a file
+    OUTSIDE the source/test roots (a migration); both must land in the committed range
+    `base...HEAD`, impl_diff.patch is the committed-only diff, and the task-dir
+    artifacts are NOT committed."""
     implement = _load_implement_module()
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "t@e")
     _git(repo, "config", "user.name", "t")
-    (repo / "src").mkdir()
-    (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
-    (repo / "src" / "util.py").write_text("y = 1\n", encoding="utf-8")
+    (repo / "app").mkdir()
+    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
     (repo / "tests").mkdir()
     (repo / "tests" / ".gitkeep").write_text("", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "init")
+    _git(repo, "checkout", "-b", "redteam/task-001")
+    # write_test already committed the test on this branch.
+    (repo / "tests" / "test_feature.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    _git(repo, "add", "tests/test_feature.py")
+    _git(repo, "commit", "-m", "test(task-001): write tests")
 
-    # unstaged tracked mod + STAGED tracked mod + new untracked test + scratch OUTSIDE roots
-    (repo / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")  # unstaged
-    (repo / "src" / "util.py").write_text("y = 2\n", encoding="utf-8")
-    _git(repo, "add", "src/util.py")  # staged
-    (repo / "tests" / "test_new.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
-    (repo / "scratch.txt").write_text("user scratch\n", encoding="utf-8")
+    task_dir = repo / ".redteam" / "batches" / "b" / "tasks" / "task-001"
+    task_dir.mkdir(parents=True)
 
-    proj = SimpleNamespace(source_dirs=["src/"], test_dir="tests/")
-    patch = implement._tdd_review_patch(repo, proj)
+    monkeypatch_proj = SimpleNamespace(
+        source_dirs=["app/"],
+        test_dir="tests/",
+        context_file="c",
+        base_branch="main",
+        verify_command="true",
+        verification_allowlist=("true",),
+    )
+    import config as _config
 
-    assert "src/app.py" in patch and "x = 2" in patch  # unstaged tracked change visible
-    assert "src/util.py" in patch and "y = 2" in patch  # STAGED tracked change visible too
-    assert "tests/test_new.py" in patch  # NEW untracked test included
-    assert "scratch.txt" not in patch  # untracked OUTSIDE source/test NOT swept in
+    monkeypatch.setattr(_config, "load_config", lambda *_a, **_k: SimpleNamespace(project=monkeypatch_proj))
+    monkeypatch.setattr(implement, "repo_root", lambda: repo)
+    monkeypatch.setattr(implement, "project_config", lambda: monkeypatch_proj)
+    monkeypatch.setattr(implement, "_run_verify_sh", lambda cwd, argv: (0, "ok\n"))
+
+    def invoke(**kwargs):
+        (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
+        (repo / "migrations").mkdir()
+        (repo / "migrations" / "0001_init.sql").write_text("-- up\n", encoding="utf-8")
+        return {"returncode": 0, "stdout": "done", "stderr": ""}
+
+    monkeypatch.setattr(implement, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
+
+    result = implement.run(task_dir, {"task_id": "task-001", "mode": "tdd", "verification": {"commands": []}})
+    assert result["status"] == "approved", result["feedback"]
+    committed = subprocess.run(
+        ["git", "diff", "--name-only", "main...HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.split("\n")
+    assert "tests/test_feature.py" in committed  # the write_test commit
+    assert "app/existing.py" in committed  # implement's source change
+    assert "migrations/0001_init.sql" in committed  # a NEW file OUTSIDE source/test roots
+    assert not any(c.startswith(".redteam/batches/") for c in committed if c)
+    # impl_diff.patch is the committed-only range (no uncommitted phantom content).
+    patch_text = (task_dir / "impl_diff.patch").read_text(encoding="utf-8")
+    assert "migrations/0001_init.sql" in patch_text and "app/existing.py" in patch_text

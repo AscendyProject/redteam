@@ -28,6 +28,7 @@
     "return_phase": null
   },
   "implement_round_count": 0,
+  "tdd_test_files": [],
   "retries": {},
   "max_retries_per_phase": 2,
   "last_failure_reason": null,

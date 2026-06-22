@@ -123,7 +123,20 @@ def test_plan_outcome_prompt_injects_foreign_config(tmp_path) -> None:
 def test_write_test_prompt_injects_foreign_config(tmp_path) -> None:
     from phase_runners import write_test
 
-    prompt = _capture(write_test, {}, tmp_path)
+    # write_test now touches git (untracked snapshot + commit) around the worker
+    # invoke; stub that layer so this test isolates the PROMPT the agent gets.
+    rec = _Recorder()
+    with (
+        patch("config.load_config", return_value=_foreign()),
+        patch("phase_runners.write_test.get_worker_adapter", return_value=rec),
+        patch("phase_runners.write_test.repo_root", return_value=tmp_path),
+        patch("phase_runners.write_test.untracked_files", return_value=set()),
+        patch("phase_runners.write_test._committed_test_files", return_value=[]),
+        patch("phase_runners.write_test.commit_paths", return_value=False),
+        patch("phase_runners.write_test.compute_branch_diff", return_value=""),
+    ):
+        write_test.run(tmp_path, {})
+    prompt = rec.prompt
     assert ".rt/testconv.md" in prompt and "spec/" in prompt
     assert "tests/api/test_" not in prompt and ".redteam/docs/test-conventions.md" not in prompt
 
@@ -139,8 +152,8 @@ def test_implement_agent_pair_prompt_injects_foreign_config(tmp_path) -> None:
         patch("phase_runners.implement.get_worker_adapter", return_value=rec),
         patch("phase_runners.implement.repo_root", return_value=tmp_path),
         patch("phase_runners.implement.compute_repo_diff", return_value=""),
-        patch("phase_runners.implement._untracked_files", return_value=set()),
-        patch("phase_runners.implement._commit_agent_pair_diff", lambda *a, **k: None),
+        patch("phase_runners.implement.untracked_files", return_value=set()),
+        patch("phase_runners.implement._commit_worker_diff", lambda *a, **k: None),
         patch("phase_runners.implement._uncommitted_scope_files", return_value=[]),
         patch("phase_runners.implement._write_current_diff", return_value=("", "sha")),
         patch("phase_runners.implement._run_verification_commands", return_value=(0, "ok")),

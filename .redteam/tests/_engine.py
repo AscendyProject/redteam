@@ -61,3 +61,15 @@ def create_pr() -> ModuleType:
     import phase_runners.create_pr as m
 
     return m
+
+
+def write_test() -> ModuleType:
+    import phase_runners.write_test as m
+
+    return m
+
+
+def verify_test() -> ModuleType:
+    import phase_runners.verify_test as m
+
+    return m
