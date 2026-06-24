@@ -1536,13 +1536,31 @@ def cmd_status(batch_dir: Path) -> int:
 def _standalone_review_prompt(cfg: Any) -> str:
     """Prompt for a one-shot adversarial review of the current branch diff, with
     no task context. Mirrors the in-pipeline review_code prompt's read-only,
-    stdout-only contract so the same reviewer adapter can run it unchanged."""
+    stdout-only contract so the same reviewer adapter can run it unchanged.
+
+    Runs OUTSIDE the task/state machine, so by design there is no
+    `verification.log`, `state.json`, `outcome.md`, or `input.md`. code_review.md's
+    "Required Checks" gate on exactly those pipeline-only artifacts, so the prompt
+    must explicitly SUSPEND them here — otherwise the reviewer fails closed on
+    their absence and a standalone review can NEVER return APPROVED (#103). The
+    diff-level criteria (security, regressions, unsafe/unrelated changes,
+    pre-change-failing tests) and the finding/decision format still apply; CI runs
+    `verify.sh` as its own step, so the standalone review does not also gate on
+    verification evidence."""
     proj = cfg.project
     return (
         "Act as an adversarial code-security reviewer. Review the changes in "
         f"`git diff {proj.base_branch}...HEAD`. Apply the review criteria in "
         ".redteam/prompts/codex/code_review.md, the project security checklist at "
         f"{proj.security_checklist}, and the project hard rules at {proj.context_file}. "
+        "This is a STANDALONE review with NO task artifacts: there is no "
+        "verification.log, state.json, outcome.md, or input.md. Do NOT require those "
+        "files and do NOT emit CHANGES_REQUESTED merely because they are absent or "
+        "because verification or outcome.md alignment cannot be confirmed — those "
+        "Required Checks do not apply outside the pipeline. Base your decision solely "
+        "on the diff against the security checklist, the project hard rules, and the "
+        "diff-level criteria (regressions, unsafe or unrelated changes, and whether any "
+        "new test would have failed against the pre-change code). "
         "DO NOT write any files or touch any sentinels — output the ENTIRE review to "
         "stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
         "CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with IR-NNN findings above it."
