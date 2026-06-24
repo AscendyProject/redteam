@@ -118,3 +118,91 @@ def test_claude_model_for_role_falls_back_to_config(monkeypatch, tmp_path):
     monkeypatch.setattr(base, "repo_root", lambda: tmp_path)
     assert base.claude_model_for_role({}, "implementer") == "claude-sonnet-4-6"
     assert base.claude_model_for_role({}, "reviewer") is None
+
+
+def _captured_permission_mode(cmd: list[str]) -> str:
+    """Pull the value following --permission-mode out of the spawned argv."""
+    i = cmd.index("--permission-mode")
+    return cmd[i + 1]
+
+
+def test_worker_permission_mode_defaults_to_bypass(monkeypatch):
+    """No env override → _worker_permission_mode() returns the historical
+    bypassPermissions default (the unattended-batch default). Asserts the new
+    helper directly: pre-change there was no helper (run_claude hard-coded the
+    literal), so this fails against pre-change code where the name is undefined.
+    The override test below pins that run_claude actually wires this value into
+    the spawned argv."""
+    base = _load_base_module()
+    monkeypatch.delenv("REDTEAM_CLAUDE_PERMISSION_MODE", raising=False)
+    assert base._worker_permission_mode() == "bypassPermissions"
+
+
+def test_run_claude_honors_permission_mode_env_override(monkeypatch):
+    """REDTEAM_CLAUDE_PERMISSION_MODE lets a locked-down environment (e.g.
+    enterprise managed settings that refuse bypassPermissions) pick a
+    policy-compatible mode like acceptEdits."""
+    base = _load_base_module()
+    monkeypatch.setenv("REDTEAM_CLAUDE_PERMISSION_MODE", "acceptEdits")
+    captured: dict[str, list[str]] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    assert _captured_permission_mode(captured["cmd"]) == "acceptEdits"
+
+
+def test_run_claude_rejects_unknown_permission_mode(monkeypatch):
+    """A typo'd / unsupported mode must fail loud rather than silently weaken
+    (or break) the gate by passing an unrecognized value through to the CLI."""
+    import pytest
+
+    base = _load_base_module()
+    monkeypatch.setenv("REDTEAM_CLAUDE_PERMISSION_MODE", "yolo")
+
+    def fake_popen(cmd, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("Popen should not run when the mode is invalid")
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(ValueError, match="REDTEAM_CLAUDE_PERMISSION_MODE"):
+        base.run_claude(agent="implementer", prompt="do it", model=None)
+
+
+def test_worker_allowed_tools_empty_by_default(monkeypatch):
+    """No REDTEAM_CLAUDE_ALLOWED_TOOLS → _worker_allowed_tools() returns [], so
+    run_claude adds no --allowedTools flag (behavior unchanged). Asserts the new
+    helper directly: pre-change there was no helper or flag, so this fails against
+    pre-change code where the name is undefined. The passes-when-set test below
+    pins that a non-empty value reaches the spawned argv."""
+    base = _load_base_module()
+    monkeypatch.delenv("REDTEAM_CLAUDE_ALLOWED_TOOLS", raising=False)
+    assert base._worker_allowed_tools() == []
+
+
+def test_run_claude_passes_allowed_tools_when_set(monkeypatch):
+    """REDTEAM_CLAUDE_ALLOWED_TOOLS pre-approves shell tools so the worker can
+    self-verify (run ruff/pytest) under a non-bypass mode like acceptEdits.
+    Values are injected before --output-format so the CLI stops consuming them
+    at that flag."""
+    base = _load_base_module()
+    monkeypatch.setenv("REDTEAM_CLAUDE_ALLOWED_TOOLS", "Bash, PowerShell")
+    captured: dict[str, list[str]] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    cmd = captured["cmd"]
+    i = cmd.index("--allowedTools")
+    assert cmd[i + 1 : i + 3] == ["Bash", "PowerShell"]
+    assert cmd[i + 3] == "--output-format"

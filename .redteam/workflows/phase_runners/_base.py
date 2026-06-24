@@ -11,6 +11,7 @@ The orchestrator stays simple by pushing all subprocess plumbing here:
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -149,6 +150,45 @@ def _print_stream_event(line: str, agent: str) -> dict | None:
     return event
 
 
+# Permission mode for the spawned worker `claude`. Defaults to bypassPermissions
+# (the harness runs as an unattended batch driver, so the worker can't stop for
+# interactive approval). Some environments — notably enterprise managed settings
+# with `disableBypassPermissionsMode` — refuse bypassPermissions, leaving the
+# headless worker unable to write its outputs (outcome.md, code). The env var
+# `REDTEAM_CLAUDE_PERMISSION_MODE` lets the operator pick a policy-compatible mode
+# (e.g. "acceptEdits", which auto-accepts file writes without bypass). Restricted
+# to known Claude Code modes so a typo fails loud instead of silently weakening
+# (or breaking) the gate.
+_VALID_PERMISSION_MODES = frozenset({"bypassPermissions", "acceptEdits", "default", "plan"})
+
+
+def _worker_permission_mode() -> str:
+    mode = os.environ.get("REDTEAM_CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
+    if mode not in _VALID_PERMISSION_MODES:
+        raise ValueError(
+            f"REDTEAM_CLAUDE_PERMISSION_MODE={mode!r} is not a recognized Claude Code "
+            f"permission mode. Use one of: {', '.join(sorted(_VALID_PERMISSION_MODES))}."
+        )
+    return mode
+
+
+def _worker_allowed_tools() -> list[str]:
+    """Optional `--allowedTools` allowlist for the spawned worker.
+
+    bypassPermissions pre-approves every tool. Under a non-bypass mode like
+    acceptEdits (forced by enterprise managed settings) only file edits are
+    auto-accepted — shell tools (Bash/PowerShell) still prompt and so fail
+    headless, which stops the implementer from running ruff/pytest to
+    self-verify. `REDTEAM_CLAUDE_ALLOWED_TOOLS` (space- or comma-separated)
+    pre-approves the named tools so the worker can self-verify under such a
+    policy. Default empty → no `--allowedTools` flag (behavior unchanged).
+    """
+    raw = os.environ.get("REDTEAM_CLAUDE_ALLOWED_TOOLS", "").strip()
+    if not raw:
+        return []
+    return [tool for tool in raw.replace(",", " ").split() if tool]
+
+
 def run_claude(
     *,
     agent: str,
@@ -169,7 +209,13 @@ def run_claude(
         "--agent",
         agent,
         "--permission-mode",
-        "bypassPermissions",
+        _worker_permission_mode(),
+    ]
+    allowed_tools = _worker_allowed_tools()
+    if allowed_tools:
+        # --allowedTools consumes values up to the next flag (--output-format).
+        cmd += ["--allowedTools", *allowed_tools]
+    cmd += [
         "--output-format",
         "stream-json",
         "--verbose",  # required when --output-format=stream-json
