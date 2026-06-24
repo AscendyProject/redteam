@@ -11,6 +11,7 @@ The orchestrator stays simple by pushing all subprocess plumbing here:
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -149,6 +150,30 @@ def _print_stream_event(line: str, agent: str) -> dict | None:
     return event
 
 
+# Permission mode for the spawned worker `claude`. Defaults to bypassPermissions
+# (the harness runs as an unattended batch driver, so the worker can't stop for
+# interactive approval). Some environments — notably enterprise managed settings
+# with `disableBypassPermissionsMode` — refuse bypassPermissions, leaving the
+# headless worker unable to write its outputs (outcome.md, code). The env var
+# `REDTEAM_CLAUDE_PERMISSION_MODE` lets the operator pick a policy-compatible mode
+# (e.g. "acceptEdits", which auto-accepts file writes without bypass). Restricted
+# to known Claude Code modes so a typo fails loud instead of silently weakening
+# (or breaking) the gate.
+_VALID_PERMISSION_MODES = frozenset(
+    {"bypassPermissions", "acceptEdits", "default", "plan"}
+)
+
+
+def _worker_permission_mode() -> str:
+    mode = os.environ.get("REDTEAM_CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
+    if mode not in _VALID_PERMISSION_MODES:
+        raise ValueError(
+            f"REDTEAM_CLAUDE_PERMISSION_MODE={mode!r} is not a recognized Claude Code "
+            f"permission mode. Use one of: {', '.join(sorted(_VALID_PERMISSION_MODES))}."
+        )
+    return mode
+
+
 def run_claude(
     *,
     agent: str,
@@ -169,7 +194,7 @@ def run_claude(
         "--agent",
         agent,
         "--permission-mode",
-        "bypassPermissions",
+        _worker_permission_mode(),
         "--output-format",
         "stream-json",
         "--verbose",  # required when --output-format=stream-json
