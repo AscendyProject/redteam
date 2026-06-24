@@ -146,6 +146,34 @@ def test_review_fails_closed_on_bad_config(monkeypatch, tmp_path, capsys) -> Non
     assert called["reviewer"] is False  # bailed before resolving the reviewer
 
 
+def test_standalone_prompt_suspends_pipeline_artifact_gate() -> None:
+    """#103: the standalone review runs with no task artifacts, so its prompt must
+    explicitly suspend code_review.md's pipeline-only Required Checks
+    (verification.log / state.json / outcome.md) — otherwise the reviewer fails
+    closed on their absence and `review` can never return APPROVED. Pins that the
+    prompt names those artifacts as not-required AND still demands a diff-level
+    review (so it isn't softened into a rubber stamp)."""
+    orch = _load_orchestrator_module()
+
+    class _Proj:
+        base_branch = "main"
+        security_checklist = ".redteam/docs/security-checklist.md"
+        context_file = ".redteam/docs/project-context.md"
+
+    class _Cfg:
+        project = _Proj()
+
+    prompt = orch._standalone_review_prompt(_Cfg())
+    low = prompt.lower()
+    # the gate is explicitly suspended for the artifacts that don't exist standalone
+    assert "verification.log" in prompt and "state.json" in prompt and "outcome.md" in prompt
+    assert "do not require those" in low
+    assert "do not emit changes_requested" in low
+    # but it is still an adversarial diff review, not a waiver
+    assert "security checklist" in low
+    assert "pre-change" in low
+
+
 def test_review_dispatched_by_main_without_batch(monkeypatch) -> None:
     """`review` takes no batch dir — main must route it without requiring argv[2]."""
     orch = _load_orchestrator_module()
