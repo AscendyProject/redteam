@@ -321,17 +321,15 @@ def resolve_tier(cfg: RedteamConfig, explicit_tier: int | None, affected_paths: 
     return binding
 
 
-def load_config(repo_root: Path) -> RedteamConfig:
-    """Load `.redteam/config.toml` under `repo_root`.
+def load_config_from_text(text: str) -> RedteamConfig:
+    """Parse + validate a config from TOML TEXT (no file I/O).
 
-    Missing file → all defaults (generic placeholders). Partial file → only
-    the specified keys override; siblings keep their defaults. Unknown
-    keys/sections or bad value types raise ValueError.
+    `load_config` reads the file then delegates here. The `config` CLI (#95) reuses
+    it to validate a candidate `[models]` edit against the SAME validators before
+    writing, so the edit path can't drift from the load path. Raises ValueError
+    (incl. tomllib.TOMLDecodeError, a ValueError subclass) on malformed/invalid input.
     """
-    path = repo_root.joinpath(*_CONFIG_RELPATH)
-    if not path.exists():
-        return RedteamConfig(project=ProjectConfig(), models=ModelsConfig())
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    data = tomllib.loads(text)
     unknown_sections = set(data) - set(_KNOWN_SECTIONS)
     if unknown_sections:
         raise ValueError(
@@ -348,3 +346,86 @@ def load_config(repo_root: Path) -> RedteamConfig:
     _validate(cfg)
     _validate_tiers(cfg)
     return cfg
+
+
+def load_config(repo_root: Path) -> RedteamConfig:
+    """Load `.redteam/config.toml` under `repo_root`.
+
+    Missing file → all defaults (generic placeholders). Partial file → only
+    the specified keys override; siblings keep their defaults. Unknown
+    keys/sections or bad value types raise ValueError.
+    """
+    path = repo_root.joinpath(*_CONFIG_RELPATH)
+    if not path.exists():
+        return RedteamConfig(project=ProjectConfig(), models=ModelsConfig())
+    return load_config_from_text(path.read_text(encoding="utf-8"))
+
+
+# Roles the `config` CLI (#95) edits in `[models]`. Kept here next to ModelsConfig.
+MODELS_ROLE_KEYS = ("planner", "implementer", "reviewer", "rescue")
+
+_SECTION_HEADER_RE = re.compile(r"^\s*\[([^\]]*)\]\s*(?:#.*)?$")
+
+
+def update_models_block(text: str, new_models: dict[str, str]) -> tuple[str, set[int]] | None:
+    """Edit EXISTING canonical `[models]` assignments IN PLACE (#95).
+
+    Returns `(candidate_text, edited_line_indices)`, or `None` when the block is not
+    safely editable so the caller can FAIL CLOSED (write nothing). Deliberately narrow —
+    the redteam config.toml is seeded from a template where every role key is a canonical
+    single-line `key = "value"` assignment, so this covers the real path; anything else
+    is refused rather than risked:
+
+    - Only a canonical line `^(\\s*<bare-key>\\s*=\\s*")([^"\\\\]*)("...)$` is edited (bare
+      key, single line, simple double-quoted value with NO embedded quote/backslash → no
+      escape ambiguity). ONLY the value between the quotes is replaced; any inline `#
+      comment` and the exact line ending are preserved.
+    - NO insertion / section creation: a role key that is missing, duplicated, or
+      non-canonical, a duplicate `[models]` header, or an absent `[models]` section → `None`.
+    - The new values must already be quote/backslash-free (the caller validates), so the
+      replacement can't break the string. Line endings (LF/CRLF) are preserved per line.
+    """
+    lines = text.splitlines(keepends=True)
+
+    header_idx: int | None = None
+    for i, line in enumerate(lines):
+        m = _SECTION_HEADER_RE.match(line.rstrip("\r\n"))
+        if m and m.group(1).strip() == "models":
+            if header_idx is not None:
+                return None  # duplicate [models] table — unsupported
+            header_idx = i
+    if header_idx is None:
+        return None  # no [models] section
+
+    body_end = len(lines)
+    for i in range(header_idx + 1, len(lines)):
+        if _SECTION_HEADER_RE.match(lines[i].rstrip("\r\n")):
+            body_end = i
+            break
+    body = range(header_idx + 1, body_end)
+
+    candidate = list(lines)
+    edited: set[int] = set()
+    for key, value in new_models.items():
+        if '"' in value or "\\" in value:
+            return None  # caller must pass a quote/backslash-free value; refuse otherwise
+        pat = re.compile(r"^(\s*" + re.escape(key) + r'\s*=\s*")([^"\\]*)("\s*(?:#.*)?)$')
+        hits: list[tuple[int, re.Match[str], str]] = []
+        for i in body:
+            raw = lines[i]
+            if raw.endswith("\r\n"):
+                content, nl = raw[:-2], "\r\n"
+            elif raw.endswith("\n"):
+                content, nl = raw[:-1], "\n"
+            else:
+                content, nl = raw, ""
+            m2 = pat.match(content)
+            if m2:
+                hits.append((i, m2, nl))
+        if len(hits) != 1:
+            return None  # missing / duplicate / non-canonical assignment for this role
+        i, m2, nl = hits[0]
+        candidate[i] = m2.group(1) + value + m2.group(3) + nl
+        edited.add(i)
+
+    return "".join(candidate), edited

@@ -74,6 +74,20 @@ def worker_provider(state: dict[str, Any]) -> str:
     return "claude"
 
 
+def reviewer_family_provider(value: str | None) -> str | None:
+    """Provider family for a reviewer-FAMILY role VALUE ("codex"/"claude"), or None for a
+    manual/human/unregistered value (the manual paste flow — a distinct adversary).
+
+    The single source of reviewer-role provider resolution: `reviewer_provider` resolves
+    the `reviewer` role through here, and the `config` CLI (#95) reuses it for the same
+    reviewer self-review check so the two paths can't drift. (rescue is intentionally NOT
+    checked — it is not a headless reviewer at runtime; see `_models_collapse`.)
+    """
+    if isinstance(value, str) and value in _REVIEWER_ADAPTERS:
+        return value
+    return None
+
+
 def reviewer_provider(state: dict[str, Any]) -> str | None:
     """Provider family of the configured headless reviewer ("codex"/"claude"),
     or None when the reviewer is manual/human (no headless adapter).
@@ -85,9 +99,7 @@ def reviewer_provider(state: dict[str, Any]) -> str | None:
     models = state.get("models")
     configured = models.get("reviewer") if isinstance(models, dict) else None
     reviewer = configured or default_model_for_role("reviewer")
-    if isinstance(reviewer, str) and reviewer in _REVIEWER_ADAPTERS:
-        return reviewer
-    return None
+    return reviewer_family_provider(reviewer)
 
 
 def get_reviewer_adapter(state: dict[str, Any]) -> ReviewerAdapter | None:
@@ -112,6 +124,12 @@ def get_reviewer_adapter(state: dict[str, Any]) -> ReviewerAdapter | None:
 # it to the manual gate, never to a retry/defer/approval (#37).
 MANUAL_REQUIRED = "manual_required"
 _MANUAL_FALLBACKS = frozenset({"manual", "human"})
+
+# The reviewer/rescue role values the `config` CLI recognizes as intentional (#95):
+# registered headless providers + the manual-flow aliases. A value OUTSIDE this set is
+# still accepted (it selects the manual paste flow, e.g. "gemini") but warns, to catch a
+# typo like "codx" that would silently degrade to manual.
+REVIEWER_PROVIDER_CHOICES = tuple(_REVIEWER_ADAPTERS) + tuple(sorted(_MANUAL_FALLBACKS))
 # Prefix on a successful-fallback review's raw, so the engine can record the audit
 # trail in state for an automatic fallback approval too (not just the manual case).
 FALLBACK_AUDIT_MARKER = "[redteam fallback]"

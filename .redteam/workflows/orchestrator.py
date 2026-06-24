@@ -15,9 +15,11 @@ that stall (same log + same diff repeatedly).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from datetime import datetime, timezone
@@ -50,12 +52,20 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
     MANUAL_REQUIRED,
+    REVIEWER_PROVIDER_CHOICES,
     get_reviewer_adapter,
     review_with_fallback,
+    reviewer_family_provider,
     reviewer_provider,
     worker_provider,
 )
-from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
+from config import (  # type: ignore[import-not-found]  # noqa: E402
+    MODELS_ROLE_KEYS,
+    load_config,
+    load_config_from_text,
+    resolve_tier,
+    update_models_block,
+)
 
 
 # ---------- phase order & runner registry ----------
@@ -1720,10 +1730,207 @@ def cmd_new_task(batch_dir: Path, args: list[str]) -> int:
     return 0
 
 
+# ---------- config CLI (#95) ----------
+
+_MODELS_GUIDANCE = {
+    "planner": 'plan/design model — top model recommended (e.g. claude-opus-4-8); "codex" runs it on Codex.',
+    "implementer": 'code-writing model — a cheaper one is fine (e.g. claude-sonnet-4-6); "codex" reverses the worker.',
+    "reviewer": 'adversarial reviewer PROVIDER: "codex", "claude", or "human" (manual paste).',
+    "rescue": "escalation reviewer provider; currently a manual flow, so NOT enforced cross-provider.",
+}
+
+
+class _ConfigAbort(Exception):
+    """The user declined a confirmation — abort without writing."""
+
+
+def _prompt_role(role: str, current: str) -> str:
+    """Prompt for one role's value. Blank keeps the current value verbatim (so a legacy
+    value is never lost). A newly TYPED value is char-checked (no quote/backslash/control
+    — those can't be written safely and would fail the gate); a reviewer value outside the
+    known provider set warns that it selects the manual flow (catches a typo like 'codx'
+    while preserving a deliberate 'gemini'). rescue is NOT a headless reviewer at runtime,
+    so it is treated as a plain value (char-checked only), like planner/implementer."""
+    print(f"{role}: {_MODELS_GUIDANCE[role]}")
+    while True:
+        raw = input(f"  {role} [{current}]: ").strip()
+        value = raw or current
+        if not value:
+            print("    value cannot be empty.")
+            continue
+        if raw:  # validate only a freshly typed value; a kept current passes through
+            if '"' in value or "\\" in value or any(ord(c) < 0x20 for c in value):
+                print("    value cannot contain a quote, backslash, or control character.")
+                continue
+            if role == "reviewer" and value not in REVIEWER_PROVIDER_CHOICES:
+                ans = (
+                    input(
+                        f"    '{value}' is not a headless reviewer adapter — it will use the MANUAL "
+                        "paste-review flow. Keep it? [y/N]: "
+                    )
+                    .strip()
+                    .lower()
+                )
+                if ans not in ("y", "yes"):
+                    continue  # re-prompt for a different value
+        return value
+
+
+def _models_collapse(effective: dict[str, str]) -> str | None:
+    """Return 'reviewer' when the reviewer role resolves to the WORKER's own provider in
+    this effective model set (self-review), else None. Reuses the engine provider
+    resolvers (single source) and mirrors the runtime guard, which checks the reviewer
+    ONLY: `rescue` is NOT a headless reviewer — the rescue runner validates a manually
+    produced report and never resolves `models.rescue` to an adapter — so enforcing a
+    cross-provider invariant on rescue would wrongly refuse a valid config (e.g. the
+    supported reverse pair implementer="codex"/reviewer="claude" with the shipped default
+    rescue="codex"), which the runtime would happily run (#101 review)."""
+    wp = worker_provider({"models": effective})
+    if reviewer_family_provider(effective.get("reviewer")) == wp:
+        return "reviewer"
+    return None
+
+
+def _config_self_review_error(chosen: dict[str, str], cfg: Any) -> str | None:
+    """Refuse a [models] choice that would collapse the adversarial pair into self-review,
+    checked across EVERY effective config it would drive. When tier routing is OFF (no
+    tiers), the top-level set drives every task (which reviews by default), so it is the
+    only scenario. When routing is ON, every task resolves to a tier (no un-merged
+    top-level path), so check each review-ENABLED tier's effective models (chosen merged
+    with the tier override) instead; review=false tiers run no headless review and are
+    skipped — matching the runtime guard."""
+    scenarios: list[tuple[str, dict[str, str]]] = []
+    if not cfg.tiers:
+        scenarios.append(("[models]", chosen))
+    else:
+        for tier_id, profile in sorted(cfg.tiers.items()):
+            if getattr(profile, "review", True):
+                scenarios.append((f"[tiers.{tier_id}]", {**chosen, **profile.models}))
+    for label, eff in scenarios:
+        role = _models_collapse(eff)
+        if role is not None:
+            wp = worker_provider({"models": eff})
+            return (
+                f"in {label} the '{role}' reviewer-family role and the worker both resolve to the "
+                f"'{wp}' provider — that is self-review and defeats the harness. Point {role} at a "
+                f'different provider (e.g. a claude-* implementer with reviewer="codex"), or set '
+                f'{role}="human" for a manual review.'
+            )
+    return None
+
+
+def cmd_config(repo: Path | None = None) -> int:
+    """Interactively pick the per-role models and write `.redteam/config.toml [models]`,
+    shell-native parity with the Claude-Code `/redteam:redteam-config` (#95). Fail-closed
+    throughout: refuses self-review pairings, never corrupts the file (a two-layer gate
+    writes nothing unless the candidate re-parses to EXACTLY the intended values with no
+    other textual change), and writes atomically. Exit: 0 written · 2 nothing written."""
+    rr = repo or repo_root()
+    cfg_path = rr.joinpath(".redteam", "config.toml")
+    if not cfg_path.is_file():
+        print(
+            "error: .redteam/config.toml not found. Run `/redteam:redteam-install` (or vendor "
+            "the harness) first, then re-run `config`.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        cfg = load_config(rr)
+    except (OSError, ValueError) as exc:
+        print(f"error: could not load .redteam/config.toml ({exc}). Fix it, then re-run `config`.", file=sys.stderr)
+        return 2
+
+    current = {role: getattr(cfg.models, role) for role in MODELS_ROLE_KEYS}
+    print("Current [models]:")
+    for role in MODELS_ROLE_KEYS:
+        print(f"  {role} = {current[role]!r}")
+    print("(press Enter to keep the current value)\n")
+
+    chosen: dict[str, str] = {}
+    try:
+        for role in MODELS_ROLE_KEYS:
+            chosen[role] = _prompt_role(role, current[role])
+    except EOFError:
+        print("\nerror: `config` needs an interactive terminal (stdin reached EOF); nothing written.", file=sys.stderr)
+        return 2
+
+    err = _config_self_review_error(chosen, cfg)
+    if err:
+        print(f"error: refusing to write — {err}", file=sys.stderr)
+        return 2
+
+    raw = cfg_path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(f"error: .redteam/config.toml is not valid UTF-8 ({exc}); nothing written.", file=sys.stderr)
+        return 2
+
+    gate_msg = (
+        "error: the [models] block uses a form `config` can't safely edit (a role key is missing, "
+        'duplicated, or not a canonical `key = "value"` line). Edit .redteam/config.toml by hand; '
+        "nothing written."
+    )
+    result = update_models_block(text, chosen)
+    if result is None:
+        print(gate_msg, file=sys.stderr)
+        return 2
+    candidate, edited = result
+
+    # Two-layer gate — corruption is impossible: write nothing unless BOTH pass.
+    # (1) textual: only the edited value-span lines may differ; everything else byte-identical.
+    orig_lines = text.splitlines(keepends=True)
+    cand_lines = candidate.splitlines(keepends=True)
+    if len(orig_lines) != len(cand_lines) or any(
+        orig_lines[i] != cand_lines[i] for i in range(len(orig_lines)) if i not in edited
+    ):
+        print(gate_msg, file=sys.stderr)
+        return 2
+    # (2) semantic: candidate re-parses + validates through the SAME loader, and the four
+    # values are EXACTLY the chosen ones.
+    try:
+        cand_cfg = load_config_from_text(candidate)
+    except ValueError as exc:
+        print(f"{gate_msg}\n  (detail: {exc})", file=sys.stderr)
+        return 2
+    if any(getattr(cand_cfg.models, role) != chosen[role] for role in MODELS_ROLE_KEYS):
+        print(gate_msg, file=sys.stderr)
+        return 2
+
+    # Atomic write: capture mode FIRST, apply to the temp file BEFORE replace, so a
+    # metadata failure aborts while the original is still intact (IR-007/IR-010).
+    try:
+        mode = cfg_path.stat().st_mode
+        fd, tmp = tempfile.mkstemp(dir=str(cfg_path.parent), prefix=".config-", suffix=".toml.tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(candidate.encode("utf-8"))
+            os.chmod(tmp, mode)
+            os.replace(tmp, cfg_path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError as exc:
+        print(f"error: could not write .redteam/config.toml ({exc}); original unchanged.", file=sys.stderr)
+        return 2
+
+    print("\nWrote [models]:")
+    for role in MODELS_ROLE_KEYS:
+        print(f"  {role} = {chosen[role]!r}")
+    print(
+        "\nReminder: reviewer/rescue providers need their CLIs installed and authenticated "
+        '(e.g. `codex login` for a "codex" reviewer).'
+    )
+    return 0
+
+
 USAGE = (
     "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
-    "       orchestrator.py review\n"
+    "       orchestrator.py {review|config}\n"
     "  start            — process every task from its current next_phase\n"
     "  resume           — same as start; convenient name to re-enter after a human gate\n"
     "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
@@ -1732,7 +1939,8 @@ USAGE = (
     "  status           — print per-task summary without running anything\n"
     "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
     "  review           — one-shot adversarial review of the current branch diff with the\n"
-    "                     configured reviewer (a different provider than the worker); no batch"
+    "                     configured reviewer (a different provider than the worker); no batch\n"
+    "  config           — interactively set the per-role models in .redteam/config.toml [models]"
 )
 
 
@@ -1743,9 +1951,11 @@ def main(argv: list[str]) -> int:
 
     command = argv[1]
 
-    # `review` takes no batch dir — it reviews the current branch diff.
+    # `review` and `config` take no batch dir.
     if command == "review":
         return cmd_review()
+    if command == "config":
+        return cmd_config()
 
     if len(argv) < 3:
         print(USAGE, file=sys.stderr)
