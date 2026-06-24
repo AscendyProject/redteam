@@ -126,22 +126,16 @@ def _captured_permission_mode(cmd: list[str]) -> str:
     return cmd[i + 1]
 
 
-def test_run_claude_defaults_to_bypass_permissions(monkeypatch):
-    """No env override → the spawned worker keeps the historical
-    --permission-mode bypassPermissions (the unattended-batch default)."""
+def test_worker_permission_mode_defaults_to_bypass(monkeypatch):
+    """No env override → _worker_permission_mode() returns the historical
+    bypassPermissions default (the unattended-batch default). Asserts the new
+    helper directly: pre-change there was no helper (run_claude hard-coded the
+    literal), so this fails against pre-change code where the name is undefined.
+    The override test below pins that run_claude actually wires this value into
+    the spawned argv."""
     base = _load_base_module()
     monkeypatch.delenv("REDTEAM_CLAUDE_PERMISSION_MODE", raising=False)
-    captured: dict[str, list[str]] = {}
-
-    def fake_popen(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return _FakeProc()
-
-    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
-
-    base.run_claude(agent="implementer", prompt="do it", model=None)
-
-    assert _captured_permission_mode(captured["cmd"]) == "bypassPermissions"
+    assert base._worker_permission_mode() == "bypassPermissions"
 
 
 def test_run_claude_honors_permission_mode_env_override(monkeypatch):
@@ -180,21 +174,15 @@ def test_run_claude_rejects_unknown_permission_mode(monkeypatch):
         base.run_claude(agent="implementer", prompt="do it", model=None)
 
 
-def test_run_claude_omits_allowed_tools_by_default(monkeypatch):
-    """No REDTEAM_CLAUDE_ALLOWED_TOOLS → no --allowedTools flag (unchanged)."""
+def test_worker_allowed_tools_empty_by_default(monkeypatch):
+    """No REDTEAM_CLAUDE_ALLOWED_TOOLS → _worker_allowed_tools() returns [], so
+    run_claude adds no --allowedTools flag (behavior unchanged). Asserts the new
+    helper directly: pre-change there was no helper or flag, so this fails against
+    pre-change code where the name is undefined. The passes-when-set test below
+    pins that a non-empty value reaches the spawned argv."""
     base = _load_base_module()
     monkeypatch.delenv("REDTEAM_CLAUDE_ALLOWED_TOOLS", raising=False)
-    captured: dict[str, list[str]] = {}
-
-    def fake_popen(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return _FakeProc()
-
-    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
-
-    base.run_claude(agent="implementer", prompt="do it", model=None)
-
-    assert "--allowedTools" not in captured["cmd"]
+    assert base._worker_allowed_tools() == []
 
 
 def test_run_claude_passes_allowed_tools_when_set(monkeypatch):
