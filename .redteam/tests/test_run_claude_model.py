@@ -178,3 +178,43 @@ def test_run_claude_rejects_unknown_permission_mode(monkeypatch):
 
     with pytest.raises(ValueError, match="REDTEAM_CLAUDE_PERMISSION_MODE"):
         base.run_claude(agent="implementer", prompt="do it", model=None)
+
+
+def test_run_claude_omits_allowed_tools_by_default(monkeypatch):
+    """No REDTEAM_CLAUDE_ALLOWED_TOOLS → no --allowedTools flag (unchanged)."""
+    base = _load_base_module()
+    monkeypatch.delenv("REDTEAM_CLAUDE_ALLOWED_TOOLS", raising=False)
+    captured: dict[str, list[str]] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    assert "--allowedTools" not in captured["cmd"]
+
+
+def test_run_claude_passes_allowed_tools_when_set(monkeypatch):
+    """REDTEAM_CLAUDE_ALLOWED_TOOLS pre-approves shell tools so the worker can
+    self-verify (run ruff/pytest) under a non-bypass mode like acceptEdits.
+    Values are injected before --output-format so the CLI stops consuming them
+    at that flag."""
+    base = _load_base_module()
+    monkeypatch.setenv("REDTEAM_CLAUDE_ALLOWED_TOOLS", "Bash, PowerShell")
+    captured: dict[str, list[str]] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    cmd = captured["cmd"]
+    i = cmd.index("--allowedTools")
+    assert cmd[i + 1 : i + 3] == ["Bash", "PowerShell"]
+    assert cmd[i + 3] == "--output-format"
