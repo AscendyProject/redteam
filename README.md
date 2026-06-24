@@ -91,6 +91,32 @@ and pr-author — plus a test-author / test-verifier pair used **only in TDD mod
 The reviewer is a *fresh* agent that only sees the diff and the project's
 security checklist — it never sees the implementer's reasoning.
 
+## Why cross-review?
+
+redteam is built around one assumption: the model that writes the code should
+not be the only model that judges whether it is safe to ship. A second pass from
+the *same* model family tends to agree with itself — the review rubber-stamps the
+diff instead of pushing back on it.
+
+So the harness separates the roles and hands the review to a **different** model
+family, whose job is to refuse that rubber stamp:
+
+- **Planning** — high-level architecture, tradeoffs, plan quality
+- **Implementation** — the actual code, iteration, token efficiency
+- **Review** — an independent reviewer challenges the diff for security,
+  scalability, correctness, and production risk
+- **Humans** keep control over the final merge
+
+The goal is not to replace engineering judgment. It is to make AI-assisted code
+pass through a stricter, independent review boundary before it reaches a real
+product.
+
+> Current setup (2026): Claude Opus for planning, Claude Sonnet for
+> implementation, Codex as the independent reviewer. This is just our current
+> configuration — the identity of redteam is the role separation and
+> cross-family review, not any specific model lineup. See
+> [Model freedom](#model-freedom) to put either model on either side.
+
 ## How it's different
 
 A plain "two-model" setup stops at *a second model takes a second look*. redteam
@@ -367,6 +393,24 @@ It reviews `git diff <base>...HEAD` and exits `0` / `1` / `2` (approved /
 changes requested / reviewer failed), so it can gate CI. Exposed as
 `/redteam:redteam-review` in Claude Code. Fail-closed: it refuses if the
 configured reviewer would collapse to the worker's own provider (self-review).
+
+## Origin
+
+redteam started while building Ascendy with AI coding agents.
+
+Vibe coding made it possible to move fast as a small team, but it also exposed a
+different problem: AI-generated code can look correct, pass shallow checks, and
+still violate product constraints that matter in production.
+
+As Ascendy grew into a real product with media storage, metadata handling,
+search, authentication, and user data flows, we needed more than a second model
+saying "looks good." We needed a harness that forces an independent reviewer to
+challenge the diff before it merges, and keeps humans in control of the final
+decision.
+
+redteam is the open-source extraction of that workflow. It is not the Ascendy
+product codebase — it is a harness born from trying to make AI-assisted software
+reliable enough to ship.
 
 ## Contributing
 
