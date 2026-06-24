@@ -118,3 +118,63 @@ def test_claude_model_for_role_falls_back_to_config(monkeypatch, tmp_path):
     monkeypatch.setattr(base, "repo_root", lambda: tmp_path)
     assert base.claude_model_for_role({}, "implementer") == "claude-sonnet-4-6"
     assert base.claude_model_for_role({}, "reviewer") is None
+
+
+def _captured_permission_mode(cmd: list[str]) -> str:
+    """Pull the value following --permission-mode out of the spawned argv."""
+    i = cmd.index("--permission-mode")
+    return cmd[i + 1]
+
+
+def test_run_claude_defaults_to_bypass_permissions(monkeypatch):
+    """No env override → the spawned worker keeps the historical
+    --permission-mode bypassPermissions (the unattended-batch default)."""
+    base = _load_base_module()
+    monkeypatch.delenv("REDTEAM_CLAUDE_PERMISSION_MODE", raising=False)
+    captured: dict[str, list[str]] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    assert _captured_permission_mode(captured["cmd"]) == "bypassPermissions"
+
+
+def test_run_claude_honors_permission_mode_env_override(monkeypatch):
+    """REDTEAM_CLAUDE_PERMISSION_MODE lets a locked-down environment (e.g.
+    enterprise managed settings that refuse bypassPermissions) pick a
+    policy-compatible mode like acceptEdits."""
+    base = _load_base_module()
+    monkeypatch.setenv("REDTEAM_CLAUDE_PERMISSION_MODE", "acceptEdits")
+    captured: dict[str, list[str]] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    assert _captured_permission_mode(captured["cmd"]) == "acceptEdits"
+
+
+def test_run_claude_rejects_unknown_permission_mode(monkeypatch):
+    """A typo'd / unsupported mode must fail loud rather than silently weaken
+    (or break) the gate by passing an unrecognized value through to the CLI."""
+    import pytest
+
+    base = _load_base_module()
+    monkeypatch.setenv("REDTEAM_CLAUDE_PERMISSION_MODE", "yolo")
+
+    def fake_popen(cmd, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("Popen should not run when the mode is invalid")
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(ValueError, match="REDTEAM_CLAUDE_PERMISSION_MODE"):
+        base.run_claude(agent="implementer", prompt="do it", model=None)
