@@ -31,6 +31,8 @@ _ROLE_LINE_RE = re.compile(r'^(\s*)(planner|implementer|reviewer|rescue)(\s*=\s*
 
 
 def _field_defaults() -> dict[str, str]:
+    # type: ignore[arg-type] — dataclasses.Field.default is typed `_T | MISSING`;
+    # ModelsConfig gives every role a str default, so the value is str in practice.
     return {f.name: f.default for f in dataclasses.fields(ModelsConfig) if f.name in _ROLES}  # type: ignore[arg-type]
 
 

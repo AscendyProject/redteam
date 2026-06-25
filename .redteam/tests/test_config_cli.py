@@ -30,6 +30,8 @@ _WF = Path(__file__).resolve().parents[1] / "workflows"
 if str(_WF) not in sys.path:
     sys.path.insert(0, str(_WF))
 
+# noqa: E402 — these imports must follow the sys.path insert above so the
+# `.redteam/workflows` dir (config_cli, config) resolves when run as a test.
 import config_cli  # noqa: E402
 from config import ModelsConfig  # noqa: E402
 
