@@ -160,6 +160,26 @@ def test_toml_breaking_value_is_rejected_before_write(tmp_path: Path, monkeypatc
     assert guard.calls == []
 
 
+def test_eof_on_stdin_aborts_without_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closed / non-interactive stdin (input() raises EOFError) must honor the
+    `-> int` abort contract: return non-zero, never raise, and leave the file
+    unchanged (the guard is never consulted)."""
+    config_path = _make_config(tmp_path)
+    original = config_path.read_bytes()
+
+    def _raise_eof(_prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _raise_eof)
+    guard = _FakeGuard()
+
+    rc = config_cli.run_config(tmp_path, guard)
+
+    assert rc != 0
+    assert config_path.read_bytes() == original
+    assert guard.calls == []
+
+
 def test_write_path_reviewer_fallback_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-target key reviewer_fallback (with inline comment) is preserved byte-for-byte."""
     config_path = _make_config(tmp_path)

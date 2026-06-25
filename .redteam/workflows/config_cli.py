@@ -141,7 +141,13 @@ def run_config(repo: Path, pairing_guard: Any) -> int:
         current = current_roles[role]
         default = defaults[role]
         prompt = f"{role} (current: {current!r}, recommended default: {default!r}): "
-        raw = input(prompt)
+        try:
+            raw = input(prompt)
+        except EOFError:
+            # Closed / non-interactive stdin: honor the `-> int` abort contract
+            # rather than letting EOFError escape, and write nothing.
+            print(f"\nerror: aborted (no input for {role})", file=sys.stderr)
+            return 1
         value = raw.strip() or current
         if not _VALID_MODEL_RE.match(value):
             print(
