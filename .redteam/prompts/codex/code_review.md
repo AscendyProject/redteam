@@ -39,6 +39,7 @@ out a separate harness task.
 - Check that the implementation matches the approved `outcome.md`.
 - Check for missed acceptance criteria, regressions, unsafe changes, unrelated churn, and missing tests.
 - For any new test added in the diff, briefly justify that the test would have failed against the pre-change code. If you cannot justify that, flag it as `severity:major`.
+- Output validity (anti-degeneracy): if the change produces a discriminating output — a score, grade, ranking, classification, threshold, or similar — argue from a few realistic inputs whether it *meaningfully discriminates*, or whether it saturates, clusters, or collapses to a near-constant (a result that conforms to the spec yet carries no signal). If it plausibly degenerates, flag it `severity:major`. Conformance to `outcome.md` does NOT excuse a degenerate design — when the spec itself encodes the saturation, say so.
 
 ## Finding Format
 

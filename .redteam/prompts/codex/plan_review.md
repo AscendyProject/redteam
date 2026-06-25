@@ -38,6 +38,7 @@ Block the plan if:
 - any verification command writes outside the repo, calls `curl`, `wget`, `nc`, `ssh`, `sudo`, pipes to a shell, removes files outside the task dir, or otherwise performs non-test/non-lint/non-type-check work
 - it ignores relevant existing code patterns
 - it hides risky migration, deletion, auth, privacy, billing, data-loss, or cross-repo assumptions
+- it produces a discriminating output (a score, grade, ranking, classification, or threshold) whose bands or thresholds look saturating or trivially met, without justifying that the result discriminates across realistic inputs (a degenerate-by-design risk — catch it before code exists, not after)
 
 ## Finding Format
 
