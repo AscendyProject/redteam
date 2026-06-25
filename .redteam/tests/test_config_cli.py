@@ -105,22 +105,57 @@ def test_write_path_role_values_updated(tmp_path: Path, monkeypatch: pytest.Monk
     assert 'rescue = "new-rescue"' in written
 
 
-def test_write_path_non_models_content_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lines outside the [models] block are byte-for-byte unchanged after write."""
+def test_write_path_only_role_values_change_byte_for_byte(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The written file is byte-for-byte identical to the original EXCEPT the
+    four [models] role values.
+
+    IR-003: a substring-presence check would pass even if non-[models] sections
+    were reordered, duplicated, or partially rewritten. Build the expected bytes
+    by replacing only the four role-value lines in the original and assert exact
+    equality, so any drift outside those spans (comments, blanks, other keys,
+    other sections, line endings) fails the test.
+    """
     config_path = _make_config(tmp_path)
-    new_vals = iter(["p", "i", "r", "s"])
+    original = config_path.read_text(encoding="utf-8")
+    new_vals = iter(["p2", "i2", "r2", "s2"])
     monkeypatch.setattr("builtins.input", lambda _: next(new_vals))
-    guard = _FakeGuard()
 
-    config_cli.run_config(tmp_path, guard)
+    config_cli.run_config(tmp_path, _FakeGuard())
 
+    expected = (
+        original.replace('planner = "claude-opus-4-7"', 'planner = "p2"')
+        .replace('implementer = "claude-sonnet-4-6"', 'implementer = "i2"')
+        .replace('reviewer = "codex"', 'reviewer = "r2"')
+        .replace('rescue = "codex"', 'rescue = "s2"')
+    )
     written = config_path.read_text(encoding="utf-8")
-    assert "# top comment" in written
-    assert "[project]" in written
-    assert 'name = "test-proj"' in written
-    assert "[tiers]" in written
-    # Comment inside the [models] block is also preserved.
-    assert "# Role" in written
+    assert written == expected
+    # The reviewer_fallback line shares the value "codex"? No — guard against an
+    # accidental over-replace: the non-target key must keep its own value.
+    assert 'reviewer_fallback = "manual"  # policy' in written
+
+
+def test_toml_breaking_value_is_rejected_before_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """IR-001: a value with TOML-breaking characters must be rejected before the
+    guard runs and before any write — otherwise the guard could check one value
+    (`codex" #` → unknown manual value) while the persisted TOML resolves to
+    another (`codex`), bypassing the cross-provider self-review guard.
+    """
+    config_path = _make_config(tmp_path)
+    original = config_path.read_bytes()
+    # implementer kept as codex-family worker; reviewer entered as an injection
+    # payload that, if written raw, would persist as bare `codex`.
+    answers = iter(["", "codex", 'codex" #', ""])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    guard = _FakeGuard()  # would return None (no collapse) on the smuggled value
+
+    rc = config_cli.run_config(tmp_path, guard)
+
+    assert rc != 0
+    # File untouched — the injection never reached the writer.
+    assert config_path.read_bytes() == original
+    # Rejected up front: the guard was never even consulted on a smuggled value.
+    assert guard.calls == []
 
 
 def test_write_path_reviewer_fallback_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

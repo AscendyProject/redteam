@@ -15,6 +15,15 @@ from config import ModelsConfig
 
 _ROLES: tuple[str, ...] = ("planner", "implementer", "reviewer", "rescue")
 
+# A role value is a provider id ("codex"/"claude"/"human") or a model name
+# ("claude-opus-4-7", "gpt-5"): letters/digits plus . _ : / -. Anything else —
+# a double-quote, '#', whitespace, backslash — could break out of the
+# double-quoted TOML value so the persisted value differs from the value the
+# self-review guard checked (e.g. `codex" #` is guarded as an unknown manual
+# value but persists as `codex`), bypassing the cross-provider guard. Reject
+# such values before the guard runs and before anything is written.
+_VALID_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+
 # Matches exactly the four target role keys with a double-quoted value.
 # Groups: (leading-ws)(role)(= separator)("value")(trailing, e.g. inline comment).
 # Does NOT match reviewer_fallback: the '=' separator check rejects the '_fallback' suffix.
@@ -131,7 +140,14 @@ def run_config(repo: Path, pairing_guard: Any) -> int:
         default = defaults[role]
         prompt = f"{role} (current: {current!r}, recommended default: {default!r}): "
         raw = input(prompt)
-        chosen[role] = raw.strip() or current
+        value = raw.strip() or current
+        if not _VALID_MODEL_RE.match(value):
+            print(
+                f"error: invalid model id for {role}: {value!r} (allowed: letters, digits, and . _ : / -)",
+                file=sys.stderr,
+            )
+            return 1
+        chosen[role] = value
 
     state: dict[str, Any] = {
         "mode": "agent-pair",
