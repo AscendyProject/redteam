@@ -5,6 +5,7 @@ Usage:
     python3 .redteam/workflows/orchestrator.py start  <batch-dir>
     python3 .redteam/workflows/orchestrator.py resume <batch-dir>
     python3 .redteam/workflows/orchestrator.py status <batch-dir>
+    python3 .redteam/workflows/orchestrator.py config
 
 Walks each task in <batch-dir>/tasks/ through the 8-phase pipeline,
 persists state.json after every phase, blocks at human gates (sentinel files),
@@ -56,6 +57,7 @@ from adapters import (  # type: ignore[import-not-found]  # noqa: E402
     worker_provider,
 )
 from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
+import config_cli  # type: ignore[import-not-found]  # noqa: E402
 
 
 # ---------- phase order & runner registry ----------
@@ -1720,10 +1722,24 @@ def cmd_new_task(batch_dir: Path, args: list[str]) -> int:
     return 0
 
 
+def cmd_config(repo: Path | None = None) -> int:
+    """Interactively pick per-role models and write .redteam/config.toml.
+
+    Resolves the repo root via repo_root() when repo is None, then delegates to
+    config_cli.run_config, injecting the engine's real cross-provider self-review
+    guard (_adversarial_pairing_error) directly. A self-review-collapse selection
+    is refused by the same boundary the pipeline uses. Exit code mirrors
+    run_config: 0 on success, non-zero on refusal, abort, or invalid input.
+    """
+    rr = repo or repo_root()
+    return config_cli.run_config(rr, _adversarial_pairing_error)
+
+
 USAGE = (
     "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
     "       orchestrator.py review\n"
+    "       orchestrator.py config\n"
     "  start            — process every task from its current next_phase\n"
     "  resume           — same as start; convenient name to re-enter after a human gate\n"
     "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
@@ -1732,7 +1748,8 @@ USAGE = (
     "  status           — print per-task summary without running anything\n"
     "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
     "  review           — one-shot adversarial review of the current branch diff with the\n"
-    "                     configured reviewer (a different provider than the worker); no batch"
+    "                     configured reviewer (a different provider than the worker); no batch\n"
+    "  config           — interactively pick per-role models and write .redteam/config.toml"
 )
 
 
@@ -1743,9 +1760,11 @@ def main(argv: list[str]) -> int:
 
     command = argv[1]
 
-    # `review` takes no batch dir — it reviews the current branch diff.
+    # `review` and `config` take no batch dir — standalone commands.
     if command == "review":
         return cmd_review()
+    if command == "config":
+        return cmd_config()
 
     if len(argv) < 3:
         print(USAGE, file=sys.stderr)
