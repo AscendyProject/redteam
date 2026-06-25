@@ -91,7 +91,7 @@ def test_write_test_commits_worker_test_and_sets_manifest(monkeypatch, tmp_path)
         (repo / "tests" / "test_feature.py").write_text("def test_x():\n    assert False\n", encoding="utf-8")
 
     _wire(wt, monkeypatch, repo, invoke)
-    state = {"task_id": "task-001"}
+    state = {"task_id": "task-001", "base_branch": "main"}
     res = wt.run(repo / "td", state)
     assert res["status"] == "approved", res["feedback"]
     assert state["tdd_test_files"] == ["tests/test_feature.py"]
@@ -126,7 +126,7 @@ def test_write_test_does_not_sweep_operator_changes(monkeypatch, tmp_path):
         (repo / "tests" / "test_feature.py").write_text("def test_x():\n    assert False\n", encoding="utf-8")
 
     _wire(wt, monkeypatch, repo, invoke)
-    state = {"task_id": "task-001"}
+    state = {"task_id": "task-001", "base_branch": "main"}
     res = wt.run(repo / "td", state)
     assert res["status"] == "approved", res["feedback"]
     assert state["tdd_test_files"] == ["tests/test_feature.py"]
@@ -145,7 +145,7 @@ def test_write_test_retry_recommits_edited_tracked_test(monkeypatch, tmp_path):
     repo = _repo(tmp_path)
 
     _wire(wt, monkeypatch, repo, lambda: (repo / "tests" / "test_feature.py").write_text("v1\n", encoding="utf-8"))
-    state = {"task_id": "task-001"}
+    state = {"task_id": "task-001", "base_branch": "main"}
     wt.run(repo / "td", state)
 
     # retry: test is now tracked/committed; the worker edits it in place
@@ -177,7 +177,7 @@ def test_write_test_recovers_committed_test_when_manifest_lost(monkeypatch, tmp_
     _git(repo, "commit", "-m", "test(task-001): write tests")  # committed, but state lost it
 
     _wire(wt, monkeypatch, repo, lambda: None)  # worker does nothing this run
-    state = {"task_id": "task-001"}  # no tdd_test_files
+    state = {"task_id": "task-001", "base_branch": "main"}  # no tdd_test_files
     res = wt.run(repo / "td", state)
     assert res["status"] == "approved", res["feedback"]
     assert state["tdd_test_files"] == ["tests/test_feature.py"]
@@ -197,7 +197,7 @@ def test_write_test_commits_deletion_and_drops_from_manifest(monkeypatch, tmp_pa
         (repo / "tests" / "test_new.py").write_text("new\n", encoding="utf-8")
 
     _wire(wt, monkeypatch, repo, invoke)
-    state = {"task_id": "task-001", "tdd_test_files": ["tests/test_old.py"]}
+    state = {"task_id": "task-001", "base_branch": "main", "tdd_test_files": ["tests/test_old.py"]}
     res = wt.run(repo / "td", state)
     assert res["status"] == "approved", res["feedback"]
     assert state["tdd_test_files"] == ["tests/test_new.py"]
@@ -234,7 +234,7 @@ def test_write_test_ignores_operator_test_commit_on_reused_branch(monkeypatch, t
         (repo / "tests" / "test_feature.py").write_text("def test_x():\n    assert False\n", encoding="utf-8")
 
     _wire(wt, monkeypatch, repo, invoke)
-    state = {"task_id": "task-001"}  # empty manifest (first run)
+    state = {"task_id": "task-001", "base_branch": "main"}  # empty manifest (first run)
     res = wt.run(repo / "td", state)
     assert res["status"] == "approved", res["feedback"]
     # only the worker test is attributed/committed; the operator test is left as-is
@@ -259,7 +259,7 @@ def test_write_test_rejects_malformed_manifest(monkeypatch, tmp_path):
         ["tests/test_ok.py\0app/test_evil.py"],  # NUL injection — would split into 2 pathspecs
     )
     for bad in bads:
-        res = wt.run(repo / "td", {"task_id": "t", "tdd_test_files": bad})
+        res = wt.run(repo / "td", {"task_id": "t", "base_branch": "main", "tdd_test_files": bad})
         assert res["status"] == "error", bad
         assert "tdd_test_files" in res["feedback"]
 
@@ -276,7 +276,7 @@ def test_write_test_does_not_sweep_pre_staged_operator_file(monkeypatch, tmp_pat
         (repo / "tests" / "test_feature.py").write_text("def test_x():\n    assert False\n", encoding="utf-8")
 
     _wire(wt, monkeypatch, repo, invoke)
-    state = {"task_id": "task-001"}
+    state = {"task_id": "task-001", "base_branch": "main"}
     res = wt.run(repo / "td", state)
     assert res["status"] == "approved", res["feedback"]
     assert [c for c in _committed(repo) if c] == ["tests/test_feature.py"]  # operator.py NOT committed

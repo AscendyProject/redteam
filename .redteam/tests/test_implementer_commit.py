@@ -62,7 +62,7 @@ def _tracked_probe(argv):
 
 
 def _state():
-    return {"task_id": "task-001", "mode": "agent-pair", "verification": {"commands": []}}
+    return {"task_id": "task-001", "mode": "agent-pair", "base_branch": "main", "verification": {"commands": []}}
 
 
 def test_agent_pair_commits_tracked_and_new_untracked(monkeypatch, tmp_path):
@@ -523,7 +523,9 @@ def test_real_git_tdd_implement_commits_out_of_root_file_into_committed_range(mo
 
     monkeypatch.setattr(implement, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
 
-    result = implement.run(task_dir, {"task_id": "task-001", "mode": "tdd", "verification": {"commands": []}})
+    result = implement.run(
+        task_dir, {"task_id": "task-001", "mode": "tdd", "base_branch": "main", "verification": {"commands": []}}
+    )
     assert result["status"] == "approved", result["feedback"]
     committed = subprocess.run(
         ["git", "diff", "--name-only", "main...HEAD"], cwd=repo, capture_output=True, text=True

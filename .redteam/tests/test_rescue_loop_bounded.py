@@ -88,6 +88,7 @@ def test_review_code_defers_instead_of_looping_when_rescue_budget_exhausted(monk
     state = {
         "task_id": "task-001",
         "mode": "agent-pair",
+        "base_branch": "main",
         "phase": "review_code",
         "phases_completed": ["plan_outcome", "plan_review", "human_gate_outcome", "implement"],
         "next_phase": "review_code",

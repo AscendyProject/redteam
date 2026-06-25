@@ -11,6 +11,7 @@ from ._base import (
     PhaseResult,
     compute_repo_diff,
     parse_review_decision,
+    pinned_base_branch,
     project_config,
     read_text_if_exists,
     repo_root,
@@ -20,13 +21,14 @@ from ._base import (
 AGENT_NAME = "code-security-reviewer"
 
 
-def _code_review_prompt(task_dir: Path) -> str:
+def _code_review_prompt(task_dir: Path, base_branch: str) -> str:
     # Headless-specific: read-only sandbox, so output to stdout only — do not
-    # write review files or touch sentinels.
+    # write review files or touch sentinels. `base_branch` is the per-task PINNED
+    # base (#91), so a mid-task config edit can't move the reviewed range.
     proj = project_config()
     return (
         f"Act as an adversarial code-security reviewer for the implementation of the task at "
-        f"{task_dir}/. Review `git diff {proj.base_branch}...HEAD`. Inputs: {task_dir}/outcome.md, "
+        f"{task_dir}/. Review `git diff {base_branch}...HEAD`. Inputs: {task_dir}/outcome.md, "
         f"{task_dir}/plan_review.md, {task_dir}/impl_diff.patch, and the git diff. Apply the review "
         f"criteria described in .redteam/prompts/codex/code_review.md, the project security checklist "
         f"at {proj.security_checklist}, and the project hard rules at {proj.context_file}, but DO NOT "
@@ -38,6 +40,7 @@ def _code_review_prompt(task_dir: Path) -> str:
 
 def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     if state.get("mode") == "agent-pair":
+        base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
         diff = compute_repo_diff(cwd=repo_root())
         review_path = task_dir / "code_review.md"
 
@@ -50,9 +53,9 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             result = review_with_fallback(
                 state,
                 role="review_code",
-                prompt=_code_review_prompt(task_dir),
+                prompt=_code_review_prompt(task_dir, base_branch),
                 cwd=repo_root(),
-                target={"kind": "branch_diff", "base": project_config().base_branch},
+                target={"kind": "branch_diff", "base": base_branch},
             )
             if result["parse_status"] == MANUAL_REQUIRED:
                 return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)

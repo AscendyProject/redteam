@@ -200,7 +200,7 @@ def test_authenticated_host_proceeds_to_worker(monkeypatch, tmp_path):
     calls, get = _worker_spy()
     monkeypatch.setattr(create_pr, "get_worker_adapter", get)
 
-    result = create_pr.run(tmp_path / "task-001", {})
+    result = create_pr.run(tmp_path / "task-001", {"base_branch": "main"})
 
     assert calls["invoked"] is True  # preflight passed → agent ran
     assert result["status"] == "error"  # no pr_url produced in the stub, but that's the post-agent path

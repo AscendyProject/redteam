@@ -191,7 +191,7 @@ def test_legacy_run_snapshots_verify_before_implementer() -> None:
             patch("phase_runners.implement.compute_repo_diff", return_value=""),
             patch("phase_runners.implement.subprocess.run", side_effect=_fake_run),
         ):
-            res = implement.run(tdp, {"mode": "tdd", "task_id": "t"})
+            res = implement.run(tdp, {"mode": "tdd", "task_id": "t", "base_branch": "main"})
 
     assert res["status"] == "approved"
     assert captured["argv"] == ["pytest"]  # snapshot wins; old code would run "true"

@@ -13,6 +13,7 @@ from adapters import get_worker_adapter
 from ._base import (
     PhaseResult,
     compute_repo_diff,
+    pinned_base_branch,
     read_text_if_exists,
     repo_root,
 )
@@ -124,7 +125,7 @@ def _preflight_pr_auth(cwd: Path) -> str | None:
     return None
 
 
-def _pr_author_prompt(task_id: str, task_dir: Path, branch: str, proj: Any) -> str:
+def _pr_author_prompt(task_id: str, task_dir: Path, branch: str, base_branch: str) -> str:
     """The pr-author prompt is mode/tier-neutral: it names only always-present
     artifacts and treats the review/test artifacts as optional, because which of
     plan_review.md / code_review.md / test_review.md exist depends on the pipeline
@@ -139,8 +140,8 @@ def _pr_author_prompt(task_id: str, task_dir: Path, branch: str, proj: Any) -> s
         "test_review.md were produced (which exist depends on the pipeline mode and tier). "
         "The implementation AND its tests are in impl_diff.patch / the branch diff — read "
         "that for the actual change rather than assuming where the files live.\n"
-        f"Push to branch `{branch}` against base branch `{proj.base_branch}` (use "
-        f"`gh pr create --base {proj.base_branch}`), write {task_dir}/pr.md, and save the "
+        f"Push to branch `{branch}` against base branch `{base_branch}` (use "
+        f"`gh pr create --base {base_branch}`), write {task_dir}/pr.md, and save the "
         f"PR URL to {task_dir}/pr_url.txt.\n"
         "ALWAYS pass `--draft`. Never `git push --force`. Follow your agent definition "
         "exactly."
@@ -160,9 +161,10 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     cfg = load_config(rr)
     branch = _pr_branch(state, task_id, cfg.project.branch_prefix)
-    proj = cfg.project
 
-    prompt = _pr_author_prompt(task_id, task_dir, branch, proj)
+    # #91: the PR base is the per-task PINNED base, not live config — so a worker that
+    # edited config.toml's base_branch can't make the PR base differ from the reviewed range.
+    prompt = _pr_author_prompt(task_id, task_dir, branch, pinned_base_branch(state))
 
     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)

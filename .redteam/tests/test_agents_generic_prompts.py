@@ -135,7 +135,7 @@ def test_write_test_prompt_injects_foreign_config(tmp_path) -> None:
         patch("phase_runners.write_test.commit_paths", return_value=False),
         patch("phase_runners.write_test.compute_branch_diff", return_value=""),
     ):
-        write_test.run(tmp_path, {})
+        write_test.run(tmp_path, {"base_branch": "develop"})
     prompt = rec.prompt
     assert ".rt/testconv.md" in prompt and "spec/" in prompt
     assert "tests/api/test_" not in prompt and ".redteam/docs/test-conventions.md" not in prompt
@@ -158,7 +158,7 @@ def test_implement_agent_pair_prompt_injects_foreign_config(tmp_path) -> None:
         patch("phase_runners.implement._write_current_diff", return_value=("", "sha")),
         patch("phase_runners.implement._run_verification_commands", return_value=(0, "ok")),
     ):
-        implement.run(tmp_path, {"mode": "agent-pair"})
+        implement.run(tmp_path, {"mode": "agent-pair", "base_branch": "develop"})
     prompt = rec.prompt
     assert ".rt/ctx.md" in prompt and "src/" in prompt and "spec/" in prompt
     assert "app/" not in prompt
@@ -178,7 +178,7 @@ def test_create_pr_prompt_injects_foreign_config(tmp_path) -> None:
         # test exercises the prompt the agent receives (its actual subject).
         patch("phase_runners.create_pr._preflight_pr_auth", return_value=None),
     ):
-        create_pr.run(tmp_path, {})
+        create_pr.run(tmp_path, {"base_branch": "develop"})
     prompt = rec.prompt
     # The pr-author prompt is diff-based (reads impl_diff.patch) and mode/tier-neutral (#73),
     # so it no longer injects source/test dirs — but it must still inject the configured
@@ -201,7 +201,7 @@ def test_headless_code_review_prompt_injects_foreign_config(tmp_path) -> None:
     from phase_runners import review_code
 
     with patch("config.load_config", return_value=_foreign()):
-        prompt = review_code._code_review_prompt(tmp_path)
+        prompt = review_code._code_review_prompt(tmp_path, "develop")
     assert ".rt/sec.md" in prompt and ".rt/ctx.md" in prompt
     assert "develop...HEAD" in prompt and "main...HEAD" not in prompt  # configured base branch
     # IR-004 contract preserved: still read-only / stdout-only.

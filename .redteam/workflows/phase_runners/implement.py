@@ -15,6 +15,7 @@ from ._base import (
     build_prompt_with_feedback,
     commit_paths,
     compute_repo_diff,
+    pinned_base_branch,
     project_config,
     run_git_checked,
     untracked_files,
@@ -75,44 +76,43 @@ def _run_verification_commands(
     return 0, "".join(chunks)
 
 
-def _branch_diff_checked(cwd: Path) -> str:
+def _branch_diff_checked(cwd: Path, base_branch: str) -> str:
     """Full branch diff (committed + unstaged + staged), FAIL-CLOSED — raises on a
     git error instead of returning a silently empty/partial diff. impl_diff.patch is
     what the reviewer reads; a partial patch behind a green status would let an
-    incomplete change be approved. (agent-pair path.)"""
-    base_branch = project_config().base_branch
+    incomplete change be approved. (agent-pair path.) `base_branch` is the per-task
+    PINNED base (#91), not live config."""
     return "".join(
         run_git_checked(args, cwd).stdout
         for args in (["diff", f"{base_branch}...HEAD"], ["diff"], ["diff", "--cached"])
     )
 
 
-def _committed_range_diff(cwd: Path) -> str:
+def _committed_range_diff(cwd: Path, base_branch: str) -> str:
     """The COMMITTED range only, `git diff <base>...HEAD`, FAIL-CLOSED. Used to
     regenerate impl_diff.patch in the tdd path (#82): tdd now truly commits (write_test
     commits the test, implement commits the rest), so the committed range IS the work —
     and a committed-only patch equals EXACTLY what the PR will contain (reviewer-input
     integrity). Anything left uncommitted in scope is caught by the integrity gate; out
-    of scope is the operator's, not the task's. `<base>` = live config base_branch, the
-    same source agent-pair's helpers use today (base-pinning is #91)."""
-    base_branch = project_config().base_branch
+    of scope is the operator's, not the task's. `base_branch` is the per-task PINNED base
+    (#91), pinned pre-worker so a mid-task config edit can't move the reviewed range."""
     return run_git_checked(["diff", f"{base_branch}...HEAD"], cwd).stdout
 
 
-def _write_current_diff(task_dir: Path, cwd: Path, diff: str | None = None) -> tuple[str, str]:
+def _write_current_diff(task_dir: Path, cwd: Path, base_branch: str, diff: str | None = None) -> tuple[str, str]:
     if diff is None:
-        diff = _branch_diff_checked(cwd)
+        diff = _branch_diff_checked(cwd, base_branch)
     patch_path = task_dir / "impl_diff.patch"
     patch_path.write_text(diff, encoding="utf-8")
     digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
     return diff, digest
 
 
-def _tracked_changed_paths(cwd: Path) -> list[str]:
+def _tracked_changed_paths(cwd: Path, base_branch: str) -> list[str]:
     """Tracked paths changed on the branch (committed + unstaged + staged), NUL-safe
     and FAIL-CLOSED — unlike `compute_branch_changed_paths` this raises on a git error
-    instead of reading partial stdout, so the staging set can't silently miss a file."""
-    base_branch = project_config().base_branch
+    instead of reading partial stdout, so the staging set can't silently miss a file.
+    `base_branch` is the per-task PINNED base (#91), not live config."""
     seen: set[str] = set()
     paths: list[str] = []
     for args in (
@@ -169,17 +169,18 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
     def _in_task_dir(p: str) -> bool:
         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
 
+    base_branch = pinned_base_branch(state)
     new_untracked = untracked_files(cwd) - before_untracked
     seen: set[str] = set()
     to_stage: list[str] = []
-    for path in _tracked_changed_paths(cwd) + sorted(new_untracked):
+    for path in _tracked_changed_paths(cwd, base_branch) + sorted(new_untracked):
         if path not in seen and not _in_task_dir(path):  # filter BOTH tracked + new untracked
             seen.add(path)
             to_stage.append(path)
 
     task_id = str(state.get("task_id") or task_dir.name)
     if commit_paths(cwd, to_stage, f"wip({task_id}): implement round {round_n}"):
-        _write_current_diff(task_dir, cwd)
+        _write_current_diff(task_dir, cwd, base_branch)
 
 
 def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
@@ -267,6 +268,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()
+    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
     # Snapshot untracked files BEFORE the worker runs so the commit step can stage
     # exactly what it creates (current − before), never a pre-existing untracked file.
     try:
@@ -276,7 +278,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
     result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     try:
-        diff, diff_sha = _write_current_diff(task_dir, rr)
+        diff, diff_sha = _write_current_diff(task_dir, rr, base_branch)
     except (RuntimeError, OSError) as exc:
         fb = f"could not capture the implementation diff ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -321,7 +323,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
     try:
-        diff, diff_sha = _write_current_diff(task_dir, rr)
+        diff, diff_sha = _write_current_diff(task_dir, rr, base_branch)
     except (RuntimeError, OSError) as exc:
         fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -385,6 +387,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()
+    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
     # Snapshot + validate the verify command BEFORE the implementer runs, so a
     # same-round edit to config.toml's verify_command cannot self-neuter the
     # gate (IR-001). The agent-pair path snapshots at plan time for the same
@@ -435,7 +438,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
     try:
-        diff, _ = _write_current_diff(task_dir, rr, _committed_range_diff(rr))
+        diff, _ = _write_current_diff(task_dir, rr, base_branch, _committed_range_diff(rr, base_branch))
     except (RuntimeError, OSError) as exc:
         fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
