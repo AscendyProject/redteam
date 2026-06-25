@@ -1546,9 +1546,12 @@ def _standalone_review_prompt(cfg: Any) -> str:
     must explicitly SUSPEND them here — otherwise the reviewer fails closed on
     their absence and a standalone review can NEVER return APPROVED (#103). The
     diff-level criteria (security, regressions, unsafe/unrelated changes,
-    pre-change-failing tests) and the finding/decision format still apply; CI runs
-    `verify.sh` as its own step, so the standalone review does not also gate on
-    verification evidence."""
+    pre-change-failing tests, output-validity/anti-degeneracy) and the finding/decision
+    format still apply; CI runs `verify.sh` as its own step, so the standalone review
+    does not also gate on verification evidence. Note: the diff-level criteria are
+    enumerated here because they are the subset of code_review.md's checks that survive
+    the Required-Checks suspension — keep this list in sync when a diff-level check is
+    added to code_review.md (#97)."""
     proj = cfg.project
     return (
         "Act as an adversarial code-security reviewer. Review the changes in "
@@ -1561,8 +1564,12 @@ def _standalone_review_prompt(cfg: Any) -> str:
         "because verification or outcome.md alignment cannot be confirmed — those "
         "Required Checks do not apply outside the pipeline. Base your decision solely "
         "on the diff against the security checklist, the project hard rules, and the "
-        "diff-level criteria (regressions, unsafe or unrelated changes, and whether any "
-        "new test would have failed against the pre-change code). "
+        "diff-level criteria: regressions, unsafe or unrelated changes, whether any new "
+        "test would have failed against the pre-change code, and output validity — if "
+        "the diff produces a discriminating output (a score, grade, ranking, "
+        "classification, or threshold), argue from realistic inputs whether it "
+        "meaningfully discriminates or degenerates by saturating/clustering/collapsing "
+        "to a near-constant (flag severity:major if it plausibly degenerates). "
         "DO NOT write any files or touch any sentinels — output the ENTIRE review to "
         "stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
         "CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with IR-NNN findings above it."
