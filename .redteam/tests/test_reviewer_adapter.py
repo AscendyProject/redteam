@@ -192,7 +192,7 @@ def test_review_code_runner_uses_adapter_in_agent_pair(tmp_path) -> None:
         patch("phase_runners.review_code.compute_repo_diff", return_value=""),
         patch("phase_runners.review_code.repo_root", return_value=tmp_path),
     ):
-        res = review_code.run(tmp_path, {"mode": "agent-pair", "models": {"reviewer": "codex"}})
+        res = review_code.run(tmp_path, {"mode": "agent-pair", "base_branch": "main", "models": {"reviewer": "codex"}})
     assert res["status"] == "changes_requested"
     assert (tmp_path / "code_review.md").exists()
     rwf.assert_called_once()
@@ -225,7 +225,7 @@ def test_headless_prompts_forbid_writes() -> None:
     """IR-004: headless prompts must instruct stdout-only (read-only sandbox)."""
     from phase_runners import plan_review, review_code
 
-    for prompt in (plan_review._plan_review_prompt(Path("/t")), review_code._code_review_prompt(Path("/t"))):
+    for prompt in (plan_review._plan_review_prompt(Path("/t")), review_code._code_review_prompt(Path("/t"), "main")):
         assert "stdout only" in prompt
         assert "DO NOT write" in prompt
 

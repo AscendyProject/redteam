@@ -42,6 +42,7 @@ def _setup(tmp_path: Path, verification: dict):
         "task_id": "task-001",
         "mode": "agent-pair",
         "phase": "implement",
+        "base_branch": "main",
         "phases_completed": ["plan_outcome", "plan_review", "human_gate_outcome"],
         "next_phase": "implement",
         "verification": verification,

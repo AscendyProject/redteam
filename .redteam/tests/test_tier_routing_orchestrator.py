@@ -207,6 +207,7 @@ def _setup_at_create_pr(orch, monkeypatch, tmp_path, tier, changed_paths):
         "task_id": "task-001",
         "mode": "agent-pair",
         "tier": tier,
+        "base_branch": "main",
         "tier_phases": ["plan_outcome", "implement", "create_pr", "done"]
         if tier == 0
         else ["plan_outcome", "plan_review", "implement", "review_code", "rescue", "create_pr", "done"],
@@ -221,7 +222,7 @@ def _setup_at_create_pr(orch, monkeypatch, tmp_path, tier, changed_paths):
     }
     (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
     _common_mocks(orch, monkeypatch, tmp_path)
-    monkeypatch.setattr(orch, "_changed_paths", lambda cwd: changed_paths)
+    monkeypatch.setattr(orch, "_changed_paths", lambda cwd, base_branch: changed_paths)
     monkeypatch.setitem(orch.PHASE_RUNNERS, "create_pr", _approve)
     return task_dir
 

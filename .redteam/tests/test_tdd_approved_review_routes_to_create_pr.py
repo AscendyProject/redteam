@@ -33,6 +33,7 @@ def test_tdd_mode_approved_review_routes_to_create_pr_not_rescue(monkeypatch, tm
     state = {
         "task_id": "task-001-demo",
         "mode": "tdd",
+        "base_branch": "main",
         "phase": "review_code",
         "phases_completed": [
             "plan_outcome",

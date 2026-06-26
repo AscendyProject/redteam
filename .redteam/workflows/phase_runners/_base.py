@@ -322,14 +322,31 @@ def compute_repo_diff(cwd: Path | None = None) -> str:
     return proc.stdout
 
 
-def compute_branch_diff(cwd: Path | None = None) -> str:
-    """Return the task branch diff against the configured base branch, including
-    tracked uncommitted changes (committed + unstaged + staged). NOTE: plain
-    `git diff` does NOT include UNTRACKED files, so a brand-new file appears here
-    only once it is staged/committed (the agent-pair commit step stages new files
-    before regenerating the patch)."""
+def pinned_base_branch(state: dict[str, Any]) -> str:
+    """The reviewed-range base branch PINNED at task-branch creation (#91), read by
+    every per-task consumer instead of live config so a mid-task edit to config.toml's
+    `[project].base_branch` can't move the reviewed range or the PR base. Fail closed:
+    raise if the pin is absent — the orchestrator pins it before any writable phase and
+    fails closed for legacy unpinned state, so a missing pin here is a contract
+    violation, never a silent fall back to (possibly worker-moved) live config."""
+    base = state.get("base_branch")
+    if not isinstance(base, str) or not base:
+        raise ValueError(
+            "state.base_branch is not pinned; refusing to derive the reviewed range from "
+            "live config (#91). The orchestrator pins it before any writable phase runs."
+        )
+    return base
+
+
+def compute_branch_diff(cwd: Path | None = None, base_branch: str | None = None) -> str:
+    """Return the task branch diff against the base branch, including tracked
+    uncommitted changes (committed + unstaged + staged). NOTE: plain `git diff` does
+    NOT include UNTRACKED files, so a brand-new file appears here only once it is
+    staged/committed (the agent-pair commit step stages new files before regenerating
+    the patch). `base_branch` is the per-task PINNED base (#91) when called from a task
+    phase; None falls back to live config (only safe for non-task callers)."""
     base = cwd or repo_root()
-    base_branch = project_config().base_branch
+    base_branch = base_branch or project_config().base_branch
     committed = subprocess.run(
         ["git", "diff", f"{base_branch}...HEAD"],
         cwd=str(base),
@@ -357,16 +374,18 @@ def compute_branch_diff(cwd: Path | None = None) -> str:
     return committed + unstaged + staged
 
 
-def compute_branch_changed_paths(cwd: Path | None = None) -> list[str]:
+def compute_branch_changed_paths(cwd: Path | None = None, base_branch: str | None = None) -> list[str]:
     """Paths changed on the task branch vs the base (committed + unstaged + staged),
     as ground truth — NOT parsed from patch headers.
 
     Uses `git diff -z --name-only` (NUL-delimited) with `core.quotepath=false`, so
     paths with spaces, non-ASCII, or other special characters are returned exactly,
     never mangled or silently dropped. This matters for the tier downgrade guard
-    (a missed path would fail OPEN, letting a downgrade bypass slip through)."""
+    (a missed path would fail OPEN, letting a downgrade bypass slip through). `base_branch`
+    is the per-task PINNED base (#91) when called from a task phase; None falls back to
+    live config (only safe for non-task callers)."""
     base = cwd or repo_root()
-    base_branch = project_config().base_branch
+    base_branch = base_branch or project_config().base_branch
     diff_args = (
         ["diff", "-z", "--name-only", f"{base_branch}...HEAD"],
         ["diff", "-z", "--name-only"],

@@ -26,6 +26,7 @@ from ._base import (
     build_prompt_with_feedback,
     commit_paths,
     compute_branch_diff,
+    pinned_base_branch,
     project_config,
     repo_root,
     run_git_checked,
@@ -53,15 +54,14 @@ def _is_test_path(path: str, proj: Any) -> bool:
         return False
 
 
-def _committed_test_files(rr: Path, proj: Any, task_id: str) -> list[str]:
+def _committed_test_files(rr: Path, proj: Any, task_id: str, base_branch: str) -> list[str]:
     """Test files committed by THIS task's prior write_test round(s) — recovers a test
     committed before a crash lost the in-memory manifest (#82 IR-004). Scoped to the
     harness's OWN write-test commits (found by their `test(<task_id>): write tests`
     message within base..HEAD), NOT the whole branch range — so on a reused branch an
     operator's own test commit is never attributed to the task (IR-007), and a normal
-    first run finds nothing (no such commit yet). `<base>` is live config base_branch,
-    same as agent-pair's helpers (base-pinning is #91)."""
-    base_branch = proj.base_branch
+    first run finds nothing (no such commit yet). `base_branch` is the per-task PINNED
+    base (#91), so a test-author that edits config.toml can't move the attribution range."""
     target = _WRITE_TEST_COMMIT_MSG.format(task_id=task_id)
     # Match the commit SUBJECT EXACTLY (not `--grep`, a substring match — an operator
     # commit "...: write tests manually" or one carrying the text in its body would
@@ -99,6 +99,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()
+    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
     # Shape-validate the persisted manifest (path-injection defense, existence-INDEPENDENT
     # so an owned-but-deleted test still validates) BEFORE invoking the worker.
     try:
@@ -123,7 +124,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     # while still recovering a crash that lost the in-memory manifest (IR-004/IR-007).
     try:
         new_untracked = [p for p in (untracked_files(rr) - before_untracked) if _is_test_path(p, proj)]
-        committed_tests = _committed_test_files(rr, proj, task_id)
+        committed_tests = _committed_test_files(rr, proj, task_id, base_branch)
     except (RuntimeError, OSError) as exc:
         fb = f"could not enumerate the task's test files ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -137,7 +138,9 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"returncode={result['returncode']}\n"
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=compute_branch_diff(cwd=rr))
+        return PhaseResult(
+            status="error", feedback=feedback, log=feedback, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
+        )
 
     # Reject an owned path that EXISTS as a symlink / non-regular file (the contract is
     # "test files"); a MISSING owned path is allowed (it stages as a deletion below).
@@ -145,7 +148,9 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         p = rr / rel
         if p.is_symlink() or (p.exists() and not p.is_file()):
             fb = f"refusing to stage a non-regular/symlink test path: {rel}"
-            return PhaseResult(status="error", feedback=fb, log=fb, diff=compute_branch_diff(cwd=rr))
+            return PhaseResult(
+                status="error", feedback=fb, log=fb, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
+            )
 
     try:
         commit_paths(rr, task_tests, _WRITE_TEST_COMMIT_MSG.format(task_id=task_id))
@@ -163,5 +168,5 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         status="approved",
         feedback="",
         log=result["stdout"] + "\n--- task test files ---\n" + "\n".join(task_tests),
-        diff=compute_branch_diff(cwd=rr),
+        diff=compute_branch_diff(cwd=rr, base_branch=base_branch),
     )

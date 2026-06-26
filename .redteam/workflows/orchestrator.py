@@ -46,6 +46,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     PhaseResult,
     compute_branch_changed_paths,
     extract_verification_commands,
+    pinned_base_branch,
     repo_root,
     validate_verification_commands,
 )
@@ -358,12 +359,41 @@ def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | No
     return tier, paths, mode
 
 
-def _changed_paths(cwd: Path) -> list[str]:
+def _writable_phase_started(state: dict[str, Any], task_dir: Path) -> bool:
+    """True if a mutating worker phase (implement / write_test) may already have run for
+    this task. The #91 base-branch pin uses this to FAIL CLOSED on legacy unpinned state
+    instead of backfilling from a live config the worker could already have moved.
+    Conservative — ANY of these signals counts, so an ambiguous legacy state fails closed."""
+    completed = state.get("phases_completed")
+    if isinstance(completed, list) and any(p in completed for p in ("implement", "write_test")):
+        return True
+    if (task_dir / "impl_diff.patch").exists():
+        return True
+    verification = state.get("verification")
+    if isinstance(verification, dict) and verification.get("last_run_at"):
+        return True
+    writable_phases = {
+        "write_test",
+        "verify_test",
+        "implement",
+        "review_code",
+        "rescue",
+        "human_gate_rescue",
+        "create_pr",
+    }
+    if state.get("phase") in writable_phases or state.get("next_phase") in writable_phases:
+        return True
+    return False
+
+
+def _changed_paths(cwd: Path, base_branch: str) -> list[str]:
     """Ground-truth changed paths on the task branch, for the tier downgrade check
     (issue #19) — the REAL diff, not the paths a task DECLARES in its front-matter.
     Delegates to the NUL-delimited name-only helper so special-char paths can't be
-    dropped (a missed path would fail open and let a downgrade slip through)."""
-    return compute_branch_changed_paths(cwd=cwd)
+    dropped (a missed path would fail open and let a downgrade slip through).
+    `base_branch` is the per-task PINNED base (#91), so a worker that moved live config
+    can't shift the changed-paths range the PR-time tier guard reads."""
+    return compute_branch_changed_paths(cwd=cwd, base_branch=base_branch)
 
 
 def _next_phase(state: dict[str, Any], current: str) -> str:
@@ -817,6 +847,27 @@ def process_task(task_dir: Path) -> TaskOutcome:
             save_state(task_dir, state)
             return "error"
 
+        # Pin the reviewed-range base branch ONCE, pre-worker (#91). Every per-task
+        # consumer — the review diff base, the committed-range / changed-paths helpers,
+        # the PR base — reads this pinned value (via pinned_base_branch) instead of live
+        # config, so a worker that edits .redteam/config.toml [project].base_branch mid-task
+        # cannot move the reviewed range or make the PR base differ from it. A LEGACY
+        # in-flight task already past a writable phase with no pin FAILS CLOSED rather than
+        # backfilling from the current config (which the worker may already have moved).
+        if "base_branch" not in state:
+            if _writable_phase_started(state, task_dir):
+                state["last_failure_reason"] = "unpinned_base_branch"
+                state["last_failure_log"] = (
+                    "state.base_branch was never pinned and a writable phase has already run; "
+                    "refusing to derive the reviewed range from live config (the worker could "
+                    "have moved it). Start this task fresh."
+                )
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            state["base_branch"] = cfg.project.base_branch
+            save_state(task_dir, state)
+
         fm_tier, fm_paths, fm_mode = _parse_input_frontmatter(task_dir)
         is_fresh_task = not state.get("phases_completed")
 
@@ -1065,7 +1116,7 @@ def process_task(task_dir: Path) -> TaskOutcome:
         if phase == "create_pr" and "tier" in state:
             cfg = load_config(repo_root())
             try:
-                effective = resolve_tier(cfg, state["tier"], _changed_paths(repo_root()))
+                effective = resolve_tier(cfg, state["tier"], _changed_paths(repo_root(), pinned_base_branch(state)))
             except ValueError as e:
                 state["last_failure_reason"] = "tier_resolution_failed"
                 state["last_failure_log"] = str(e)

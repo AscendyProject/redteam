@@ -17,6 +17,7 @@ def test_review_code_changes_requested_routes_to_rescue_after_two_implement_retr
     state = {
         "task_id": "task-001-demo",
         "mode": "agent-pair",
+        "base_branch": "main",
         "phase": "review_code",
         "phases_completed": ["plan_outcome", "plan_review", "human_gate_outcome", "implement"],
         "next_phase": "review_code",
