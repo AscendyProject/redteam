@@ -53,6 +53,9 @@ def test_writable_phase_started_counts_any_signal(tmp_path):
     assert orch._writable_phase_started({"phases_completed": ["plan_outcome", "implement"]}, tmp_path) is True
     assert orch._writable_phase_started({"phases_completed": ["write_test"]}, tmp_path) is True
     assert orch._writable_phase_started({"verification": {"last_run_at": "2026-06-26T00:00:00Z"}}, tmp_path) is True
+    assert orch._writable_phase_started({"phase": "implement"}, tmp_path) is True
+    assert orch._writable_phase_started({"next_phase": "review_code"}, tmp_path) is True
+    assert orch._writable_phase_started({"next_phase": "plan_outcome"}, tmp_path) is False
     (tmp_path / "impl_diff.patch").write_text("x", encoding="utf-8")
     assert orch._writable_phase_started({}, tmp_path) is True
 
@@ -105,6 +108,24 @@ def test_legacy_unpinned_past_writable_phase_fails_closed(monkeypatch, tmp_path)
     assert outcome in ("error", "deferred")
     assert saved["last_failure_reason"] == "unpinned_base_branch"
     assert "base_branch" not in saved  # NOT backfilled from live config
+
+
+def test_legacy_unpinned_next_phase_fails_closed_regression(monkeypatch, tmp_path):
+    """An in-flight legacy task with next_phase=review_code but empty phases_completed
+    must FAIL CLOSED (unpinned_base_branch) rather than backfilling base_branch."""
+    orch = _orch()
+    state = {
+        "task_id": "task-001",
+        "mode": "agent-pair",
+        "phases_completed": [],
+        "next_phase": "review_code",
+    }
+    task_dir = _setup(orch, monkeypatch, tmp_path, state)
+    outcome = orch.process_task(task_dir)
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    assert outcome in ("error", "deferred")
+    assert saved["last_failure_reason"] == "unpinned_base_branch"
+    assert "base_branch" not in saved
 
 
 def test_pinned_base_drives_consumer_not_live_config():

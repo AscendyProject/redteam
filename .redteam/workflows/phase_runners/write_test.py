@@ -138,7 +138,9 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"returncode={result['returncode']}\n"
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=compute_branch_diff(cwd=rr, base_branch=base_branch))
+        return PhaseResult(
+            status="error", feedback=feedback, log=feedback, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
+        )
 
     # Reject an owned path that EXISTS as a symlink / non-regular file (the contract is
     # "test files"); a MISSING owned path is allowed (it stages as a deletion below).
@@ -146,7 +148,9 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         p = rr / rel
         if p.is_symlink() or (p.exists() and not p.is_file()):
             fb = f"refusing to stage a non-regular/symlink test path: {rel}"
-            return PhaseResult(status="error", feedback=fb, log=fb, diff=compute_branch_diff(cwd=rr, base_branch=base_branch))
+            return PhaseResult(
+                status="error", feedback=fb, log=fb, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
+            )
 
     try:
         commit_paths(rr, task_tests, _WRITE_TEST_COMMIT_MSG.format(task_id=task_id))

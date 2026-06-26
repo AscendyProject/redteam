@@ -91,6 +91,7 @@ def test_dispatch_sets_phase_started_at_and_writes_progress(monkeypatch, tmp_pat
         "task_id": "task-001",
         "mode": "agent-pair",
         "phase": "implement",
+        "base_branch": "main",
         "phases_completed": ["plan_outcome"],
         "next_phase": "implement",
         "verification": {"verify_command": "x", "verify_allowlist": ["pytest"], "commands": ["x"]},

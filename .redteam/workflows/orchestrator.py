@@ -372,6 +372,17 @@ def _writable_phase_started(state: dict[str, Any], task_dir: Path) -> bool:
     verification = state.get("verification")
     if isinstance(verification, dict) and verification.get("last_run_at"):
         return True
+    writable_phases = {
+        "write_test",
+        "verify_test",
+        "implement",
+        "review_code",
+        "rescue",
+        "human_gate_rescue",
+        "create_pr",
+    }
+    if state.get("phase") in writable_phases or state.get("next_phase") in writable_phases:
+        return True
     return False
 
 
