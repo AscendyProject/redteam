@@ -1015,6 +1015,32 @@ def process_task(
                     save_state(task_dir, state)
                     return "error"
             save_state(task_dir, state)
+        elif base_is_parent:
+            # Existing state for a dependent task: verify it is consistent with the
+            # scheduler's resolved parent base. A previously-seeded flat task (or one
+            # manually pre-seeded with a different base) must not silently run against
+            # the wrong base or bypass the SHA freeze guard — fail closed in both cases.
+            if state["base_branch"] != resolved_base:
+                state["last_failure_reason"] = "base_branch_mismatch"
+                state["last_failure_log"] = (
+                    f"state.base_branch={state['base_branch']!r} does not match the "
+                    f"scheduler-resolved parent base {resolved_base!r}. The task may have "
+                    "been previously started flat or pre-seeded with a different base. "
+                    "Refusing to continue — resolve the mismatch manually."
+                )
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
+            if "base_branch_sha" not in state:
+                state["last_failure_reason"] = "base_sha_missing"
+                state["last_failure_log"] = (
+                    f"state.base_branch_sha is absent for dependent task with parent base "
+                    f"{state['base_branch']!r}. The SHA freeze guard cannot be enforced. "
+                    "Refusing to continue — start this task fresh."
+                )
+                state["next_phase"] = "deferred"
+                save_state(task_dir, state)
+                return "error"
 
         # 2. Ancestry check for dependent tasks (every start/resume): if the task branch
         #    already exists, it must descend from the pinned parent. Never auto-delete.

@@ -45,6 +45,67 @@ def _setup_task(tmp_path: Path, orch, monkeypatch, task_id: str, **state_extra):
     return task_dir
 
 
+# ---------- IR-001: fail-closed when existing state mismatches resolved_base ----------
+
+
+def test_existing_state_base_branch_mismatch_fails_closed(monkeypatch, tmp_path):
+    """When a task already has base_branch in state but it doesn't match the
+    scheduler's resolved_base (e.g. previously seeded as flat), process_task
+    must fail closed rather than silently using the stale base."""
+    orch = _orch()
+
+    (tmp_path / ".redteam").mkdir()
+    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
+    # Pre-seed state with a DIFFERENT base_branch than what the scheduler resolved
+    task_dir = _setup_task(
+        tmp_path,
+        orch,
+        monkeypatch,
+        "task-001",
+        base_branch="main",  # stale flat base
+        base_branch_sha="sha_old",
+    )
+
+    outcome = orch.process_task(
+        task_dir,
+        resolved_base="redteam/parent-task",  # scheduler says this
+        base_is_parent=True,
+    )
+
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    assert outcome == "error"
+    assert saved["last_failure_reason"] == "base_branch_mismatch"
+    assert "stale" in saved["last_failure_log"] or "mismatch" in saved["last_failure_log"]
+
+
+def test_existing_state_missing_sha_fails_closed(monkeypatch, tmp_path):
+    """When a dependent task already has base_branch matching resolved_base but
+    lacks base_branch_sha (e.g. seeded before SHA freeze guard was introduced),
+    process_task must fail closed."""
+    orch = _orch()
+
+    (tmp_path / ".redteam").mkdir()
+    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
+    # Pre-seed with correct base_branch but NO sha
+    task_dir = _setup_task(
+        tmp_path,
+        orch,
+        monkeypatch,
+        "task-001",
+        base_branch="redteam/parent-task",  # correct base, but no SHA
+    )
+
+    outcome = orch.process_task(
+        task_dir,
+        resolved_base="redteam/parent-task",
+        base_is_parent=True,
+    )
+
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    assert outcome == "error"
+    assert saved["last_failure_reason"] == "base_sha_missing"
+
+
 # ---------- pin-before-branch ordering ----------
 
 
@@ -252,17 +313,55 @@ def test_ensure_task_branch_pull_issued_when_not_base_is_parent(monkeypatch, tmp
 # ---------- create_pr receives parent branch as --base ----------
 
 
-def test_create_pr_prompt_uses_parent_branch_as_base(monkeypatch, tmp_path):
-    """create_pr._pr_author_prompt receives the pinned parent branch as base_branch,
-    so the gh pr create --base arg is the parent task branch."""
+def test_create_pr_run_uses_pinned_base_from_state(monkeypatch, tmp_path):
+    """create_pr.run derives the --base from state via pinned_base_branch(state, repo),
+    not from a hardcoded value. Exercises the actual call-site wiring in run()."""
+    from types import SimpleNamespace
     import phase_runners.create_pr as create_pr_mod
 
     parent_branch = "redteam/task-parent"
-    prompt = create_pr_mod._pr_author_prompt(
-        "task-child",
-        tmp_path / "task-child",
-        "redteam/task-child",
-        parent_branch,
+    task_dir = tmp_path / "task-child"
+    task_dir.mkdir()
+
+    # Stable SHA — freeze guard should pass
+    state = {
+        "base_branch": parent_branch,
+        "base_branch_sha": "abc123",
+        "branch": "redteam/task-child",
+    }
+
+    captured_prompts: list[str] = []
+
+    # Patch git_rev_parse in _base so freeze guard sees a matching SHA
+    import phase_runners._base as base_mod
+
+    monkeypatch.setattr(base_mod, "git_rev_parse", lambda ref, repo: "abc123")
+
+    # Patch preflight to pass
+    monkeypatch.setattr(create_pr_mod, "_preflight_pr_auth", lambda cwd: None)
+
+    # Patch load_config
+    monkeypatch.setattr(
+        create_pr_mod,
+        "load_config",
+        lambda repo: SimpleNamespace(project=SimpleNamespace(branch_prefix="redteam")),
     )
-    assert f"--base {parent_branch}" in prompt
+
+    # Patch repo_root
+    monkeypatch.setattr(create_pr_mod, "repo_root", lambda: tmp_path)
+
+    # Capture the prompt via the adapter
+    class FakeAdapter:
+        def invoke(self, *, role, agent, prompt, cwd):
+            captured_prompts.append(prompt)
+            # Return a non-zero code so run() doesn't need pr_url.txt
+            return {"returncode": 1, "stdout": "", "stderr": "no-op"}
+
+    monkeypatch.setattr(create_pr_mod, "get_worker_adapter", lambda state: FakeAdapter())
+
+    create_pr_mod.run(task_dir, state)
+
+    assert captured_prompts, "adapter was never invoked — wiring is broken"
+    prompt = captured_prompts[0]
+    assert f"--base {parent_branch}" in prompt, f"Expected '--base {parent_branch}' in prompt, got: {prompt!r}"
     assert f"against base branch `{parent_branch}`" in prompt
