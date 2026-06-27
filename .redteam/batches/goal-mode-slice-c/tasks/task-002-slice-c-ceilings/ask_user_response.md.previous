@@ -1,0 +1,48 @@
+# Operator decision on PR-002 (goal-status exposure)
+
+The reviewer is **correct**, and this aligns with the brief's own Risks note
+("read the SAME per-task result map the scheduler already produces — don't
+re-derive task status from disk"). The previous plan exposed goal-status only via a
+standalone `_compute_goal_status`, with `_run_pipeline` **re-loading `goal.json`**
+after `process_batch` returns — that re-load IS the disk-re-derivation drift the
+brief forbids, and it makes the status "available only if a caller independently
+re-loads the manifest," which is the scope change PR-002 names. Do NOT proceed on
+the helper-only design.
+
+Re-plan with this concrete, mandatory API (this closes PR-002 — implement exactly):
+
+1. **`_run_batch(batch_dir) -> tuple[dict[str, str], GoalStatus | None]`** — the real
+   batch worker. Load `goal.json` **once**, run the layered scheduler, and compute the
+   goal-status from the **in-memory** `(results, deps)` it already holds — never
+   re-read `goal.json` or any task state from disk. Flat mode (no manifest) → second
+   element is `None`.
+2. **`process_batch(batch_dir) -> dict[str, str]`** stays a thin backward-compatible
+   wrapper: `return _run_batch(batch_dir)[0]`. Every existing caller and all Slice A
+   tests (`results == {...}` assertions) remain byte-for-byte valid — the
+   `dict[str, str]` contract is preserved.
+3. **`_run_pipeline` calls `_run_batch` directly** to obtain BOTH results and
+   goal-status in a single pass. **Delete the planned `_run_pipeline` re-load of
+   `goal.json`** entirely (and drop the corresponding "re-loads goal.json" Risk — it no
+   longer applies). The `GOAL COMPLETE` / `GOAL INCOMPLETE` line is rendered from the
+   returned `GoalStatus`.
+4. **`_compute_goal_status(results, manifest_task_ids) -> GoalStatus`** remains a pure,
+   unit-testable helper called inside `_run_batch` (no I/O, no subprocess). `GoalStatus`
+   carries `complete` / `done_count` / `total` / `blocked_ids` (blocked_ids in
+   `_topo_layers` dispatch order). The manifest task-id list is passed in from
+   `_run_batch`'s in-memory `deps` — not reloaded.
+
+This satisfies "available from `process_batch`'s run, unit-testable, not only printed"
+(via `_run_batch`, which `process_batch` and `_run_pipeline` both go through), keeps
+the public `dict[str, str]` contract, and eliminates the manifest double-read.
+
+Keep the PR-001 / PR-003 / PR-004 resolutions exactly as already accepted (concrete
+affected files; no goal-level line after a manifest-validation abort; unknown
+`ceilings.*` = tolerate-and-ignore). Update outcome.md's Affected files (add
+`_run_batch`), the goal-status section, and the Risks accordingly.
+
+On the reviewer's "Uncertain" item: **the brief IS authoritative.** The umbrella design
+doc (`docs/decisions/2026-06-27-goal-mode-design.md`) lives on the not-yet-merged PR
+#110 branch, so its absence on this branch is expected; the brief faithfully encodes
+the Slice C cut. The design doc is NOT required to land in this PR.
+
+USER_DECISION: REVISE_PLAN
