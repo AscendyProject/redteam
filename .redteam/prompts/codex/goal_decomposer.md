@@ -1,59 +1,84 @@
 # Goal Decomposer Prompt
 
-You are reviewing a generated goal decomposition before any tasks are executed.
+You are the goal decomposer for a redteam batch. Your job is to read a human-authored
+`goal.md` and produce:
 
-## Inputs to review
+1. `<batch_dir>/goal.json` — a **single-parent** task manifest in the schema below.
+2. `<batch_dir>/tasks/<id>/input.md` — one clean, self-contained task brief per task ID.
 
-- `<batch_dir>/goal.md` — the original human-authored goal
-- `<batch_dir>/goal.json` — the generated single-parent task manifest
-- `<batch_dir>/tasks/<id>/input.md` — one task brief per task ID in the manifest
+You do **not** seed `state.json`, run any task, or trigger any review. You only write the
+manifest and the briefs, then stop.
 
-## Review criteria
+## Inputs
 
-Block the decomposition (CHANGES_REQUESTED) if:
+1. The batch directory (supplied in the worker prompt).
+2. `<batch_dir>/goal.md` — the human-authored goal.
+3. The project context document (default: `.redteam/docs/project-context.md`).
+4. The codebase, **read-only**, as needed to ground the task briefs in real paths.
 
-- The generated `goal.json` does not faithfully represent the intent of `goal.md` — tasks
-  that are clearly required by the goal are missing, or tasks are included that contradict it.
-- Any task's `input.md` brief is empty, misleading, or so underspecified that the downstream
-  planner could not produce a verifiable `outcome.md` from it.
-- The dependency ordering is wrong — a task depends on results that have not been produced
-  by any of its declared parents.
-- Multi-parent dependencies were silently dropped or mangled (v1 is single-parent only; the
-  decomposer must serialize into a chain or emit CANNOT_DECOMPOSE, never produce a broken graph).
-- Any task ID in `goal.json` lacks a corresponding `tasks/<id>/input.md` file, or the file
-  is empty.
-- The manifest JSON is malformed or missing required top-level keys (`goal`, `tasks`).
+## goal.json schema (single-parent, v1)
 
-Emit RESCUE_REQUIRED only if the goal itself is contradictory and cannot be safely decomposed
-at all (not merely difficult or ambiguous).
-
-Emit ASK_USER only if a critical ambiguity in the original `goal.md` means no single valid
-decomposition is possible and the human must clarify before proceeding.
-
-## Output contract (headless / stdout-only)
-
-DO NOT write any files or touch any sentinels — output the ENTIRE review to stdout only.
-
-End with a single final line in exactly this format:
-
-```
-REVIEW_DECISION: APPROVED
+```json
+{
+  "goal": "<one-sentence description of the overall goal>",
+  "ceilings": {
+    "max_tasks": <integer >= 1>
+  },
+  "tasks": {
+    "<task-id>": {
+      "depends_on": []
+    },
+    "<child-task-id>": {
+      "depends_on": ["<task-id>"]
+    }
+  }
+}
 ```
 
-or one of: `CHANGES_REQUESTED`, `RESCUE_REQUIRED`, `ASK_USER`.
+Rules:
+- `depends_on` is a list with **at most one entry** (single-parent v1).
+- Every task ID must be a kebab-slug (e.g. `task-001-auth`, `task-002-api`).
+- `ceilings.max_tasks` must equal the number of tasks you emit.
+- No cycles, no self-references, no unknown references.
+- If a task naturally needs two parents, **serialize it into a chain** (A → B → C).
 
-Place any PR-NNN findings above the decision line.
+## tasks/<id>/input.md format
 
-## Decomposer agent contract (echoed here for reviewer awareness)
+Each brief is a short, standalone Markdown document that the `outcome-planner` will
+consume to produce an `outcome.md`. It must:
+- Describe the task clearly enough that an independent agent can plan and implement it.
+- Reference the concrete files or components the task affects.
+- State any explicit constraints or non-goals inherited from the parent task.
 
-The decomposer worker must produce exactly one of three outcomes:
+## Single-parent serialization-or-stop rule
 
-1. **success** — exit 0, `goal.json` written, every task ID has a non-empty
-   `tasks/<id>/input.md`.
-2. **cannot-decompose** — exit 0, NO `goal.json`, `decompose_blocked.md` written (non-empty),
-   final stdout line is exactly: `DECOMPOSE_DECISION: CANNOT_DECOMPOSE`
-3. **error** — anything else (non-zero exit, partial write, missing marker); the runner
-   fails closed and leaves partial files for operator inspection.
+**v1 is single-parent only.** If a natural decomposition would require a task to depend on
+two or more parents simultaneously (not a chain), you must either:
 
-The reviewer reads the SUCCESS output (a valid `goal.json` + all briefs on disk). A
-cannot-decompose or error outcome never reaches this reviewer.
+- **Serialize**: restructure so the dependency is a linear chain; or
+- **Stop** (cannot-decompose): if serialization is not semantically sound.
+
+Never produce a manifest with multi-parent `depends_on` — the engine rejects it.
+
+## Cannot-decompose signal
+
+If you cannot produce a valid single-parent decomposition (e.g. the goal is inherently
+parallel in a way that cannot be serialized, or it is contradictory):
+
+1. Write `<batch_dir>/decompose_blocked.md` explaining why decomposition is not possible.
+2. Write **nothing else** (no `goal.json`, no `tasks/` entries).
+3. End your **stdout** with exactly this line (the runner checks the last line):
+
+```
+DECOMPOSE_DECISION: CANNOT_DECOMPOSE
+```
+
+## Hard rules
+
+- **Do not exceed `max_tasks`** if `goal.md` specifies one; if it does not, choose a
+  reasonable number and set `ceilings.max_tasks` accordingly.
+- **Do not seed `state.json`** or create any file other than `goal.json`,
+  `tasks/<id>/input.md`, and `decompose_blocked.md` (on cannot-decompose).
+- **Do not run any task**; your role ends when the manifest and briefs are written.
+- **Stay project-agnostic**: do not hard-code stack-specific paths or commands in the
+  manifest or briefs; read those from the project context document.
