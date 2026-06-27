@@ -7,7 +7,10 @@ Invokes the goal-decomposer worker agent and enforces the three-outcome contract
                         completeness gate before and after the review.
   (b) cannot-decompose: worker exit 0 AND goal.json ABSENT AND final stdout line
                         is exactly DECOMPOSE_DECISION: CANNOT_DECOMPOSE AND
-                        decompose_blocked.md is present and non-empty.
+                        decompose_blocked.md is present and non-empty AND
+                        NO tasks/<id>/input.md exists under the batch dir.
+                        If any task briefs were written alongside the marker,
+                        that is a partial-write → outcome (c), not (b).
   (c) anything else:   fail closed — partial writes are left untouched for the
                         operator to inspect; the runner itself writes nothing.
 
@@ -65,9 +68,19 @@ def run(batch_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
     stdout_lines = [ln.strip() for ln in stdout_stripped.splitlines() if ln.strip()]
     final_stdout_line = stdout_lines[-1] if stdout_lines else ""
     blocked_exists = blocked_path.is_file() and blocked_path.stat().st_size > 0
+    stray_briefs = list(batch_dir.glob("tasks/*/input.md"))
 
-    # Outcome (b): cannot-decompose — all four conditions must hold
-    if exit_code == 0 and not goal_json_exists and final_stdout_line == CANNOT_DECOMPOSE_MARKER and blocked_exists:
+    # Outcome (b): cannot-decompose — all five conditions must hold.
+    # Stray task briefs alongside the marker are a contract violation (partial write)
+    # and fall into outcome (c) instead — hiding them as a valid cannot-decompose
+    # would leave the operator with an inconsistent batch dir.
+    if (
+        exit_code == 0
+        and not goal_json_exists
+        and final_stdout_line == CANNOT_DECOMPOSE_MARKER
+        and blocked_exists
+        and not stray_briefs
+    ):
         return {
             "status": "cannot_decompose",
             "log": stdout,

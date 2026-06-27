@@ -300,6 +300,40 @@ def test_cannot_decompose_marker_without_blocked_md_fails_closed(tmp_path: Path)
     mock_review.assert_not_called()
 
 
+def test_cannot_decompose_with_stray_briefs_fails_closed(tmp_path: Path) -> None:
+    """Outcome (c): marker + blocked.md + stray tasks/*/input.md → partial write, fail closed.
+
+    A worker that emits CANNOT_DECOMPOSE but also wrote task briefs violates the
+    contract (cannot-decompose requires NO goal.json / tasks/<id>/input.md / state.json
+    writes). The runner must classify this as outcome (c), not (b), so the operator
+    can inspect the inconsistent batch dir rather than silently accepting it.
+    """
+    decompose_mod = _decompose_mod()
+    batch_dir = _make_batch(tmp_path)
+
+    def stray_worker_invoke(**_kwargs: object) -> dict:
+        # Writes decompose_blocked.md AND a stray task brief (contract violation)
+        (batch_dir / "decompose_blocked.md").write_text("blocked", encoding="utf-8")
+        stray_dir = batch_dir / "tasks" / "task-stray"
+        stray_dir.mkdir(parents=True, exist_ok=True)
+        (stray_dir / "input.md").write_text("stray brief", encoding="utf-8")
+        return {
+            "returncode": 0,
+            "stdout": "DECOMPOSE_DECISION: CANNOT_DECOMPOSE",
+            "stderr": "",
+        }
+
+    fake_worker = MagicMock()
+    fake_worker.invoke.side_effect = stray_worker_invoke
+
+    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
+        result = decompose_mod.run(batch_dir, {})
+
+    # Must be outcome (c), not (b)
+    assert result["status"] == "error"
+    assert "cannot_decompose" not in result["status"]
+
+
 # ---------- runner contract enforced in decompose.run() directly (IR-001) ----------
 
 
