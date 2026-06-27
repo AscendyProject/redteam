@@ -8,9 +8,16 @@ Invokes the goal-decomposer worker agent and enforces the three-outcome contract
   (b) cannot-decompose: worker exit 0 AND goal.json ABSENT AND final stdout line
                         is exactly DECOMPOSE_DECISION: CANNOT_DECOMPOSE AND
                         decompose_blocked.md is present and non-empty AND
-                        NO tasks/<id>/input.md exists under the batch dir.
-                        If any task briefs were written alongside the marker,
-                        that is a partial-write → outcome (c), not (b).
+                        NO tasks/<id>/input.md AND NO tasks/<id>/state.json exists
+                        under the batch dir. If any task brief OR task state was
+                        written alongside the marker, that is a partial-write →
+                        outcome (c), not (b). A stray tasks/<id>/state.json is
+                        especially dangerous: with no goal.json the scheduler falls
+                        back to flat mode and _run_one_task runs a task dir that
+                        already has a state.json without re-seeding (bypassing the
+                        no_input_md guard), so an attacker-controlled state would
+                        execute. The per-task state-machine surface must stay
+                        untouched until APPROVED.
   (c) anything else:   fail closed — partial writes are left untouched for the
                         operator to inspect; the runner itself writes nothing.
 
@@ -69,17 +76,22 @@ def run(batch_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
     final_stdout_line = stdout_lines[-1] if stdout_lines else ""
     blocked_exists = blocked_path.is_file() and blocked_path.stat().st_size > 0
     stray_briefs = list(batch_dir.glob("tasks/*/input.md"))
+    stray_states = list(batch_dir.glob("tasks/*/state.json"))
 
-    # Outcome (b): cannot-decompose — all five conditions must hold.
-    # Stray task briefs alongside the marker are a contract violation (partial write)
-    # and fall into outcome (c) instead — hiding them as a valid cannot-decompose
-    # would leave the operator with an inconsistent batch dir.
+    # Outcome (b): cannot-decompose — all six conditions must hold.
+    # Stray task briefs OR stray task state.json alongside the marker are a contract
+    # violation (partial write) and fall into outcome (c) instead — hiding them as a
+    # valid cannot-decompose would leave the operator with an inconsistent batch dir.
+    # A stray state.json is the worse case: with no goal.json the scheduler runs flat
+    # mode and _run_one_task executes a pre-seeded task dir without re-seeding, so the
+    # per-task state-machine surface must stay untouched until APPROVED.
     if (
         exit_code == 0
         and not goal_json_exists
         and final_stdout_line == CANNOT_DECOMPOSE_MARKER
         and blocked_exists
         and not stray_briefs
+        and not stray_states
     ):
         return {
             "status": "cannot_decompose",

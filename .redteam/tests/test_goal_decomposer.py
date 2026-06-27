@@ -334,6 +334,42 @@ def test_cannot_decompose_with_stray_briefs_fails_closed(tmp_path: Path) -> None
     assert "cannot_decompose" not in result["status"]
 
 
+def test_cannot_decompose_with_stray_state_fails_closed(tmp_path: Path) -> None:
+    """Outcome (c): marker + blocked.md + stray tasks/*/state.json → partial write, fail closed (IR-005).
+
+    A worker that emits CANNOT_DECOMPOSE but also wrote a tasks/<id>/state.json is the
+    worst partial-write: with no goal.json the scheduler runs flat mode and
+    _run_one_task executes a pre-seeded task dir WITHOUT re-seeding, bypassing the
+    no_input_md guard, so attacker-controlled state would run. The runner must classify
+    this as outcome (c), not (b) — the per-task state-machine surface stays untouched
+    until APPROVED.
+    """
+    decompose_mod = _decompose_mod()
+    batch_dir = _make_batch(tmp_path)
+
+    def stray_worker_invoke(**_kwargs: object) -> dict:
+        # Writes decompose_blocked.md AND a stray task state.json (contract violation)
+        (batch_dir / "decompose_blocked.md").write_text("blocked", encoding="utf-8")
+        stray_dir = batch_dir / "tasks" / "task-stray"
+        stray_dir.mkdir(parents=True, exist_ok=True)
+        (stray_dir / "state.json").write_text('{"task_id": "task-stray"}', encoding="utf-8")
+        return {
+            "returncode": 0,
+            "stdout": "DECOMPOSE_DECISION: CANNOT_DECOMPOSE",
+            "stderr": "",
+        }
+
+    fake_worker = MagicMock()
+    fake_worker.invoke.side_effect = stray_worker_invoke
+
+    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
+        result = decompose_mod.run(batch_dir, {})
+
+    # Must be outcome (c), not (b)
+    assert result["status"] == "error"
+    assert "cannot_decompose" not in result["status"]
+
+
 # ---------- runner contract enforced in decompose.run() directly (IR-001) ----------
 
 
