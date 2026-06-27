@@ -169,7 +169,7 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
     def _in_task_dir(p: str) -> bool:
         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
 
-    base_branch = pinned_base_branch(state)
+    base_branch = pinned_base_branch(state, cwd)
     new_untracked = untracked_files(cwd) - before_untracked
     seen: set[str] = set()
     to_stage: list[str] = []
@@ -268,7 +268,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()
-    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
+    base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
     # Snapshot untracked files BEFORE the worker runs so the commit step can stage
     # exactly what it creates (current − before), never a pre-existing untracked file.
     try:
@@ -387,7 +387,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()
-    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
+    base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
     # Snapshot + validate the verify command BEFORE the implementer runs, so a
     # same-round edit to config.toml's verify_command cannot self-neuter the
     # gate (IR-001). The agent-pair path snapshots at plan time for the same

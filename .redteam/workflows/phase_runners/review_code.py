@@ -40,7 +40,12 @@ def _code_review_prompt(task_dir: Path, base_branch: str) -> str:
 
 def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     if state.get("mode") == "agent-pair":
-        base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
+        rr = repo_root()
+        try:
+            base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
+        except ValueError as exc:
+            msg = str(exc)
+            return PhaseResult(status="error", feedback=msg, log=msg, diff=compute_repo_diff(cwd=rr))
         diff = compute_repo_diff(cwd=repo_root())
         review_path = task_dir / "code_review.md"
 
