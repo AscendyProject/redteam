@@ -24,10 +24,11 @@ _MARKETPLACE_JSON = _ROOT / ".claude-plugin" / "marketplace.json"
 _BIN = _ROOT / "bin" / "redteam-install"
 _COMMAND = _ROOT / "commands" / "redteam-install.md"
 
-# The six generic sub-agents install.py vendors (kept in sync with
+# The generic sub-agents install.py vendors (kept in sync with
 # install.py HARNESS_AGENTS — drift here is the bug this guards).
 _EXPECTED_AGENTS = {
     "code-security-reviewer",
+    "goal-decomposer",
     "implementer",
     "outcome-planner",
     "pr-author",

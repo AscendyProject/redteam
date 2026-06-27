@@ -2,6 +2,7 @@
 """redteam orchestrator.
 
 Usage:
+    python3 .redteam/workflows/orchestrator.py decompose <batch-dir>
     python3 .redteam/workflows/orchestrator.py start  <batch-dir>
     python3 .redteam/workflows/orchestrator.py resume <batch-dir>
     python3 .redteam/workflows/orchestrator.py status <batch-dir>
@@ -33,6 +34,7 @@ if str(_HERE) not in sys.path:
 
 from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
     create_pr,
+    decompose as decompose_runner,
     implement,
     plan_outcome,
     plan_review,
@@ -2143,6 +2145,183 @@ def cmd_new_task(batch_dir: Path, args: list[str]) -> int:
     return 0
 
 
+def _missing_briefs(batch_dir: Path) -> list[str]:
+    """Return task IDs from goal.json that lack a non-empty tasks/<id>/input.md.
+
+    Reads goal.json to enumerate expected task IDs. Returns an empty list if
+    goal.json is absent or unreadable (the caller has already validated it exists).
+    """
+    goal_path = batch_dir / "goal.json"
+    try:
+        data = json.loads(goal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    task_ids = list(data.get("tasks", {}).keys())
+    missing = []
+    for tid in task_ids:
+        brief = batch_dir / "tasks" / tid / "input.md"
+        if not brief.is_file() or brief.stat().st_size == 0:
+            missing.append(tid)
+    return missing
+
+
+def _decomposition_review_prompt(batch_dir: Path) -> str:
+    """Prompt for the cross-provider adversarial decomposition review."""
+    return (
+        f"Act as an adversarial decomposition reviewer for the batch at {batch_dir}/. "
+        f"Inputs: {batch_dir}/goal.md (the original goal), {batch_dir}/goal.json "
+        f"(the generated manifest), and each {batch_dir}/tasks/<id>/input.md brief. "
+        f"Apply the review criteria in .redteam/prompts/codex/goal_decomposer.md. "
+        f"DO NOT write any files or touch any sentinels — output the ENTIRE review to "
+        f"stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
+        f"CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with PR-NNN findings above it."
+    )
+
+
+def cmd_decompose(batch_dir: Path) -> int:
+    """Generate goal.json + task briefs from goal.md and run a cross-provider review gate.
+
+    Reads goal.md, invokes the decomposer worker, runs the decomposition review,
+    and returns before any task is dispatched.  Fail-closed on every uncertainty:
+
+    - If goal.json or any tasks/<id>/input.md already exists, exits non-zero without
+      writing or modifying anything (idempotency guard).
+    - On a cannot-decompose signal from the worker, surfaces decompose_blocked.md and
+      exits non-zero.
+    - On a non-APPROVED review, persists decompose_review.md and exits non-zero.
+    - On APPROVED, validates goal.json via _load_goal_manifest (same Slice A+C path as
+      a hand-fed manifest) and re-asserts brief completeness before exit 0.
+    - Seeds NO tasks/<id>/state.json (start/resume run the validated stack separately).
+    """
+    if not batch_dir.is_dir():
+        print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
+        return 2
+
+    # 1. goal.md is required
+    goal_md = batch_dir / "goal.md"
+    if not goal_md.is_file():
+        print(
+            f"error: no goal.md found at {goal_md}; `decompose` requires a goal.md at the batch root",
+            file=sys.stderr,
+        )
+        return 2
+
+    # 2. Idempotency guard — fail closed if any prior generated artifact exists
+    goal_json = batch_dir / "goal.json"
+    if goal_json.is_file():
+        print(
+            f"error: {goal_json} already exists. Already decomposed; remove generated artifacts manually to re-run.",
+            file=sys.stderr,
+        )
+        return 1
+
+    tasks_root = batch_dir / "tasks"
+    if tasks_root.is_dir():
+        for task_dir_entry in tasks_root.iterdir():
+            if task_dir_entry.is_dir() and (task_dir_entry / "input.md").is_file():
+                print(
+                    f"error: {task_dir_entry / 'input.md'} already exists. Already decomposed; "
+                    "remove generated artifacts manually to re-run.",
+                    file=sys.stderr,
+                )
+                return 1
+
+    # 3. Cross-provider guard (reuse _adversarial_pairing_error via a synthetic state
+    #    that guarantees runs_headless_review=True, since we always run a review)
+    pairing_error = _adversarial_pairing_error({"tier_phases": ["plan_review"]})
+    if pairing_error:
+        print(f"error: decompose cross-provider guard: {pairing_error}", file=sys.stderr)
+        return 2
+
+    # 4. Invoke the decomposer worker
+    print(f"orchestrator decompose: {batch_dir}")
+    result = decompose_runner.run(batch_dir, {})
+
+    # 5. Three-outcome worker contract
+    if result["status"] == "cannot_decompose":
+        blocked = batch_dir / "decompose_blocked.md"
+        print(result["log"])
+        print(
+            f"decomposer cannot decompose this goal — see {blocked}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if result["status"] == "error":
+        print(result["log"])
+        print(f"error: decomposer failed — {result['message']}", file=sys.stderr)
+        return 1
+
+    # 6. success: pre-approval brief completeness gate (PR-004)
+    missing = _missing_briefs(batch_dir)
+    if missing:
+        print(
+            f"error: generated goal.json lists task(s) with no non-empty input.md: "
+            f"{', '.join(missing)}. Batch aborted — no task state seeded.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 7. Cross-provider decomposition review
+    review_result = review_with_fallback(
+        {},
+        role="plan_review",
+        prompt=_decomposition_review_prompt(batch_dir),
+        cwd=repo_root(),
+        target={"kind": "plan", "base": None},
+    )
+
+    # 8. Persist review artifact
+    review_path = batch_dir / "decompose_review.md"
+    review_path.write_text(review_result["raw"], encoding="utf-8")
+
+    if review_result["parse_status"] == MANUAL_REQUIRED:
+        print(
+            f"error: reviewer fallback exhausted — manual review required; see {review_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if review_result["parse_status"] != "ok":
+        print(
+            f"error: reviewer failed (parse_status={review_result['parse_status']}); see {review_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    decision = review_result["decision"]
+
+    if decision != "APPROVED":
+        print(
+            f"decomposition review: {decision} — batch not started; see {review_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 9. APPROVED: validate via the existing Slice A+C _load_goal_manifest path
+    try:
+        _load_goal_manifest(batch_dir, goal_json)
+    except ValueError as exc:
+        print(
+            f"error: generated goal.json failed validation: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 10. Re-assert brief completeness before exit 0
+    missing = _missing_briefs(batch_dir)
+    if missing:
+        print(
+            f"error: post-approval brief completeness check failed — missing non-empty "
+            f"input.md for: {', '.join(missing)}. Batch aborted.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("DECOMPOSITION APPROVED — run `orchestrator start` to execute the validated stack")
+    return 0
+
+
 def cmd_config(repo: Path | None = None) -> int:
     """Interactively pick per-role models and write .redteam/config.toml.
 
@@ -2157,10 +2336,14 @@ def cmd_config(repo: Path | None = None) -> int:
 
 
 USAGE = (
-    "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
+    "usage: orchestrator.py decompose <batch-dir>\n"
+    "       orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
     "       orchestrator.py review\n"
     "       orchestrator.py config\n"
+    "  decompose        — generate goal.json + task briefs from goal.md; run the\n"
+    "                     cross-provider decomposition review gate; stop before any\n"
+    "                     task is dispatched (run `start` after to execute the stack)\n"
     "  start            — process every task from its current next_phase\n"
     "  resume           — same as start; convenient name to re-enter after a human gate\n"
     "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
@@ -2194,6 +2377,8 @@ def main(argv: list[str]) -> int:
 
     if command == "new":
         return cmd_new_task(batch_dir, argv[3:])
+    if command == "decompose":
+        return cmd_decompose(batch_dir)
     if command == "start":
         return cmd_start(batch_dir)
     if command == "resume":
