@@ -300,6 +300,67 @@ def test_cannot_decompose_marker_without_blocked_md_fails_closed(tmp_path: Path)
     mock_review.assert_not_called()
 
 
+# ---------- runner contract enforced in decompose.run() directly (IR-001) ----------
+
+
+def _decompose_mod():
+    _orch()  # ensures workflows/ is on sys.path via _engine
+    import phase_runners.decompose as m
+
+    return m
+
+
+def test_run_partial_write_returns_error(tmp_path: Path) -> None:
+    """run() itself fails closed on goal.json + an empty brief (not deferred to caller)."""
+    decompose_mod = _decompose_mod()
+    batch_dir = _make_batch(tmp_path)
+    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001", "task-002"], empty_brief_ids=["task-002"])
+
+    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
+        result = decompose_mod.run(batch_dir, {})
+
+    assert result["status"] == "error"
+    assert "task-002" in result["message"]
+
+
+def test_run_missing_brief_returns_error(tmp_path: Path) -> None:
+    """run() fails closed when a manifest task has no input.md at all."""
+    decompose_mod = _decompose_mod()
+    batch_dir = _make_batch(tmp_path)
+    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001"], write_briefs=False)
+
+    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
+        result = decompose_mod.run(batch_dir, {})
+
+    assert result["status"] == "error"
+    assert "task-001" in result["message"]
+
+
+def test_run_unparseable_goal_json_returns_error(tmp_path: Path) -> None:
+    """run() fails closed when the worker writes an unparseable goal.json."""
+    decompose_mod = _decompose_mod()
+    batch_dir = _make_batch(tmp_path)
+    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001"], goal_json_override="{not valid json")
+
+    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
+        result = decompose_mod.run(batch_dir, {})
+
+    assert result["status"] == "error"
+    assert "unparseable" in result["message"]
+
+
+def test_run_complete_returns_success(tmp_path: Path) -> None:
+    """run() returns success only when goal.json + every brief is present and non-empty."""
+    decompose_mod = _decompose_mod()
+    batch_dir = _make_batch(tmp_path)
+    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001", "task-002"])
+
+    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
+        result = decompose_mod.run(batch_dir, {})
+
+    assert result["status"] == "success"
+
+
 # ---------- (c) non-APPROVED review ----------
 
 

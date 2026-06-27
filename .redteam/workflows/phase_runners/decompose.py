@@ -22,7 +22,7 @@ from typing import Any
 
 from adapters import get_worker_adapter
 
-from ._base import repo_root
+from ._base import incomplete_briefs, repo_root
 
 AGENT_NAME = "goal-decomposer"
 CANNOT_DECOMPOSE_MARKER = "DECOMPOSE_DECISION: CANNOT_DECOMPOSE"
@@ -74,8 +74,28 @@ def run(batch_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
             "message": f"decomposer cannot decompose this goal; see {blocked_path}",
         }
 
-    # Outcome (a): basic success signal (caller runs the full completeness gate)
+    # Outcome (a): success requires exit 0 AND goal.json present AND every task in
+    # goal.json backed by a non-empty input.md. A goal.json with missing/empty briefs
+    # (or an unparseable goal.json) is a partial write → outcome (c), fail closed.
+    # The completeness check is the runner's own contract (not deferred to the caller),
+    # so a future direct caller of run() gets the same guarantee.
     if exit_code == 0 and goal_json_exists:
+        incomplete = incomplete_briefs(batch_dir)
+        if incomplete is None:
+            return {
+                "status": "error",
+                "log": stdout,
+                "message": f"decomposer wrote an unparseable goal.json at {goal_json_path}",
+            }
+        if incomplete:
+            return {
+                "status": "error",
+                "log": stdout,
+                "message": (
+                    f"decomposer wrote goal.json but task(s) {', '.join(incomplete)} "
+                    "have a missing or empty input.md (partial write)"
+                ),
+            }
         return {
             "status": "success",
             "log": stdout,

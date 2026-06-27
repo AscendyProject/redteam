@@ -49,6 +49,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     compute_branch_changed_paths,
     extract_verification_commands,
     git_rev_parse,
+    incomplete_briefs,
     pinned_base_branch,
     repo_root,
     validate_verification_commands,
@@ -2148,21 +2149,12 @@ def cmd_new_task(batch_dir: Path, args: list[str]) -> int:
 def _missing_briefs(batch_dir: Path) -> list[str]:
     """Return task IDs from goal.json that lack a non-empty tasks/<id>/input.md.
 
-    Reads goal.json to enumerate expected task IDs. Returns an empty list if
-    goal.json is absent or unreadable (the caller has already validated it exists).
+    Delegates to the shared `incomplete_briefs` helper so the pre-approval gate and
+    the decomposer runner contract enforce the SAME completeness check (no
+    divergence). Returns an empty list if goal.json is absent or unreadable (the
+    caller has already validated it exists).
     """
-    goal_path = batch_dir / "goal.json"
-    try:
-        data = json.loads(goal_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    task_ids = list(data.get("tasks", {}).keys())
-    missing = []
-    for tid in task_ids:
-        brief = batch_dir / "tasks" / tid / "input.md"
-        if not brief.is_file() or brief.stat().st_size == 0:
-            missing.append(tid)
-    return missing
+    return incomplete_briefs(batch_dir) or []
 
 
 def _decomposition_review_prompt(batch_dir: Path) -> str:
