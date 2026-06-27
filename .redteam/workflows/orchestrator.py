@@ -23,7 +23,7 @@ import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, NamedTuple
 
 # Make `phase_runners.*` importable when this file is invoked as a script
 # (`python3 .redteam/workflows/orchestrator.py ...`) rather than via `python -m`.
@@ -727,6 +727,38 @@ def _route_to_rescue_or_defer(
 # ---------- goal manifest (optional goal.json at batch root) ----------
 
 
+class GoalStatus(NamedTuple):
+    """Immutable summary of a manifest batch run's done-criterion.
+
+    complete: True iff every manifest task ended with result "done".
+    done_count: number of manifest tasks whose result == "done".
+    total: total number of manifest tasks.
+    incomplete_ids: manifest task IDs whose result != "done", in dispatch order.
+    """
+
+    complete: bool
+    done_count: int
+    total: int
+    incomplete_ids: tuple[str, ...]
+
+
+def _compute_goal_status(results: dict[str, str], manifest_task_ids: list[str]) -> GoalStatus:
+    """Pure helper: compute goal-level done-criterion from in-memory results.
+
+    Side-effect free: reads no files, makes no subprocess calls.
+    Membership rule: a task is incomplete iff results.get(id) != "done".
+    """
+    total = len(manifest_task_ids)
+    incomplete = tuple(tid for tid in manifest_task_ids if results.get(tid) != "done")
+    done_count = total - len(incomplete)
+    return GoalStatus(
+        complete=len(incomplete) == 0,
+        done_count=done_count,
+        total=total,
+        incomplete_ids=incomplete,
+    )
+
+
 def _check_no_cycle(deps: dict[str, str | None]) -> None:
     """Raise ValueError if deps contains a dependency cycle (DFS back-edge detection).
 
@@ -780,10 +812,21 @@ def _load_goal_manifest(batch_dir: Path, goal_path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("goal.json must be a JSON object")
 
-    # ceilings: parsed/stored but not enforced (Slice C); must be a JSON object if present
+    # ceilings: must be a JSON object if present; max_tasks is validated and enforced
     ceilings = data.get("ceilings")
     if ceilings is not None and not isinstance(ceilings, dict):
         raise ValueError("goal.json 'ceilings' must be a JSON object if present")
+
+    # Slice C: validate ceilings.max_tasks shape (unknown ceilings keys are tolerate-and-ignore)
+    max_tasks = None
+    if ceilings is not None and "max_tasks" in ceilings:
+        _mt = ceilings["max_tasks"]
+        # bool check BEFORE int: isinstance(True, int) is True in Python
+        if isinstance(_mt, bool):
+            raise ValueError(f"goal.json ceilings.max_tasks must be an integer >= 1, got {_mt!r}")
+        if not isinstance(_mt, int) or _mt < 1:
+            raise ValueError(f"goal.json ceilings.max_tasks must be an integer >= 1, got {_mt!r}")
+        max_tasks = _mt
 
     tasks_raw = data.get("tasks")
     if not isinstance(tasks_raw, dict):
@@ -792,6 +835,9 @@ def _load_goal_manifest(batch_dir: Path, goal_path: Path) -> dict[str, Any]:
         raise ValueError("goal.json 'tasks' must not be empty")
 
     task_ids = set(tasks_raw.keys())
+    # Enforce max_tasks ceiling (fail-closed, before any state is seeded or any task runs)
+    if max_tasks is not None and len(task_ids) > max_tasks:
+        raise ValueError(f"goal.json declares {len(task_ids)} tasks but ceilings.max_tasks={max_tasks}; batch aborted")
     deps: dict[str, str | None] = {}
 
     for task_id, task_data in tasks_raw.items():
@@ -1591,17 +1637,20 @@ def _run_one_task(task_dir: Path, **kwargs: Any) -> str:
         return f"error: {e!r}"
 
 
-def process_batch(batch_dir: Path) -> dict[str, str]:
-    """Run all tasks in the batch.
+def _run_batch(batch_dir: Path) -> tuple[dict[str, str], GoalStatus | None]:
+    """Real batch worker: load manifest once, run layered scheduler, compute goal status.
 
-    If an optional `goal.json` manifest is present at batch_dir/goal.json, it is
-    loaded and validated BEFORE any task state is seeded or any task runs. Any
-    validation error aborts the whole batch (fail-closed, no seeding). When the
-    manifest is absent, behavior is byte-for-byte identical to the original flat mode.
+    Returns (results, goal_status) where goal_status is:
+    - None: flat mode (no goal.json present), or manifest-aborted (validation error).
+    - GoalStatus: manifest loaded and ran successfully — derived in-memory, no re-read.
+
+    If an optional `goal.json` manifest is present, it is loaded and validated BEFORE
+    any task state is seeded or any task runs. Any validation error aborts the whole
+    batch (fail-closed, no seeding). When the manifest is absent, behavior is
+    byte-for-byte identical to the original flat mode.
     """
     results: dict[str, str] = {}
 
-    # Optional goal manifest
     goal_path = batch_dir / "goal.json"
     if goal_path.is_file():
         try:
@@ -1610,7 +1659,7 @@ def process_batch(batch_dir: Path) -> dict[str, str]:
             # Fail closed: abort the entire batch without seeding or running anything
             for task_dir in list_tasks(batch_dir):
                 results[task_dir.name] = f"error: {exc!r}"
-            return results
+            return results, None
 
         cfg = load_config(repo_root())
         deps = manifest["deps"]  # {task_id: parent_id_or_None}
@@ -1640,12 +1689,24 @@ def process_batch(batch_dir: Path) -> dict[str, str]:
                     resolved_base=resolved_base,
                     base_is_parent=base_is_parent,
                 )
-        return results
+
+        # Compute goal status from in-memory results + deps — no second disk read
+        manifest_task_ids = [tid for layer in _topo_layers(deps) for tid in layer]
+        return results, _compute_goal_status(results, manifest_task_ids)
 
     # Flat mode (no manifest) — byte-for-byte identical to the original behavior
     for task_dir in list_tasks(batch_dir):
         results[task_dir.name] = _run_one_task(task_dir)
-    return results
+    return results, None
+
+
+def process_batch(batch_dir: Path) -> dict[str, str]:
+    """Run all tasks in the batch. Returns per-task results.
+
+    Thin wrapper over _run_batch — preserves the dict[str, str] contract for all
+    callers and Slice A tests. Use _run_batch directly when GoalStatus is needed.
+    """
+    return _run_batch(batch_dir)[0]
 
 
 # ---------- CLI ----------
@@ -1691,7 +1752,7 @@ def _run_pipeline(batch_dir: Path, *, label: str) -> int:
         print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
         return 2
     print(f"orchestrator {label}: {batch_dir}")
-    results = process_batch(batch_dir)
+    results, goal_status = _run_batch(batch_dir)
     _print_results(results)
     blocked = [n for n, s in results.items() if s == "blocked_on_human_gate"]
     deferred = [n for n, s in results.items() if s == "deferred"]
@@ -1714,6 +1775,15 @@ def _run_pipeline(batch_dir: Path, *, label: str) -> int:
             f"⏭  {len(dep_blocked)} task(s) skipped (blocked_on_dependency — parent not done).",
             file=sys.stderr,
         )
+    if goal_status is not None:
+        if goal_status.complete:
+            print(
+                f"GOAL COMPLETE — draft-PR stack ready for human review "
+                f"({goal_status.done_count}/{goal_status.total} tasks done; not merged)"
+            )
+        else:
+            incomplete_str = ", ".join(goal_status.incomplete_ids)
+            print(f"GOAL INCOMPLETE — {goal_status.done_count}/{goal_status.total} done; incomplete: {incomplete_str}")
     return 0 if not blocked else 1
 
 
