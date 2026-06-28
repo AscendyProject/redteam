@@ -75,6 +75,28 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def incomplete_briefs(batch_dir: Path) -> list[str] | None:
+    """Task IDs in goal.json that lack a non-empty tasks/<id>/input.md.
+
+    Single source of truth for the brief-completeness check, shared by the
+    decomposer runner contract and cmd_decompose's pre-approval gate so the two
+    cannot diverge. Returns None when goal.json is absent or unparseable (the
+    caller decides whether that is fail-closed or a no-op); otherwise the list of
+    task IDs whose input.md is missing or empty (empty list == all briefs present).
+    """
+    goal_path = batch_dir / "goal.json"
+    try:
+        data = json.loads(goal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    incomplete = []
+    for tid in data.get("tasks", {}):
+        brief = batch_dir / "tasks" / tid / "input.md"
+        if not brief.is_file() or brief.stat().st_size == 0:
+            incomplete.append(tid)
+    return incomplete
+
+
 def _print_stream_event(line: str, agent: str) -> dict | None:
     """Parse one stream-json line and print a short summary to stderr.
 

@@ -132,6 +132,7 @@ HARNESS_TREES = (
 # delete them.
 HARNESS_AGENTS = (
     "code-security-reviewer",
+    "goal-decomposer",
     "implementer",
     "outcome-planner",
     "pr-author",
