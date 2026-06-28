@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
@@ -769,3 +770,60 @@ def claude_model_for_role(state: dict, role: str) -> str | None:
     if model == "codex":
         return None
     return model
+
+
+def utc_now() -> str:
+    """Current UTC time as an ISO-8601 string. Single monkeypatchable symbol shared
+    by persist_state and orchestrator.save_state so the parity test can fix the clock."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def persist_state(task_dir: Path, state: dict[str, Any]) -> None:
+    """Atomic state.json write — the pure-persistence half of save_state.
+
+    Sets ``state["updated_at"]`` to the current UTC time and atomically replaces
+    ``task_dir/state.json`` via a .tmp rename. Does NOT render progress.md —
+    progress.md is an orchestrator-only concern (operator surface + best-effort
+    swallow). Shared by the implement runners so they can durably flush the
+    untracked baseline BEFORE the worker runs (#112), independent of the
+    orchestrator's full save_state path.
+    """
+    state["updated_at"] = utc_now()
+    payload = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
+    tmp = task_dir / "state.json.tmp"
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(task_dir / "state.json")
+
+
+def get_or_set_untracked_baseline(state: dict[str, Any], cwd: Path, *, _untracked_fn: Any = None) -> set[str]:
+    """Set-once read-or-snapshot of ``state["implement_untracked_baseline"]``.
+
+    **Key-present (set-once path):** if ``state["implement_untracked_baseline"]``
+    is already a ``list``, returns it as a ``set`` WITHOUT calling
+    ``untracked_files`` and WITHOUT mutating the stored value. This is the
+    authoritative set-once gate — no prior-run signal (implement_round_count,
+    phases_completed, verification.last_run_at, etc.) is consulted; the sole
+    criterion is key presence as a list.
+
+    **Key-absent (first-entry path):** calls ``untracked_files(cwd)`` exactly
+    once, stores the sorted ``list[str]`` back into
+    ``state["implement_untracked_baseline"]``, and returns the matching set.
+
+    **Does NOT persist** — the caller is responsible for calling
+    ``persist_state(task_dir, state)`` immediately after, so the baseline
+    survives a crash that kills the worker between file-create and
+    ``_commit_worker_diff`` (IR-006 pre-worker discipline).
+
+    ``_untracked_fn`` is an internal seam for callers (e.g. implement.py) that
+    need the baseline snapshot to use the caller-module's patchable
+    ``untracked_files`` binding rather than this module's binding — so a test
+    that patches ``phase_runners.implement.untracked_files`` reaches the right
+    function. Defaults to this module's ``untracked_files``.
+    """
+    existing = state.get("implement_untracked_baseline")
+    if isinstance(existing, list):
+        return set(existing)
+    _fn = _untracked_fn if _untracked_fn is not None else untracked_files
+    files = _fn(cwd)
+    state["implement_untracked_baseline"] = sorted(files)
+    return files

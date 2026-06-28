@@ -15,6 +15,8 @@ from ._base import (
     build_prompt_with_feedback,
     commit_paths,
     compute_repo_diff,
+    get_or_set_untracked_baseline,
+    persist_state,
     pinned_base_branch,
     project_config,
     run_git_checked,
@@ -241,6 +243,42 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     return sorted(stray)
 
 
+def _uncommitted_outside_scope_files(cwd: Path, task_dir: Path, proj: Any, baseline: set[str]) -> list[str]:
+    """NEW untracked files OUTSIDE source_dirs/test_dir that are not in the baseline
+    and not under the task dir — Layer 2 of the two-layer integrity gate (#112).
+
+    Uses the module-level ``untracked_files`` (same ``--exclude-standard`` semantics
+    as ``_commit_worker_diff``'s untracked capture) and returns paths in
+    ``current_untracked - baseline`` that are not under ``task_dir``, not under any
+    ``proj.source_dirs`` root, and not under ``proj.test_dir``. Fail-closed on a
+    non-zero git exit via ``untracked_files`` (raises RuntimeError, omits stderr —
+    IR-002). Using the module-level ``untracked_files`` name also makes this function
+    patchable in tests that patch ``phase_runners.implement.untracked_files``.
+    Stdlib-only.
+    """
+    current = untracked_files(cwd)
+    new_files = current - baseline
+
+    try:
+        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
+    except ValueError:
+        task_rel = None
+
+    def _in_task_dir(p: str) -> bool:
+        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
+
+    def _root(r: str) -> str:
+        r = r.replace("\\", "/")
+        return r if r.endswith("/") else r + "/"
+
+    scope_roots = [_root(r) for r in (*proj.source_dirs, proj.test_dir)]
+
+    def _in_scope(p: str) -> bool:
+        return any(p.replace("\\", "/").startswith(root) for root in scope_roots)
+
+    return sorted(p for p in new_files if not _in_task_dir(p) and not _in_scope(p))
+
+
 def _agent_pair_base_prompt(task_dir: Path, proj: Any) -> str:
     """Agent-pair implement prompt. plan_review.md / code_review.md are OPTIONAL —
     a review=false tier runs plan_outcome→implement with neither — so they are
@@ -269,10 +307,14 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     rr = repo_root()
     base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
-    # Snapshot untracked files BEFORE the worker runs so the commit step can stage
-    # exactly what it creates (current − before), never a pre-existing untracked file.
+    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
+    # the persisted value is re-used across restarts so a file created in a prior
+    # interrupted round is correctly re-attributed). Persist the baseline to
+    # state.json BEFORE invoking the worker so it survives a crash between
+    # file-create and _commit_worker_diff (IR-006 pre-worker discipline, #112).
     try:
-        before_untracked = untracked_files(rr)
+        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
+        persist_state(task_dir, state)
     except (RuntimeError, OSError) as exc:
         fb = f"could not snapshot the working tree before implement ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -330,23 +372,27 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     verification["last_diff_sha256"] = diff_sha
 
     if rc == 0:
-        # Integrity gate (#50): verification passed on the WORKTREE, but review_code
-        # inspects the committed range. If the WIP commit left source/test changes
-        # uncommitted, that range is stale — fail closed (don't hand a stale range to
-        # the reviewer). status="error" routes through the generic retry, carrying the
-        # stray-file list back to the implementer; a repeat defers/escalates normally.
+        # Two-layer integrity gate (#50 + #112): verification passed on the WORKTREE,
+        # but review_code inspects the COMMITTED range. Any uncommitted change makes
+        # that range stale — fail closed. Layer 1 (baseline-INDEPENDENT): source/test
+        # files still uncommitted after the WIP commit. Layer 2 (baseline-RELATIVE):
+        # new files outside source/test that are not in the persisted baseline (the
+        # worker created them but left them uncommitted). status="error" routes through
+        # the generic retry; a repeat defers/escalates normally (#50 review PR-001).
         try:
-            stray = _uncommitted_scope_files(rr, proj)
+            layer1 = _uncommitted_scope_files(rr, proj)
+            layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
         except (OSError, RuntimeError) as exc:
             # A git probe failed → can't confirm the committed range is fresh. Fail
             # closed (don't approve a possibly-stale range); the generic retry path
             # re-runs, a repeat defers (#50 review PR-001).
             feedback = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
             return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+        stray = sorted(set(layer1) | set(layer2))
         if stray:
             feedback = (
-                "implement left source/test changes uncommitted after the WIP commit, so the "
-                "reviewed range (git diff <base>...HEAD) would be STALE relative to the tree "
+                "implement left changes uncommitted after the [WIP] commit, so the reviewed range "
+                "`git diff <base>...HEAD` would be STALE relative to the tree "
                 "verification just passed on. Uncommitted: " + ", ".join(stray) + ". Commit these "
                 "(they belong in the implementation diff), or remove them — refusing to "
                 "hand a stale committed range to review."
@@ -405,11 +451,14 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         msg = f"invalid project.verify_command in config: {exc}"
         return PhaseResult(status="error", feedback=msg, log=msg, diff="")
 
-    # Snapshot untracked files BEFORE the worker runs so the commit step stages
-    # exactly what implement creates (current − before); the test was already committed
-    # by write_test, so it is not in `before` and is not re-handled here (#82).
+    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
+    # the persisted value is re-used across restarts). Persist BEFORE invoking the
+    # worker so the baseline survives a crash between file-create and
+    # _commit_worker_diff (#112 / IR-006). The test was already committed by
+    # write_test, so it is not in `before` and is not re-handled here (#82).
     try:
-        before_untracked = untracked_files(rr)
+        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
+        persist_state(task_dir, state)
     except (RuntimeError, OSError) as exc:
         fb = f"could not snapshot the working tree before implement ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -444,21 +493,25 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
 
     if rc == 0:
-        # Integrity gate (#50): verify passed on the WORKTREE, but review_code inspects
-        # the committed range. If anything source/test is left uncommitted, that range
-        # is stale — fail closed. Also the safety net for a legacy in-flight tdd task
-        # whose test was never committed (its untracked test trips this).
+        # Two-layer integrity gate (#50 + #112): verify passed on the WORKTREE, but
+        # review_code inspects the COMMITTED range. Layer 1 (baseline-INDEPENDENT):
+        # source/test files still uncommitted. Layer 2 (baseline-RELATIVE): new files
+        # outside source/test not in the persisted baseline. Also the safety net for a
+        # legacy in-flight tdd task whose test was never committed (trips Layer 1).
         try:
-            stray = _uncommitted_scope_files(rr, proj)
+            layer1 = _uncommitted_scope_files(rr, proj)
+            layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
         except (OSError, RuntimeError) as exc:
             fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
             return PhaseResult(status="error", feedback=fb, log=fb, diff=diff)
+        stray = sorted(set(layer1) | set(layer2))
         if stray:
             feedback = (
-                "implement left source/test changes uncommitted after the commit, so the reviewed "
-                "range (git diff <base>...HEAD) would be STALE relative to the tree verify just "
-                "passed on. Uncommitted: " + ", ".join(stray) + ". Commit these (they belong in the "
-                "implementation diff), or remove them — refusing to hand a stale range to review."
+                "implement left changes uncommitted after the [WIP] commit, so the reviewed range "
+                "`git diff <base>...HEAD` would be STALE relative to the tree "
+                "verification just passed on. Uncommitted: " + ", ".join(stray) + ". Commit these "
+                "(they belong in the implementation diff), or remove them — refusing to "
+                "hand a stale committed range to review."
             )
             return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
         return PhaseResult(
