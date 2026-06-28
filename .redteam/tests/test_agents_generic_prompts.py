@@ -27,6 +27,7 @@ _AGENT_FILES = [
     "implementer.md",
     "code-security-reviewer.md",
     "pr-author.md",
+    "goal-decomposer.md",
 ]
 
 # Tokens that would mean an ascendy/Python literal leaked into a (supposedly

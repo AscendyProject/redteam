@@ -18,6 +18,7 @@
       ],
       "agents": [
         "./.claude/agents/code-security-reviewer.md",
+        "./.claude/agents/goal-decomposer.md",
         "./.claude/agents/implementer.md",
         "./.claude/agents/outcome-planner.md",
         "./.claude/agents/pr-author.md",
