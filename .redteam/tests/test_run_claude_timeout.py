@@ -154,6 +154,38 @@ class _WaitTimeoutProc:
         return self.returncode
 
 
+class _TimerFiredDuringWaitProc:
+    """Fake proc whose stdout closes immediately but whose wait() blocks until killed.
+
+    This exercises the race where the timer fires DURING the bounded post-EOF
+    proc.wait(timeout=5) call.  Sequence of events:
+      1. stdout (empty) → for loop finishes immediately.
+      2. timed_out.is_set() check: False (timer hasn't fired yet).
+      3. proc.wait(timeout=5) starts; _kill_event.wait() blocks inside.
+      4. Timer fires → _kill_on_timeout() sets timed_out AND calls proc.kill()
+         → _kill_event is set → wait() unblocks and returns -9 (SIGKILL value).
+      5. Without a post-wait re-check run_claude would return -9, not 124.
+    """
+
+    def __init__(self) -> None:
+        self._kill_event = threading.Event()
+        self.stdout = io.StringIO("")  # EOF immediately
+        self.stderr = io.StringIO("")
+        self.returncode = -9  # SIGKILL value an observer would see
+        self.kill_called = False
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self._kill_event.set()
+
+    def wait(self, timeout: float | None = None) -> int:
+        # Block until kill() is called (or timeout elapses — whichever comes first).
+        # With timeout_sec=0.1 the timer fires well within `timeout=5`, so
+        # kill() unblocks this before the fallback timeout.
+        self._kill_event.wait(timeout=timeout)
+        return self.returncode
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -262,6 +294,34 @@ def test_post_eof_wait_timeout_returns_124(monkeypatch):
 
     assert result["returncode"] == 124
     assert proc.kill_called, "proc.kill() must be called when post-EOF wait times out"
+
+
+def test_timer_fired_during_post_eof_wait_returns_124(monkeypatch):
+    """Race: timer fires DURING proc.wait(timeout=5), not during the stdout loop.
+
+    Scenario: child closes stdout (for loop ends) before the timer fires, so the
+    first timed_out.is_set() check is False.  Then proc.wait(timeout=5) is called;
+    the timer fires during that wait, _kill_on_timeout() sets timed_out and calls
+    proc.kill(), which unblocks wait() returning -9 (SIGKILL).
+
+    run_claude must detect the post-wait timed_out state and return 124, NOT -9.
+    This is the regression caught by IR-002 in the code review."""
+    base = _load_base_module()
+    proc = _TimerFiredDuringWaitProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **kw: proc)
+
+    start = time.monotonic()
+    result = base.run_claude(agent="test-agent", prompt="x", timeout_sec=0.1)
+    elapsed = time.monotonic() - start
+
+    # Must map the timer-fired kill to 124, not proc.returncode (-9).
+    assert result["returncode"] == 124, (
+        f"expected 124 (timer-fired contract), got {result['returncode']} (proc.returncode={proc.returncode})"
+    )
+    assert proc.kill_called, "proc.kill() must have been called by the timer"
+    # Must complete well within the fake's otherwise-indefinite block.
+    assert elapsed < 5.0
 
 
 def test_exception_path_returns_125_and_cancels_timer(monkeypatch):

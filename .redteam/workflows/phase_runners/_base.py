@@ -327,6 +327,26 @@ def run_claude(
                 stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
                 parsed_json=final_result,
             )
+
+        # Re-check: timer may have fired while we were blocked in proc.wait().
+        # In that case _kill_on_timeout() set timed_out AND called proc.kill();
+        # wait() returned the SIGKILL returncode (-9), not 124.  We must map
+        # timer-fired kills to 124 regardless of when during the bounded wait
+        # the timer fired.
+        if timed_out.is_set():
+            stderr_tail = proc.stderr.read() if proc.stderr else ""
+            print(
+                f"[{agent}] TIMEOUT after {timeout_sec}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            return ClaudeRunResult(
+                returncode=124,
+                stdout="".join(raw_lines),
+                stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
+                parsed_json=final_result,
+            )
+
         stderr_output = proc.stderr.read() if proc.stderr else ""
 
         return ClaudeRunResult(
