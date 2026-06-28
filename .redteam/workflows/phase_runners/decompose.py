@@ -121,6 +121,20 @@ def run(batch_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
                     "have a missing or empty input.md (partial write)"
                 ),
             }
+        # Stray state.json on the success path: _run_one_task trusts an existing
+        # state.json and skips template seeding (bypassing the no_input_md guard), so
+        # untrusted decomposer-written state would execute before the decomposition is
+        # APPROVED.  The per-task state-machine surface must stay untouched until APPROVED.
+        if stray_states:
+            return {
+                "status": "error",
+                "log": stdout,
+                "message": (
+                    f"decomposer pre-seeded tasks/<id>/state.json "
+                    f"({', '.join(str(p) for p in stray_states)}); "
+                    "the per-task state-machine surface must stay untouched until APPROVED"
+                ),
+            }
         return {
             "status": "success",
             "log": stdout,

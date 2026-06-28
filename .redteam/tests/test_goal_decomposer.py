@@ -475,6 +475,72 @@ def test_run_complete_returns_success(tmp_path: Path) -> None:
     assert result["status"] == "success"
 
 
+def test_run_success_path_stray_state_json_returns_error(tmp_path: Path) -> None:
+    """run() fails closed when a worker writes goal.json + valid briefs + a stray state.json (IR-007).
+
+    A worker that pre-seeds tasks/<id>/state.json on the success path bypasses
+    template re-seeding: _run_one_task trusts the existing state.json and skips the
+    no_input_md guard, so untrusted decomposer-written state would execute before
+    APPROVED.  The runner must return 'error', not 'success'.
+    """
+    decompose_mod = _decompose_mod()
+    batch_dir = _make_batch(tmp_path)
+
+    def stray_state_invoke(**_kwargs: object) -> dict:
+        (batch_dir / "goal.json").write_text(_simple_goal_json(["task-001"]), encoding="utf-8")
+        task_dir = batch_dir / "tasks" / "task-001"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "input.md").write_text("Brief for task-001.", encoding="utf-8")
+        # Also writes state.json — contract violation on the success path
+        (task_dir / "state.json").write_text('{"task_id": "task-001"}', encoding="utf-8")
+        return {"returncode": 0, "stdout": "decompose done", "stderr": ""}
+
+    fake_worker = MagicMock()
+    fake_worker.invoke.side_effect = stray_state_invoke
+
+    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
+        result = decompose_mod.run(batch_dir, {})
+
+    assert result["status"] == "error"
+    assert "state.json" in result["message"] or "state-machine" in result["message"]
+
+
+# ---------- (IR-007) success-path stray state.json ----------
+
+
+def test_cmd_decompose_success_path_stray_state_json_aborts(tmp_path: Path) -> None:
+    """cmd_decompose exits non-zero when the worker pre-seeds state.json on the success path.
+
+    The per-task state-machine surface must stay untouched until APPROVED.  A worker
+    that writes goal.json + valid input.md briefs + a tasks/<id>/state.json must be
+    rejected fail-closed so the reviewer is never invoked and no task state is left
+    trusted in the batch directory.
+    """
+    orch = _orch()
+    batch_dir = _make_batch(tmp_path)
+
+    def stray_state_invoke(**_kwargs: object) -> dict:
+        (batch_dir / "goal.json").write_text(_simple_goal_json(["task-001"]), encoding="utf-8")
+        task_dir = batch_dir / "tasks" / "task-001"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "input.md").write_text("Brief for task-001.", encoding="utf-8")
+        (task_dir / "state.json").write_text('{"task_id": "task-001"}', encoding="utf-8")
+        return {"returncode": 0, "stdout": "decompose done", "stderr": ""}
+
+    fake_worker = MagicMock()
+    fake_worker.invoke.side_effect = stray_state_invoke
+
+    with (
+        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
+        patch("redteam_orchestrator.review_with_fallback") as mock_review,
+    ):
+        rc = orch.cmd_decompose(batch_dir)
+
+    assert rc != 0
+    mock_review.assert_not_called()
+    assert not (batch_dir / "decompose_review.md").exists()
+
+
 # ---------- (c) non-APPROVED review ----------
 
 
