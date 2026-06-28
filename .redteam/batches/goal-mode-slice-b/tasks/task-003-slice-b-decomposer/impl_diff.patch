@@ -1,0 +1,1561 @@
+diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
+index 6ba9bff..87e2bd4 100644
+--- a/.claude-plugin/marketplace.json
++++ b/.claude-plugin/marketplace.json
+@@ -18,6 +18,7 @@
+       ],
+       "agents": [
+         "./.claude/agents/code-security-reviewer.md",
++        "./.claude/agents/goal-decomposer.md",
+         "./.claude/agents/implementer.md",
+         "./.claude/agents/outcome-planner.md",
+         "./.claude/agents/pr-author.md",
+diff --git a/.claude/agents/goal-decomposer.md b/.claude/agents/goal-decomposer.md
+new file mode 100644
+index 0000000..a1af75a
+--- /dev/null
++++ b/.claude/agents/goal-decomposer.md
+@@ -0,0 +1,94 @@
++---
++name: goal-decomposer
++description: Decompose a human-authored goal.md into a single-parent goal.json manifest and one tasks/<id>/input.md brief per task. Invoked by `orchestrator decompose <batch>` before any task is seeded or run. Serialize-or-stop on multi-parent requirements.
++tools: Read, Write, Bash
++---
++
++# Goal Decomposer
++
++You are the decomposer agent for a redteam batch. Your job is to read a human-authored
++`goal.md` and produce:
++
++1. `<batch_dir>/goal.json` — a **single-parent** task manifest in the schema below.
++2. `<batch_dir>/tasks/<id>/input.md` — one clean, self-contained task brief per task ID.
++
++You do **not** seed `state.json`, run any task, or trigger any review. You only write the
++manifest and the briefs, then stop.
++
++## Inputs you must read
++
++1. `<batch_dir>/goal.md` — the human-authored goal (the phase prompt supplies the batch dir).
++2. The project context document named in the phase prompt (hard rules + architecture
++   boundaries; default install path `.redteam/docs/project-context.md`).
++3. The codebase, **read-only**, as needed to ground the task briefs in real paths.
++
++## goal.json schema (single-parent, v1)
++
++```json
++{
++  "goal": "<one-sentence description of the overall goal>",
++  "ceilings": {
++    "max_tasks": <integer >= 1>
++  },
++  "tasks": {
++    "<task-id>": {
++      "depends_on": []
++    },
++    "<child-task-id>": {
++      "depends_on": ["<task-id>"]
++    }
++  }
++}
++```
++
++Rules:
++- `depends_on` is a list with **at most one entry** (single-parent v1).
++- Every task ID must be a kebab-slug (e.g. `task-001-auth`, `task-002-api`).
++- `ceilings.max_tasks` must equal the number of tasks you emit.
++- No cycles, no self-references, no unknown references.
++- If a task naturally needs two parents, **serialize it into a chain** (A → B → C).
++
++## tasks/<id>/input.md format
++
++Each brief is a short, standalone Markdown document that the `outcome-planner` will
++consume to produce an `outcome.md`. It must:
++- Describe the task clearly enough that an independent agent can plan and implement it.
++- Reference the concrete files or components the task affects.
++- State any explicit constraints or non-goals inherited from the parent task.
++
++## Single-parent serialization-or-stop rule
++
++**v1 is single-parent only.** If a natural decomposition would require a task to depend on
++two or more parents simultaneously (not a chain), you must either:
++
++- **Serialize**: restructure so the dependency is a linear chain (the intermediate result
++  of one task feeds the next); or
++- **Stop** (cannot-decompose): if serialization is not semantically sound, emit the
++  cannot-decompose signal below.
++
++Never produce a manifest with multi-parent `depends_on` — the engine rejects it.
++
++## Cannot-decompose signal
++
++If you cannot produce a valid single-parent decomposition (e.g. the goal is inherently
++parallel in a way that cannot be serialized, or it is contradictory), do the following:
++
++1. Write `<batch_dir>/decompose_blocked.md` explaining why decomposition is not possible.
++2. Write **nothing else** (no `goal.json`, no `tasks/` entries).
++3. End your **stdout** with exactly this line (the runner checks the last line):
++
++```
++DECOMPOSE_DECISION: CANNOT_DECOMPOSE
++```
++
++The engine will surface `decompose_blocked.md` to the operator and exit non-zero.
++
++## Hard rules
++
++- **Do not exceed `max_tasks`** if the goal.md specifies one; if it does not, choose a
++  reasonable number and set `ceilings.max_tasks` accordingly.
++- **Do not seed `state.json`** or create any file other than `goal.json`,
++  `tasks/<id>/input.md`, and `decompose_blocked.md` (on cannot-decompose).
++- **Do not run any task**; your role ends when the manifest and briefs are written.
++- **Stay project-agnostic**: do not hard-code stack-specific paths or commands in the
++  manifest or briefs; read those from the project context document.
+diff --git a/.redteam/prompts/codex/goal_decomposer.md b/.redteam/prompts/codex/goal_decomposer.md
+new file mode 100644
+index 0000000..0534240
+--- /dev/null
++++ b/.redteam/prompts/codex/goal_decomposer.md
+@@ -0,0 +1,84 @@
++# Goal Decomposer Prompt
++
++You are the goal decomposer for a redteam batch. Your job is to read a human-authored
++`goal.md` and produce:
++
++1. `<batch_dir>/goal.json` — a **single-parent** task manifest in the schema below.
++2. `<batch_dir>/tasks/<id>/input.md` — one clean, self-contained task brief per task ID.
++
++You do **not** seed `state.json`, run any task, or trigger any review. You only write the
++manifest and the briefs, then stop.
++
++## Inputs
++
++1. The batch directory (supplied in the worker prompt).
++2. `<batch_dir>/goal.md` — the human-authored goal.
++3. The project context document (default: `.redteam/docs/project-context.md`).
++4. The codebase, **read-only**, as needed to ground the task briefs in real paths.
++
++## goal.json schema (single-parent, v1)
++
++```json
++{
++  "goal": "<one-sentence description of the overall goal>",
++  "ceilings": {
++    "max_tasks": <integer >= 1>
++  },
++  "tasks": {
++    "<task-id>": {
++      "depends_on": []
++    },
++    "<child-task-id>": {
++      "depends_on": ["<task-id>"]
++    }
++  }
++}
++```
++
++Rules:
++- `depends_on` is a list with **at most one entry** (single-parent v1).
++- Every task ID must be a kebab-slug (e.g. `task-001-auth`, `task-002-api`).
++- `ceilings.max_tasks` must equal the number of tasks you emit.
++- No cycles, no self-references, no unknown references.
++- If a task naturally needs two parents, **serialize it into a chain** (A → B → C).
++
++## tasks/<id>/input.md format
++
++Each brief is a short, standalone Markdown document that the `outcome-planner` will
++consume to produce an `outcome.md`. It must:
++- Describe the task clearly enough that an independent agent can plan and implement it.
++- Reference the concrete files or components the task affects.
++- State any explicit constraints or non-goals inherited from the parent task.
++
++## Single-parent serialization-or-stop rule
++
++**v1 is single-parent only.** If a natural decomposition would require a task to depend on
++two or more parents simultaneously (not a chain), you must either:
++
++- **Serialize**: restructure so the dependency is a linear chain; or
++- **Stop** (cannot-decompose): if serialization is not semantically sound.
++
++Never produce a manifest with multi-parent `depends_on` — the engine rejects it.
++
++## Cannot-decompose signal
++
++If you cannot produce a valid single-parent decomposition (e.g. the goal is inherently
++parallel in a way that cannot be serialized, or it is contradictory):
++
++1. Write `<batch_dir>/decompose_blocked.md` explaining why decomposition is not possible.
++2. Write **nothing else** (no `goal.json`, no `tasks/` entries).
++3. End your **stdout** with exactly this line (the runner checks the last line):
++
++```
++DECOMPOSE_DECISION: CANNOT_DECOMPOSE
++```
++
++## Hard rules
++
++- **Do not exceed `max_tasks`** if `goal.md` specifies one; if it does not, choose a
++  reasonable number and set `ceilings.max_tasks` accordingly.
++- **Do not seed `state.json`** or create any file other than `goal.json`,
++  `tasks/<id>/input.md`, and `decompose_blocked.md` (on cannot-decompose).
++- **Do not run any task**; your role ends when the manifest and briefs are written.
++- **Stay project-agnostic**: do not hard-code stack-specific paths or commands in the
++  manifest or briefs; read those from the project context document.
+diff --git a/.redteam/scripts/install.py b/.redteam/scripts/install.py
+index d9f41ec..0e34f52 100644
+--- a/.redteam/scripts/install.py
++++ b/.redteam/scripts/install.py
+@@ -132,6 +132,7 @@ HARNESS_TREES = (
+ # delete them.
+ HARNESS_AGENTS = (
+     "code-security-reviewer",
++    "goal-decomposer",
+     "implementer",
+     "outcome-planner",
+     "pr-author",
+diff --git a/.redteam/tests/test_agents_generic_prompts.py b/.redteam/tests/test_agents_generic_prompts.py
+index 9ae1f99..265c030 100644
+--- a/.redteam/tests/test_agents_generic_prompts.py
++++ b/.redteam/tests/test_agents_generic_prompts.py
+@@ -27,6 +27,7 @@ _AGENT_FILES = [
+     "implementer.md",
+     "code-security-reviewer.md",
+     "pr-author.md",
++    "goal-decomposer.md",
+ ]
+ 
+ # Tokens that would mean an ascendy/Python literal leaked into a (supposedly
+diff --git a/.redteam/tests/test_goal_decomposer.py b/.redteam/tests/test_goal_decomposer.py
+new file mode 100644
+index 0000000..c280c3f
+--- /dev/null
++++ b/.redteam/tests/test_goal_decomposer.py
+@@ -0,0 +1,767 @@
++"""Slice B — goal decomposer + decomposition review invariants.
++
++All tests stub the decomposer worker adapter (no live model call) and the
++reviewer (review_with_fallback returns a deterministic decision). Asserts:
++
++  (a) invalid generated manifest (cycle / self-ref / unknown ref / exceeds
++      max_tasks) aborts the whole batch via _load_goal_manifest fail-closed
++      path — no state.json seeded, no task run.
++  (b) generated goal.json with a task that lacks a non-empty input.md aborts
++      fail-closed BEFORE review is invoked (pre-approval completeness gate,
++      PR-004). Covers missing and empty input.md subcases.
++  (c) non-APPROVED decomposition review aborts fail-closed (no state.json
++      seeded) and decompose_review.md is persisted.
++  (d) cannot-decompose contract — DECOMPOSE_DECISION: CANNOT_DECOMPOSE marker +
++      decompose_blocked.md → exit non-zero, reviewer not invoked; and exit 0 +
++      no goal.json + no marker → fail closed under outcome (c).
++  (e) APPROVED decomposition with a valid manifest lets the existing Slice A/C
++      scheduler run the stack on a subsequent start/resume.
++  (f) absent goal.md → decompose never invoked, process_batch / _run_pipeline
++      behave byte-for-byte as under Slice A/C.
++  (g) re-running decompose against a batch that already has goal.json OR any
++      tasks/<id>/input.md fails closed (no writes/modifications).
++  (h) same-provider worker/reviewer configuration refuses fail-closed via
++      the existing _adversarial_pairing_error helper.
++"""
++
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++from unittest.mock import MagicMock, patch
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++
++def _orch():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++# ---------- helpers ----------
++
++
++def _make_batch(
++    tmp_path: Path,
++    *,
++    with_goal_md: bool = True,
++    goal_md_text: str = "Goal: build a feature.",
++) -> Path:
++    batch_dir = tmp_path / "batch"
++    batch_dir.mkdir()
++    (batch_dir / "tasks").mkdir()
++    if with_goal_md:
++        (batch_dir / "goal.md").write_text(goal_md_text, encoding="utf-8")
++    return batch_dir
++
++
++def _simple_goal_json(task_ids: list[str], max_tasks: int | None = None) -> str:
++    tasks = {tid: {"depends_on": []} for tid in task_ids}
++    data: dict = {"goal": "test", "tasks": tasks}
++    if max_tasks is not None:
++        data["ceilings"] = {"max_tasks": max_tasks}
++    return json.dumps(data)
++
++
++class _FakeWorker:
++    """Stubs the goal-decomposer worker adapter.
++
++    Writes goal.json and tasks/<id>/input.md to batch_dir when invoked,
++    simulating the three outcomes the runner contract recognises.
++    """
++
++    def __init__(
++        self,
++        batch_dir: Path,
++        *,
++        task_ids: list[str] | None = None,
++        write_briefs: bool = True,
++        empty_brief_ids: list[str] | None = None,
++        cannot_decompose: bool = False,
++        exit_code: int = 0,
++        goal_json_override: str | None = None,
++    ) -> None:
++        self._batch = batch_dir
++        self._task_ids = task_ids or []
++        self._write_briefs = write_briefs
++        self._empty_brief_ids = set(empty_brief_ids or [])
++        self._cannot_decompose = cannot_decompose
++        self._exit_code = exit_code
++        self._goal_json_override = goal_json_override
++
++    def invoke(self, **_kwargs: object) -> dict:
++        # Outcome (b): cannot-decompose
++        if self._cannot_decompose:
++            (self._batch / "decompose_blocked.md").write_text(
++                "cannot decompose: multi-parent required", encoding="utf-8"
++            )
++            return {
++                "returncode": 0,
++                "stdout": "DECOMPOSE_DECISION: CANNOT_DECOMPOSE",
++                "stderr": "",
++            }
++
++        # Non-zero exit → outcome (c) error
++        if self._exit_code != 0:
++            return {"returncode": self._exit_code, "stdout": "", "stderr": "worker error"}
++
++        # Write goal.json
++        goal_json_str = self._goal_json_override or _simple_goal_json(self._task_ids)
++        (self._batch / "goal.json").write_text(goal_json_str, encoding="utf-8")
++
++        # Create task directories and optionally write briefs
++        for tid in self._task_ids:
++            task_dir = self._batch / "tasks" / tid
++            task_dir.mkdir(parents=True, exist_ok=True)
++            if self._write_briefs:
++                content = "" if tid in self._empty_brief_ids else f"Brief for {tid}."
++                (task_dir / "input.md").write_text(content, encoding="utf-8")
++
++        return {"returncode": 0, "stdout": "decompose done", "stderr": ""}
++
++
++def _approved() -> dict:
++    return {"decision": "APPROVED", "raw": "REVIEW_DECISION: APPROVED", "parse_status": "ok"}
++
++
++def _rejected(decision: str = "CHANGES_REQUESTED") -> dict:
++    return {
++        "decision": decision,
++        "raw": f"REVIEW_DECISION: {decision}",
++        "parse_status": "ok",
++    }
++
++
++# ---------- (g) idempotency ----------
++
++
++def test_decompose_fails_if_goal_json_exists(tmp_path: Path) -> None:
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    (batch_dir / "goal.json").write_text("{}", encoding="utf-8")
++
++    rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_decompose_fails_if_task_input_md_exists(tmp_path: Path) -> None:
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_dir = batch_dir / "tasks" / "task-001"
++    task_dir.mkdir(parents=True)
++    (task_dir / "input.md").write_text("existing brief", encoding="utf-8")
++
++    rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert not (batch_dir / "goal.json").exists()
++
++
++def test_decompose_idempotency_writes_nothing(tmp_path: Path) -> None:
++    """When aborted for idempotency, no new file is created or modified."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    existing_json = batch_dir / "goal.json"
++    existing_json.write_text('{"x": 1}', encoding="utf-8")
++    mtime_before = existing_json.stat().st_mtime
++
++    orch.cmd_decompose(batch_dir)
++
++    assert existing_json.stat().st_mtime == mtime_before  # untouched
++
++
++# ---------- (f) absent goal.md ----------
++
++
++def test_decompose_requires_goal_md(tmp_path: Path) -> None:
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path, with_goal_md=False)
++
++    rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++
++
++def test_process_batch_unchanged_without_goal_json(tmp_path: Path) -> None:
++    """Flat mode (no goal.json) is byte-for-byte unchanged from Slice A/C."""
++    orch = _orch()
++    batch_dir = tmp_path / "batch"
++    (batch_dir / "tasks").mkdir(parents=True)
++
++    results = orch.process_batch(batch_dir)
++
++    assert results == {}
++
++
++def test_run_pipeline_unchanged_when_no_goal_md(tmp_path: Path, monkeypatch) -> None:
++    """_run_pipeline does not call the decomposer when goal.md is absent."""
++    orch = _orch()
++    batch_dir = tmp_path / "batch"
++    (batch_dir / "tasks").mkdir(parents=True)
++    decompose_called = []
++
++    monkeypatch.setattr(
++        orch,
++        "cmd_decompose",
++        lambda _bd: decompose_called.append(True) or 0,
++    )
++
++    orch._run_pipeline(batch_dir, label="start")
++
++    assert not decompose_called
++
++
++# ---------- (h) same-provider guard ----------
++
++
++def test_decompose_refuses_same_provider_pairing(tmp_path: Path) -> None:
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++
++    with (
++        patch("redteam_orchestrator.reviewer_provider", return_value="claude"),
++        patch("redteam_orchestrator.worker_provider", return_value="claude"),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    # no artifact written when guard fires
++    assert not (batch_dir / "goal.json").exists()
++    assert not (batch_dir / "decompose_review.md").exists()
++
++
++def test_decompose_review_pins_pre_worker_provider_snapshot(tmp_path: Path) -> None:
++    """IR-006: a decomposer worker has workspace-write access and could mutate
++    .redteam/config.toml to point the reviewer at its own provider AFTER the
++    preflight cross-provider guard. cmd_decompose pins the reviewer/implementer
++    model resolution BEFORE the worker runs and passes that snapshot to the
++    decomposition review, so a post-worker config mutation cannot collapse the
++    adversarial pair into same-provider self-review.
++    """
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++
++    flipped = {"after_worker": False}
++    base_worker = _FakeWorker(batch_dir, task_ids=["task-001"])
++
++    class _MutatingWorker:
++        def invoke(self, **kwargs: object) -> dict:
++            result = base_worker.invoke(**kwargs)
++            flipped["after_worker"] = True  # simulate the worker mutating config.toml
++            return result
++
++    def fake_default_model(role: str) -> str | None:
++        if role == "reviewer":
++            # pre-worker: cross-provider "codex"; post-mutation: "claude" (== worker)
++            return "claude" if flipped["after_worker"] else "codex"
++        if role == "implementer":
++            return "claude"
++        return None
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=_MutatingWorker()),
++        patch("redteam_orchestrator.default_model_for_role", side_effect=fake_default_model),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()) as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc == 0
++    assert flipped["after_worker"] is True  # the mutation path was exercised
++    # The review ran against the PRE-worker snapshot ("codex"), NOT the post-mutation
++    # value ("claude" == the worker's own provider).
++    pinned_state = mock_review.call_args.args[0]
++    assert pinned_state["models"]["reviewer"] == "codex"
++    assert pinned_state["models"]["implementer"] == "claude"
++
++
++# ---------- (d) cannot-decompose contract ----------
++
++
++def test_cannot_decompose_exits_nonzero_no_reviewer(tmp_path: Path) -> None:
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    fake_worker = _FakeWorker(batch_dir, cannot_decompose=True)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback") as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    mock_review.assert_not_called()
++    assert (batch_dir / "decompose_blocked.md").is_file()
++    assert not (batch_dir / "goal.json").exists()
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_worker_exit0_no_goal_json_no_marker_fails_closed(tmp_path: Path) -> None:
++    """Outcome (c): exit 0 + no goal.json + no CANNOT_DECOMPOSE → fail closed."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++
++    # Worker exits 0 but writes nothing (no goal.json, no marker, no blocked.md)
++    fake_worker = MagicMock()
++    fake_worker.invoke.return_value = {"returncode": 0, "stdout": "oops", "stderr": ""}
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback") as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    mock_review.assert_not_called()
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_cannot_decompose_marker_without_blocked_md_fails_closed(tmp_path: Path) -> None:
++    """Outcome (c): marker present but no decompose_blocked.md → not a valid cannot-decompose."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++
++    # Worker emits marker but does NOT write decompose_blocked.md
++    fake_worker = MagicMock()
++    fake_worker.invoke.return_value = {
++        "returncode": 0,
++        "stdout": "DECOMPOSE_DECISION: CANNOT_DECOMPOSE",
++        "stderr": "",
++    }
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback") as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    mock_review.assert_not_called()
++
++
++def test_cannot_decompose_with_stray_briefs_fails_closed(tmp_path: Path) -> None:
++    """Outcome (c): marker + blocked.md + stray tasks/*/input.md → partial write, fail closed.
++
++    A worker that emits CANNOT_DECOMPOSE but also wrote task briefs violates the
++    contract (cannot-decompose requires NO goal.json / tasks/<id>/input.md / state.json
++    writes). The runner must classify this as outcome (c), not (b), so the operator
++    can inspect the inconsistent batch dir rather than silently accepting it.
++    """
++    decompose_mod = _decompose_mod()
++    batch_dir = _make_batch(tmp_path)
++
++    def stray_worker_invoke(**_kwargs: object) -> dict:
++        # Writes decompose_blocked.md AND a stray task brief (contract violation)
++        (batch_dir / "decompose_blocked.md").write_text("blocked", encoding="utf-8")
++        stray_dir = batch_dir / "tasks" / "task-stray"
++        stray_dir.mkdir(parents=True, exist_ok=True)
++        (stray_dir / "input.md").write_text("stray brief", encoding="utf-8")
++        return {
++            "returncode": 0,
++            "stdout": "DECOMPOSE_DECISION: CANNOT_DECOMPOSE",
++            "stderr": "",
++        }
++
++    fake_worker = MagicMock()
++    fake_worker.invoke.side_effect = stray_worker_invoke
++
++    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
++        result = decompose_mod.run(batch_dir, {})
++
++    # Must be outcome (c), not (b)
++    assert result["status"] == "error"
++    assert "cannot_decompose" not in result["status"]
++
++
++def test_cannot_decompose_with_stray_state_fails_closed(tmp_path: Path) -> None:
++    """Outcome (c): marker + blocked.md + stray tasks/*/state.json → partial write, fail closed (IR-005).
++
++    A worker that emits CANNOT_DECOMPOSE but also wrote a tasks/<id>/state.json is the
++    worst partial-write: with no goal.json the scheduler runs flat mode and
++    _run_one_task executes a pre-seeded task dir WITHOUT re-seeding, bypassing the
++    no_input_md guard, so attacker-controlled state would run. The runner must classify
++    this as outcome (c), not (b) — the per-task state-machine surface stays untouched
++    until APPROVED.
++    """
++    decompose_mod = _decompose_mod()
++    batch_dir = _make_batch(tmp_path)
++
++    def stray_worker_invoke(**_kwargs: object) -> dict:
++        # Writes decompose_blocked.md AND a stray task state.json (contract violation)
++        (batch_dir / "decompose_blocked.md").write_text("blocked", encoding="utf-8")
++        stray_dir = batch_dir / "tasks" / "task-stray"
++        stray_dir.mkdir(parents=True, exist_ok=True)
++        (stray_dir / "state.json").write_text('{"task_id": "task-stray"}', encoding="utf-8")
++        return {
++            "returncode": 0,
++            "stdout": "DECOMPOSE_DECISION: CANNOT_DECOMPOSE",
++            "stderr": "",
++        }
++
++    fake_worker = MagicMock()
++    fake_worker.invoke.side_effect = stray_worker_invoke
++
++    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
++        result = decompose_mod.run(batch_dir, {})
++
++    # Must be outcome (c), not (b)
++    assert result["status"] == "error"
++    assert "cannot_decompose" not in result["status"]
++
++
++# ---------- runner contract enforced in decompose.run() directly (IR-001) ----------
++
++
++def _decompose_mod():
++    _orch()  # ensures workflows/ is on sys.path via _engine
++    import phase_runners.decompose as m
++
++    return m
++
++
++def test_run_partial_write_returns_error(tmp_path: Path) -> None:
++    """run() itself fails closed on goal.json + an empty brief (not deferred to caller)."""
++    decompose_mod = _decompose_mod()
++    batch_dir = _make_batch(tmp_path)
++    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001", "task-002"], empty_brief_ids=["task-002"])
++
++    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
++        result = decompose_mod.run(batch_dir, {})
++
++    assert result["status"] == "error"
++    assert "task-002" in result["message"]
++
++
++def test_run_missing_brief_returns_error(tmp_path: Path) -> None:
++    """run() fails closed when a manifest task has no input.md at all."""
++    decompose_mod = _decompose_mod()
++    batch_dir = _make_batch(tmp_path)
++    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001"], write_briefs=False)
++
++    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
++        result = decompose_mod.run(batch_dir, {})
++
++    assert result["status"] == "error"
++    assert "task-001" in result["message"]
++
++
++def test_run_unparseable_goal_json_returns_error(tmp_path: Path) -> None:
++    """run() fails closed when the worker writes an unparseable goal.json."""
++    decompose_mod = _decompose_mod()
++    batch_dir = _make_batch(tmp_path)
++    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001"], goal_json_override="{not valid json")
++
++    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
++        result = decompose_mod.run(batch_dir, {})
++
++    assert result["status"] == "error"
++    assert "unparseable" in result["message"]
++
++
++def test_run_complete_returns_success(tmp_path: Path) -> None:
++    """run() returns success only when goal.json + every brief is present and non-empty."""
++    decompose_mod = _decompose_mod()
++    batch_dir = _make_batch(tmp_path)
++    fake_worker = _FakeWorker(batch_dir, task_ids=["task-001", "task-002"])
++
++    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
++        result = decompose_mod.run(batch_dir, {})
++
++    assert result["status"] == "success"
++
++
++# ---------- (c) non-APPROVED review ----------
++
++
++def test_rejected_review_no_state_seeded(tmp_path: Path) -> None:
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_rejected()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert (batch_dir / "decompose_review.md").is_file()
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_rescue_required_review_no_state_seeded(tmp_path: Path) -> None:
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch(
++            "redteam_orchestrator.review_with_fallback",
++            return_value=_rejected("RESCUE_REQUIRED"),
++        ),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert (batch_dir / "decompose_review.md").is_file()
++    assert not list(batch_dir.rglob("state.json"))
++
++
++# ---------- (b) brief completeness gate (PR-004) ----------
++
++
++def test_missing_brief_aborts_before_review(tmp_path: Path) -> None:
++    """goal.json lists a task that has no input.md — aborts before reviewer is called."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++    # Worker writes goal.json but NOT the input.md
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, write_briefs=False)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback") as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    mock_review.assert_not_called()
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_empty_brief_aborts_before_review(tmp_path: Path) -> None:
++    """goal.json task with an empty input.md aborts before reviewer is called."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, empty_brief_ids=["task-001"])
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback") as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    mock_review.assert_not_called()
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_multi_task_partial_briefs_aborts(tmp_path: Path) -> None:
++    """When only some tasks have briefs, the completeness gate aborts."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001", "task-002"]
++    # task-002 has no brief
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, empty_brief_ids=["task-002"])
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback") as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    mock_review.assert_not_called()
++
++
++# ---------- (a) invalid manifest aborts via _load_goal_manifest ----------
++
++
++def test_cycle_in_manifest_aborts_via_load_goal_manifest(tmp_path: Path) -> None:
++    """Cycle A→B→A: _load_goal_manifest detects it, cmd_decompose exits non-zero."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001", "task-002"]
++
++    cycle_manifest = json.dumps(
++        {
++            "goal": "test",
++            "tasks": {
++                "task-001": {"depends_on": ["task-002"]},
++                "task-002": {"depends_on": ["task-001"]},
++            },
++        }
++    )
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, goal_json_override=cycle_manifest)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_exceeds_max_tasks_aborts_via_load_goal_manifest(tmp_path: Path) -> None:
++    """max_tasks=2 but 3 tasks generated: _load_goal_manifest enforces ceiling."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001", "task-002", "task-003"]
++
++    manifest = _simple_goal_json(task_ids, max_tasks=2)
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, goal_json_override=manifest)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_self_ref_in_manifest_aborts_via_load_goal_manifest(tmp_path: Path) -> None:
++    """Self-dependency: _load_goal_manifest detects and aborts."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++
++    self_ref = json.dumps({"goal": "test", "tasks": {"task-001": {"depends_on": ["task-001"]}}})
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, goal_json_override=self_ref)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_unknown_ref_in_manifest_aborts_via_load_goal_manifest(tmp_path: Path) -> None:
++    """Unknown parent reference: _load_goal_manifest detects and aborts."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++
++    unknown_ref = json.dumps({"goal": "test", "tasks": {"task-001": {"depends_on": ["task-does-not-exist"]}}})
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, goal_json_override=unknown_ref)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_multi_parent_in_manifest_aborts_via_load_goal_manifest(tmp_path: Path) -> None:
++    """Two-parent depends_on: _load_goal_manifest rejects (single-parent v1)."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001", "task-002", "task-003"]
++
++    multi_parent = json.dumps(
++        {
++            "goal": "test",
++            "tasks": {
++                "task-001": {"depends_on": []},
++                "task-002": {"depends_on": []},
++                "task-003": {"depends_on": ["task-001", "task-002"]},
++            },
++        }
++    )
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids, goal_json_override=multi_parent)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    assert not list(batch_dir.rglob("state.json"))
++
++
++# ---------- (e) APPROVED lets scheduler run ----------
++
++
++def test_approved_decompose_exits_zero(tmp_path: Path) -> None:
++    """APPROVED review + valid manifest + all briefs → exit 0."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc == 0
++    assert (batch_dir / "goal.json").is_file()
++    assert (batch_dir / "decompose_review.md").is_file()
++    # decompose does NOT seed task state
++    assert not list(batch_dir.rglob("state.json"))
++
++
++def test_approved_decompose_manifest_loadable_by_scheduler(tmp_path: Path) -> None:
++    """After APPROVED decompose, _load_goal_manifest succeeds and scheduler picks it up."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc == 0
++
++    # The generated manifest is valid per _load_goal_manifest (same Slice A+C path)
++    manifest = orch._load_goal_manifest(batch_dir, batch_dir / "goal.json")
++    assert manifest["goal"] == "test"
++    assert "task-001" in manifest["deps"]
++
++
++def test_approved_decompose_scheduler_runs_tasks(tmp_path: Path, monkeypatch) -> None:
++    """After APPROVED decompose, process_batch with the generated goal.json runs the
++    scheduler correctly (process_task and _seed_state stubbed to avoid git calls)."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++    task_ids = ["task-001"]
++    fake_worker = _FakeWorker(batch_dir, task_ids=task_ids)
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()),
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc == 0
++
++    # Stub process_task so process_batch can run without git
++    ran: list[str] = []
++
++    def fake_seed(td: Path) -> None:
++        pass
++
++    def fake_task(td: Path, *, resolved_base: str | None = None, base_is_parent: bool = False) -> str:
++        ran.append(td.name)
++        return "done"
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    assert "task-001" in ran
++    assert results["task-001"] == "done"
+diff --git a/.redteam/tests/test_plugin_packaging.py b/.redteam/tests/test_plugin_packaging.py
+index 3453a3d..730cd93 100644
+--- a/.redteam/tests/test_plugin_packaging.py
++++ b/.redteam/tests/test_plugin_packaging.py
+@@ -24,10 +24,11 @@ _MARKETPLACE_JSON = _ROOT / ".claude-plugin" / "marketplace.json"
+ _BIN = _ROOT / "bin" / "redteam-install"
+ _COMMAND = _ROOT / "commands" / "redteam-install.md"
+ 
+-# The six generic sub-agents install.py vendors (kept in sync with
++# The generic sub-agents install.py vendors (kept in sync with
+ # install.py HARNESS_AGENTS — drift here is the bug this guards).
+ _EXPECTED_AGENTS = {
+     "code-security-reviewer",
++    "goal-decomposer",
+     "implementer",
+     "outcome-planner",
+     "pr-author",
+diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
+index cb893a2..2d62f1e 100644
+--- a/.redteam/workflows/orchestrator.py
++++ b/.redteam/workflows/orchestrator.py
+@@ -2,6 +2,7 @@
+ """redteam orchestrator.
+ 
+ Usage:
++    python3 .redteam/workflows/orchestrator.py decompose <batch-dir>
+     python3 .redteam/workflows/orchestrator.py start  <batch-dir>
+     python3 .redteam/workflows/orchestrator.py resume <batch-dir>
+     python3 .redteam/workflows/orchestrator.py status <batch-dir>
+@@ -33,6 +34,7 @@ if str(_HERE) not in sys.path:
+ 
+ from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
+     create_pr,
++    decompose as decompose_runner,
+     implement,
+     plan_outcome,
+     plan_review,
+@@ -45,8 +47,10 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
+     DEFAULT_TIMEOUT_SEC,
+     PhaseResult,
+     compute_branch_changed_paths,
++    default_model_for_role,
+     extract_verification_commands,
+     git_rev_parse,
++    incomplete_briefs,
+     pinned_base_branch,
+     repo_root,
+     validate_verification_commands,
+@@ -2143,6 +2147,211 @@ def cmd_new_task(batch_dir: Path, args: list[str]) -> int:
+     return 0
+ 
+ 
++def _missing_briefs(batch_dir: Path) -> list[str]:
++    """Return task IDs from goal.json that lack a non-empty tasks/<id>/input.md.
++
++    Delegates to the shared `incomplete_briefs` helper so the pre-approval gate and
++    the decomposer runner contract enforce the SAME completeness check (no
++    divergence). Returns an empty list if goal.json is absent or unreadable (the
++    caller has already validated it exists).
++    """
++    return incomplete_briefs(batch_dir) or []
++
++
++def _decomposition_review_prompt(batch_dir: Path) -> str:
++    """Prompt for the cross-provider adversarial decomposition review."""
++    return (
++        f"Act as an adversarial decomposition reviewer for the batch at {batch_dir}/. "
++        f"Inputs: {batch_dir}/goal.md (the original goal), {batch_dir}/goal.json "
++        f"(the generated manifest), and each {batch_dir}/tasks/<id>/input.md brief. "
++        f"Block the decomposition (CHANGES_REQUESTED) if: the generated goal.json does not "
++        f"faithfully represent the intent of goal.md; any task's input.md is empty, "
++        f"misleading, or so underspecified that the downstream planner could not produce a "
++        f"verifiable outcome.md; the dependency ordering is wrong; multi-parent dependencies "
++        f"were silently dropped or mangled (v1 is single-parent only); any task ID in "
++        f"goal.json lacks a corresponding tasks/<id>/input.md, or the file is empty; or the "
++        f"manifest JSON is malformed or missing required top-level keys (goal, tasks). "
++        f"Emit RESCUE_REQUIRED only if the goal itself is contradictory and cannot be safely "
++        f"decomposed at all. Emit ASK_USER only if a critical ambiguity in goal.md means no "
++        f"single valid decomposition is possible and the human must clarify. "
++        f"DO NOT write any files or touch any sentinels — output the ENTIRE review to "
++        f"stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
++        f"CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with PR-NNN findings above it."
++    )
++
++
++def cmd_decompose(batch_dir: Path) -> int:
++    """Generate goal.json + task briefs from goal.md and run a cross-provider review gate.
++
++    Reads goal.md, invokes the decomposer worker, runs the decomposition review,
++    and returns before any task is dispatched.  Fail-closed on every uncertainty:
++
++    - If goal.json or any tasks/<id>/input.md already exists, exits non-zero without
++      writing or modifying anything (idempotency guard).
++    - On a cannot-decompose signal from the worker, surfaces decompose_blocked.md and
++      exits non-zero.
++    - On a non-APPROVED review, persists decompose_review.md and exits non-zero.
++    - On APPROVED, validates goal.json via _load_goal_manifest (same Slice A+C path as
++      a hand-fed manifest) and re-asserts brief completeness before exit 0.
++    - Seeds NO tasks/<id>/state.json (start/resume run the validated stack separately).
++    """
++    if not batch_dir.is_dir():
++        print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
++        return 2
++
++    # 1. goal.md is required
++    goal_md = batch_dir / "goal.md"
++    if not goal_md.is_file():
++        print(
++            f"error: no goal.md found at {goal_md}; `decompose` requires a goal.md at the batch root",
++            file=sys.stderr,
++        )
++        return 2
++
++    # 2. Idempotency guard — fail closed if any prior generated artifact exists
++    goal_json = batch_dir / "goal.json"
++    if goal_json.is_file():
++        print(
++            f"error: {goal_json} already exists. Already decomposed; remove generated artifacts manually to re-run.",
++            file=sys.stderr,
++        )
++        return 1
++
++    tasks_root = batch_dir / "tasks"
++    if tasks_root.is_dir():
++        for task_dir_entry in tasks_root.iterdir():
++            if task_dir_entry.is_dir() and (task_dir_entry / "input.md").is_file():
++                print(
++                    f"error: {task_dir_entry / 'input.md'} already exists. Already decomposed; "
++                    "remove generated artifacts manually to re-run.",
++                    file=sys.stderr,
++                )
++                return 1
++
++    # 3. Snapshot provider config BEFORE the worker runs (IR-006).
++    #    A decomposer worker (untrusted model output) has workspace-write access and
++    #    could mutate .redteam/config.toml after the preflight cross-provider guard
++    #    to point the reviewer at the worker's own provider (collapsing to self-review).
++    #    Pinning the model names here means the review call and all subsequent
++    #    cross-provider checks use the pre-worker resolution, not live config.
++    _pre_worker_reviewer = default_model_for_role("reviewer")
++    _pre_worker_implementer = default_model_for_role("implementer")
++    _pinned_models: dict[str, Any] = {}
++    if _pre_worker_reviewer is not None:
++        _pinned_models["reviewer"] = _pre_worker_reviewer
++    if _pre_worker_implementer is not None:
++        _pinned_models["implementer"] = _pre_worker_implementer
++    # tier_phases guarantees runs_headless_review=True inside _adversarial_pairing_error
++    _pinned_state: dict[str, Any] = {"tier_phases": ["plan_review"], "models": _pinned_models}
++
++    pairing_error = _adversarial_pairing_error(_pinned_state)
++    if pairing_error:
++        print(f"error: decompose cross-provider guard: {pairing_error}", file=sys.stderr)
++        return 2
++
++    # 4. Invoke the decomposer worker
++    print(f"orchestrator decompose: {batch_dir}")
++    result = decompose_runner.run(batch_dir, {})
++
++    # 5. Three-outcome worker contract
++    if result["status"] == "cannot_decompose":
++        blocked = batch_dir / "decompose_blocked.md"
++        print(result["log"])
++        print(
++            f"decomposer cannot decompose this goal — see {blocked}",
++            file=sys.stderr,
++        )
++        return 1
++
++    if result["status"] == "error":
++        print(result["log"])
++        print(f"error: decomposer failed — {result['message']}", file=sys.stderr)
++        return 1
++
++    # 6. success: pre-approval brief completeness gate (PR-004)
++    missing = _missing_briefs(batch_dir)
++    if missing:
++        print(
++            f"error: generated goal.json lists task(s) with no non-empty input.md: "
++            f"{', '.join(missing)}. Batch aborted — no task state seeded.",
++            file=sys.stderr,
++        )
++        return 1
++
++    # 6b. Post-worker cross-provider re-check against the pre-worker snapshot (IR-006).
++    #     The worker had workspace-write access and may have mutated config.toml.
++    #     _pinned_state contains the pre-worker model names (not live config), so this
++    #     check is immutable regardless of any config mutation the worker performed.
++    pairing_error = _adversarial_pairing_error(_pinned_state)
++    if pairing_error:
++        print(
++            f"error: post-worker cross-provider guard (pre-worker snapshot): {pairing_error}",
++            file=sys.stderr,
++        )
++        return 2
++
++    # 7. Cross-provider decomposition review — use _pinned_state (pre-worker snapshot,
++    #    IR-006) so review_with_fallback resolves the reviewer adapter from the
++    #    pre-worker provider decision, not from potentially-mutated live config.
++    review_result = review_with_fallback(
++        _pinned_state,
++        role="plan_review",
++        prompt=_decomposition_review_prompt(batch_dir),
++        cwd=repo_root(),
++        target={"kind": "plan", "base": None},
++    )
++
++    # 8. Persist review artifact
++    review_path = batch_dir / "decompose_review.md"
++    review_path.write_text(review_result["raw"], encoding="utf-8")
++
++    if review_result["parse_status"] == MANUAL_REQUIRED:
++        print(
++            f"error: reviewer fallback exhausted — manual review required; see {review_path}",
++            file=sys.stderr,
++        )
++        return 1
++
++    if review_result["parse_status"] != "ok":
++        print(
++            f"error: reviewer failed (parse_status={review_result['parse_status']}); see {review_path}",
++            file=sys.stderr,
++        )
++        return 1
++
++    decision = review_result["decision"]
++
++    if decision != "APPROVED":
++        print(
++            f"decomposition review: {decision} — batch not started; see {review_path}",
++            file=sys.stderr,
++        )
++        return 1
++
++    # 9. APPROVED: validate via the existing Slice A+C _load_goal_manifest path
++    try:
++        _load_goal_manifest(batch_dir, goal_json)
++    except ValueError as exc:
++        print(
++            f"error: generated goal.json failed validation: {exc}",
++            file=sys.stderr,
++        )
++        return 1
++
++    # 10. Re-assert brief completeness before exit 0
++    missing = _missing_briefs(batch_dir)
++    if missing:
++        print(
++            f"error: post-approval brief completeness check failed — missing non-empty "
++            f"input.md for: {', '.join(missing)}. Batch aborted.",
++            file=sys.stderr,
++        )
++        return 1
++
++    print("DECOMPOSITION APPROVED — run `orchestrator start` to execute the validated stack")
++    return 0
++
++
+ def cmd_config(repo: Path | None = None) -> int:
+     """Interactively pick per-role models and write .redteam/config.toml.
+ 
+@@ -2157,10 +2366,14 @@ def cmd_config(repo: Path | None = None) -> int:
+ 
+ 
+ USAGE = (
+-    "usage: orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
++    "usage: orchestrator.py decompose <batch-dir>\n"
++    "       orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
+     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
+     "       orchestrator.py review\n"
+     "       orchestrator.py config\n"
++    "  decompose        — generate goal.json + task briefs from goal.md; run the\n"
++    "                     cross-provider decomposition review gate; stop before any\n"
++    "                     task is dispatched (run `start` after to execute the stack)\n"
+     "  start            — process every task from its current next_phase\n"
+     "  resume           — same as start; convenient name to re-enter after a human gate\n"
+     "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
+@@ -2194,6 +2407,8 @@ def main(argv: list[str]) -> int:
+ 
+     if command == "new":
+         return cmd_new_task(batch_dir, argv[3:])
++    if command == "decompose":
++        return cmd_decompose(batch_dir)
+     if command == "start":
+         return cmd_start(batch_dir)
+     if command == "resume":
+diff --git a/.redteam/workflows/phase_runners/_base.py b/.redteam/workflows/phase_runners/_base.py
+index 314240e..3e0f8bf 100644
+--- a/.redteam/workflows/phase_runners/_base.py
++++ b/.redteam/workflows/phase_runners/_base.py
+@@ -75,6 +75,28 @@ def repo_root() -> Path:
+     return Path(__file__).resolve().parents[3]
+ 
+ 
++def incomplete_briefs(batch_dir: Path) -> list[str] | None:
++    """Task IDs in goal.json that lack a non-empty tasks/<id>/input.md.
++
++    Single source of truth for the brief-completeness check, shared by the
++    decomposer runner contract and cmd_decompose's pre-approval gate so the two
++    cannot diverge. Returns None when goal.json is absent or unparseable (the
++    caller decides whether that is fail-closed or a no-op); otherwise the list of
++    task IDs whose input.md is missing or empty (empty list == all briefs present).
++    """
++    goal_path = batch_dir / "goal.json"
++    try:
++        data = json.loads(goal_path.read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    incomplete = []
++    for tid in data.get("tasks", {}):
++        brief = batch_dir / "tasks" / tid / "input.md"
++        if not brief.is_file() or brief.stat().st_size == 0:
++            incomplete.append(tid)
++    return incomplete
++
++
+ def _print_stream_event(line: str, agent: str) -> dict | None:
+     """Parse one stream-json line and print a short summary to stderr.
+ 
+diff --git a/.redteam/workflows/phase_runners/decompose.py b/.redteam/workflows/phase_runners/decompose.py
+new file mode 100644
+index 0000000..2b06267
+--- /dev/null
++++ b/.redteam/workflows/phase_runners/decompose.py
+@@ -0,0 +1,136 @@
++"""Goal decomposer runner.
++
++Invokes the goal-decomposer worker agent and enforces the three-outcome contract:
++
++  (a) success:          worker exit 0 AND goal.json present on disk.
++                        The caller (cmd_decompose) then runs the full brief-
++                        completeness gate before and after the review.
++  (b) cannot-decompose: worker exit 0 AND goal.json ABSENT AND final stdout line
++                        is exactly DECOMPOSE_DECISION: CANNOT_DECOMPOSE AND
++                        decompose_blocked.md is present and non-empty AND
++                        NO tasks/<id>/input.md AND NO tasks/<id>/state.json exists
++                        under the batch dir. If any task brief OR task state was
++                        written alongside the marker, that is a partial-write →
++                        outcome (c), not (b). A stray tasks/<id>/state.json is
++                        especially dangerous: with no goal.json the scheduler falls
++                        back to flat mode and _run_one_task runs a task dir that
++                        already has a state.json without re-seeding (bypassing the
++                        no_input_md guard), so an attacker-controlled state would
++                        execute. The per-task state-machine surface must stay
++                        untouched until APPROVED.
++  (c) anything else:   fail closed — partial writes are left untouched for the
++                        operator to inspect; the runner itself writes nothing.
++
++The runner owns the contract; the prompt only echoes it.  Mirrors plan_review.py's
++shape; reuses fail-closed semantics.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++from adapters import get_worker_adapter
++
++from ._base import incomplete_briefs, repo_root
++
++AGENT_NAME = "goal-decomposer"
++CANNOT_DECOMPOSE_MARKER = "DECOMPOSE_DECISION: CANNOT_DECOMPOSE"
++
++
++def _decomposer_prompt(batch_dir: Path, goal_text: str) -> str:
++    """Build the project-agnostic decomposer prompt."""
++    return (
++        f"You are the goal decomposer for a redteam batch.\n\n"
++        f"Batch directory: {batch_dir}\n\n"
++        f"Goal document contents:\n\n{goal_text}\n\n"
++        f"Follow your agent definition at .claude/agents/goal-decomposer.md exactly.\n"
++        f"Write goal.json and tasks/<id>/input.md files under {batch_dir}.\n"
++        f"On cannot-decompose: write {batch_dir}/decompose_blocked.md and end stdout with:\n"
++        f"{CANNOT_DECOMPOSE_MARKER}"
++    )
++
++
++def run(batch_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
++    """Invoke the decomposer worker and enforce the three-outcome contract.
++
++    Returns a dict with:
++        status:   "success" | "cannot_decompose" | "error"
++        log:      worker stdout (for operator inspection on error)
++        message:  human-readable description of the outcome
++    """
++    goal_path = batch_dir / "goal.md"
++    goal_text = goal_path.read_text(encoding="utf-8")
++
++    prompt = _decomposer_prompt(batch_dir, goal_text)
++    result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=repo_root())
++
++    stdout: str = result["stdout"] or ""
++    exit_code: int = result["returncode"]
++    goal_json_path = batch_dir / "goal.json"
++    blocked_path = batch_dir / "decompose_blocked.md"
++
++    goal_json_exists = goal_json_path.is_file()
++    stdout_stripped = stdout.strip()
++    stdout_lines = [ln.strip() for ln in stdout_stripped.splitlines() if ln.strip()]
++    final_stdout_line = stdout_lines[-1] if stdout_lines else ""
++    blocked_exists = blocked_path.is_file() and blocked_path.stat().st_size > 0
++    stray_briefs = list(batch_dir.glob("tasks/*/input.md"))
++    stray_states = list(batch_dir.glob("tasks/*/state.json"))
++
++    # Outcome (b): cannot-decompose — all six conditions must hold.
++    # Stray task briefs OR stray task state.json alongside the marker are a contract
++    # violation (partial write) and fall into outcome (c) instead — hiding them as a
++    # valid cannot-decompose would leave the operator with an inconsistent batch dir.
++    # A stray state.json is the worse case: with no goal.json the scheduler runs flat
++    # mode and _run_one_task executes a pre-seeded task dir without re-seeding, so the
++    # per-task state-machine surface must stay untouched until APPROVED.
++    if (
++        exit_code == 0
++        and not goal_json_exists
++        and final_stdout_line == CANNOT_DECOMPOSE_MARKER
++        and blocked_exists
++        and not stray_briefs
++        and not stray_states
++    ):
++        return {
++            "status": "cannot_decompose",
++            "log": stdout,
++            "message": f"decomposer cannot decompose this goal; see {blocked_path}",
++        }
++
++    # Outcome (a): success requires exit 0 AND goal.json present AND every task in
++    # goal.json backed by a non-empty input.md. A goal.json with missing/empty briefs
++    # (or an unparseable goal.json) is a partial write → outcome (c), fail closed.
++    # The completeness check is the runner's own contract (not deferred to the caller),
++    # so a future direct caller of run() gets the same guarantee.
++    if exit_code == 0 and goal_json_exists:
++        incomplete = incomplete_briefs(batch_dir)
++        if incomplete is None:
++            return {
++                "status": "error",
++                "log": stdout,
++                "message": f"decomposer wrote an unparseable goal.json at {goal_json_path}",
++            }
++        if incomplete:
++            return {
++                "status": "error",
++                "log": stdout,
++                "message": (
++                    f"decomposer wrote goal.json but task(s) {', '.join(incomplete)} "
++                    "have a missing or empty input.md (partial write)"
++                ),
++            }
++        return {
++            "status": "success",
++            "log": stdout,
++            "message": "decomposer completed successfully",
++        }
++
++    # Outcome (c): anything else — fail closed
++    reason = f"decomposer exited {exit_code} without writing goal.json or emitting {CANNOT_DECOMPOSE_MARKER!r}"
++    return {
++        "status": "error",
++        "log": stdout,
++        "message": reason,
++    }
+diff --git a/.redteam/tests/test_goal_decomposer.py b/.redteam/tests/test_goal_decomposer.py
+index c280c3f..eedaa95 100644
+--- a/.redteam/tests/test_goal_decomposer.py
++++ b/.redteam/tests/test_goal_decomposer.py
+@@ -475,6 +475,72 @@ def test_run_complete_returns_success(tmp_path: Path) -> None:
+     assert result["status"] == "success"
+ 
+ 
++def test_run_success_path_stray_state_json_returns_error(tmp_path: Path) -> None:
++    """run() fails closed when a worker writes goal.json + valid briefs + a stray state.json (IR-007).
++
++    A worker that pre-seeds tasks/<id>/state.json on the success path bypasses
++    template re-seeding: _run_one_task trusts the existing state.json and skips the
++    no_input_md guard, so untrusted decomposer-written state would execute before
++    APPROVED.  The runner must return 'error', not 'success'.
++    """
++    decompose_mod = _decompose_mod()
++    batch_dir = _make_batch(tmp_path)
++
++    def stray_state_invoke(**_kwargs: object) -> dict:
++        (batch_dir / "goal.json").write_text(_simple_goal_json(["task-001"]), encoding="utf-8")
++        task_dir = batch_dir / "tasks" / "task-001"
++        task_dir.mkdir(parents=True, exist_ok=True)
++        (task_dir / "input.md").write_text("Brief for task-001.", encoding="utf-8")
++        # Also writes state.json — contract violation on the success path
++        (task_dir / "state.json").write_text('{"task_id": "task-001"}', encoding="utf-8")
++        return {"returncode": 0, "stdout": "decompose done", "stderr": ""}
++
++    fake_worker = MagicMock()
++    fake_worker.invoke.side_effect = stray_state_invoke
++
++    with patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker):
++        result = decompose_mod.run(batch_dir, {})
++
++    assert result["status"] == "error"
++    assert "state.json" in result["message"] or "state-machine" in result["message"]
++
++
++# ---------- (IR-007) success-path stray state.json ----------
++
++
++def test_cmd_decompose_success_path_stray_state_json_aborts(tmp_path: Path) -> None:
++    """cmd_decompose exits non-zero when the worker pre-seeds state.json on the success path.
++
++    The per-task state-machine surface must stay untouched until APPROVED.  A worker
++    that writes goal.json + valid input.md briefs + a tasks/<id>/state.json must be
++    rejected fail-closed so the reviewer is never invoked and no task state is left
++    trusted in the batch directory.
++    """
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path)
++
++    def stray_state_invoke(**_kwargs: object) -> dict:
++        (batch_dir / "goal.json").write_text(_simple_goal_json(["task-001"]), encoding="utf-8")
++        task_dir = batch_dir / "tasks" / "task-001"
++        task_dir.mkdir(parents=True, exist_ok=True)
++        (task_dir / "input.md").write_text("Brief for task-001.", encoding="utf-8")
++        (task_dir / "state.json").write_text('{"task_id": "task-001"}', encoding="utf-8")
++        return {"returncode": 0, "stdout": "decompose done", "stderr": ""}
++
++    fake_worker = MagicMock()
++    fake_worker.invoke.side_effect = stray_state_invoke
++
++    with (
++        patch("phase_runners.decompose.get_worker_adapter", return_value=fake_worker),
++        patch("redteam_orchestrator.review_with_fallback") as mock_review,
++    ):
++        rc = orch.cmd_decompose(batch_dir)
++
++    assert rc != 0
++    mock_review.assert_not_called()
++    assert not (batch_dir / "decompose_review.md").exists()
++
++
+ # ---------- (c) non-APPROVED review ----------
+ 
+ 
+diff --git a/.redteam/workflows/phase_runners/decompose.py b/.redteam/workflows/phase_runners/decompose.py
+index 2b06267..5dddb10 100644
+--- a/.redteam/workflows/phase_runners/decompose.py
++++ b/.redteam/workflows/phase_runners/decompose.py
+@@ -121,6 +121,20 @@ def run(batch_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
+                     "have a missing or empty input.md (partial write)"
+                 ),
+             }
++        # Stray state.json on the success path: _run_one_task trusts an existing
++        # state.json and skips template seeding (bypassing the no_input_md guard), so
++        # untrusted decomposer-written state would execute before the decomposition is
++        # APPROVED.  The per-task state-machine surface must stay untouched until APPROVED.
++        if stray_states:
++            return {
++                "status": "error",
++                "log": stdout,
++                "message": (
++                    f"decomposer pre-seeded tasks/<id>/state.json "
++                    f"({', '.join(str(p) for p in stray_states)}); "
++                    "the per-task state-machine surface must stay untouched until APPROVED"
++                ),
++            }
+         return {
+             "status": "success",
+             "log": stdout,
