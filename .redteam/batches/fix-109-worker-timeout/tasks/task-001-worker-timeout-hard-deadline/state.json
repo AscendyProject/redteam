@@ -1,0 +1,97 @@
+{
+  "task_id": "task-001-worker-timeout-hard-deadline",
+  "mode": "agent-pair",
+  "phase": "create_pr",
+  "phases_completed": [
+    "plan_outcome",
+    "plan_review",
+    "implement",
+    "review_code"
+  ],
+  "next_phase": "create_pr",
+  "decision": "pending",
+  "owner": "claude",
+  "reviewer": "codex",
+  "next_action": null,
+  "review_items": [
+    {
+      "id": "PR-001",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-001 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "IR-001",
+      "phase": "review_code",
+      "severity": "major",
+      "status": "resolved",
+      "summary": "IR-001 severity:major status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "IR-002",
+      "phase": "review_code",
+      "severity": "major",
+      "status": "resolved",
+      "summary": "IR-002 severity:major status:resolved",
+      "carry_over_count": 0
+    }
+  ],
+  "verification": {
+    "commands": [
+      "bash .redteam/scripts/verify.sh"
+    ],
+    "last_exit_code": 0,
+    "last_output_path": "verification.log",
+    "last_run_at": "2026-06-28T09:44:37.922046+00:00",
+    "last_diff_sha256": "dd7ecaf483ac5f1315b59ded326088b8cd7bf04f0b6fc29f06612710396d504c",
+    "verify_command": "bash .redteam/scripts/verify.sh",
+    "verify_allowlist": [
+      "pytest",
+      "ruff",
+      "mypy"
+    ]
+  },
+  "models": {
+    "planner": "claude-opus-4-7",
+    "implementer": "claude-sonnet-4-6",
+    "reviewer": "codex",
+    "rescue": "codex"
+  },
+  "escape": {
+    "ask_user": false,
+    "reason": null,
+    "return_phase": null
+  },
+  "implement_round_count": 3,
+  "tdd_test_files": [],
+  "retries": {
+    "plan_outcome": 1,
+    "implement": 2
+  },
+  "max_retries_per_phase": 2,
+  "last_failure_reason": null,
+  "last_failure_log": null,
+  "last_failure_diff": null,
+  "deferred_requirements": [],
+  "branch": "redteam/task-001-worker-timeout-hard-deadline",
+  "pr_url": null,
+  "created_at": "2026-06-28T09:21:36.589559+00:00",
+  "updated_at": "2026-06-28T09:46:12.149036+00:00",
+  "base_branch": "main",
+  "phase_started_at": "2026-06-28T09:46:12.149024+00:00",
+  "last_user_response": null,
+  "implement_untracked_baseline": [
+    ".redteam/batches/fix-109-worker-timeout/tasks/task-001-worker-timeout-hard-deadline/input.md",
+    ".redteam/batches/fix-109-worker-timeout/tasks/task-001-worker-timeout-hard-deadline/outcome.md",
+    ".redteam/batches/fix-109-worker-timeout/tasks/task-001-worker-timeout-hard-deadline/plan_review.md",
+    ".redteam/batches/fix-109-worker-timeout/tasks/task-001-worker-timeout-hard-deadline/plan_review.round1.md",
+    ".redteam/batches/fix-109-worker-timeout/tasks/task-001-worker-timeout-hard-deadline/state.json",
+    ".redteam/batches/fix-112-untracked-baseline/tasks/task-001-untracked-baseline-pin/pr.md",
+    ".redteam/batches/fix-112-untracked-baseline/tasks/task-001-untracked-baseline-pin/pr_url.txt",
+    ".redteam/batches/goal-mode-slice-a/tasks/task-001-slice-a-dag-branching/pr_url.txt"
+  ],
+  "rescue_entry_count": 0
+}
