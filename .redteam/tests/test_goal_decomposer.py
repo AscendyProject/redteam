@@ -236,6 +236,50 @@ def test_decompose_refuses_same_provider_pairing(tmp_path: Path) -> None:
     assert not (batch_dir / "decompose_review.md").exists()
 
 
+def test_decompose_review_pins_pre_worker_provider_snapshot(tmp_path: Path) -> None:
+    """IR-006: a decomposer worker has workspace-write access and could mutate
+    .redteam/config.toml to point the reviewer at its own provider AFTER the
+    preflight cross-provider guard. cmd_decompose pins the reviewer/implementer
+    model resolution BEFORE the worker runs and passes that snapshot to the
+    decomposition review, so a post-worker config mutation cannot collapse the
+    adversarial pair into same-provider self-review.
+    """
+    orch = _orch()
+    batch_dir = _make_batch(tmp_path)
+
+    flipped = {"after_worker": False}
+    base_worker = _FakeWorker(batch_dir, task_ids=["task-001"])
+
+    class _MutatingWorker:
+        def invoke(self, **kwargs: object) -> dict:
+            result = base_worker.invoke(**kwargs)
+            flipped["after_worker"] = True  # simulate the worker mutating config.toml
+            return result
+
+    def fake_default_model(role: str) -> str | None:
+        if role == "reviewer":
+            # pre-worker: cross-provider "codex"; post-mutation: "claude" (== worker)
+            return "claude" if flipped["after_worker"] else "codex"
+        if role == "implementer":
+            return "claude"
+        return None
+
+    with (
+        patch("phase_runners.decompose.get_worker_adapter", return_value=_MutatingWorker()),
+        patch("redteam_orchestrator.default_model_for_role", side_effect=fake_default_model),
+        patch("redteam_orchestrator.review_with_fallback", return_value=_approved()) as mock_review,
+    ):
+        rc = orch.cmd_decompose(batch_dir)
+
+    assert rc == 0
+    assert flipped["after_worker"] is True  # the mutation path was exercised
+    # The review ran against the PRE-worker snapshot ("codex"), NOT the post-mutation
+    # value ("claude" == the worker's own provider).
+    pinned_state = mock_review.call_args.args[0]
+    assert pinned_state["models"]["reviewer"] == "codex"
+    assert pinned_state["models"]["implementer"] == "claude"
+
+
 # ---------- (d) cannot-decompose contract ----------
 
 

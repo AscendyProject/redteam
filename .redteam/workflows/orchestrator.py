@@ -47,6 +47,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     DEFAULT_TIMEOUT_SEC,
     PhaseResult,
     compute_branch_changed_paths,
+    default_model_for_role,
     extract_verification_commands,
     git_rev_parse,
     incomplete_briefs,
@@ -2227,9 +2228,23 @@ def cmd_decompose(batch_dir: Path) -> int:
                 )
                 return 1
 
-    # 3. Cross-provider guard (reuse _adversarial_pairing_error via a synthetic state
-    #    that guarantees runs_headless_review=True, since we always run a review)
-    pairing_error = _adversarial_pairing_error({"tier_phases": ["plan_review"]})
+    # 3. Snapshot provider config BEFORE the worker runs (IR-006).
+    #    A decomposer worker (untrusted model output) has workspace-write access and
+    #    could mutate .redteam/config.toml after the preflight cross-provider guard
+    #    to point the reviewer at the worker's own provider (collapsing to self-review).
+    #    Pinning the model names here means the review call and all subsequent
+    #    cross-provider checks use the pre-worker resolution, not live config.
+    _pre_worker_reviewer = default_model_for_role("reviewer")
+    _pre_worker_implementer = default_model_for_role("implementer")
+    _pinned_models: dict[str, Any] = {}
+    if _pre_worker_reviewer is not None:
+        _pinned_models["reviewer"] = _pre_worker_reviewer
+    if _pre_worker_implementer is not None:
+        _pinned_models["implementer"] = _pre_worker_implementer
+    # tier_phases guarantees runs_headless_review=True inside _adversarial_pairing_error
+    _pinned_state: dict[str, Any] = {"tier_phases": ["plan_review"], "models": _pinned_models}
+
+    pairing_error = _adversarial_pairing_error(_pinned_state)
     if pairing_error:
         print(f"error: decompose cross-provider guard: {pairing_error}", file=sys.stderr)
         return 2
@@ -2263,9 +2278,23 @@ def cmd_decompose(batch_dir: Path) -> int:
         )
         return 1
 
-    # 7. Cross-provider decomposition review
+    # 6b. Post-worker cross-provider re-check against the pre-worker snapshot (IR-006).
+    #     The worker had workspace-write access and may have mutated config.toml.
+    #     _pinned_state contains the pre-worker model names (not live config), so this
+    #     check is immutable regardless of any config mutation the worker performed.
+    pairing_error = _adversarial_pairing_error(_pinned_state)
+    if pairing_error:
+        print(
+            f"error: post-worker cross-provider guard (pre-worker snapshot): {pairing_error}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # 7. Cross-provider decomposition review — use _pinned_state (pre-worker snapshot,
+    #    IR-006) so review_with_fallback resolves the reviewer adapter from the
+    #    pre-worker provider decision, not from potentially-mutated live config.
     review_result = review_with_fallback(
-        {},
+        _pinned_state,
         role="plan_review",
         prompt=_decomposition_review_prompt(batch_dir),
         cwd=repo_root(),
