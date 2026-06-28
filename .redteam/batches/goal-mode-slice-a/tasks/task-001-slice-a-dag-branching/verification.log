@@ -1,0 +1,60 @@
+$ bash .redteam/scripts/verify.sh
+=== ruff check ===
+All checks passed!
+=== ruff format check ===
+62 files already formatted
+=== pytest ===
+============================= test session starts ==============================
+platform darwin -- Python 3.12.8, pytest-9.1.1, pluggy-1.6.0
+rootdir: /Users/kh/Documents/redteam
+configfile: pyproject.toml
+collected 350 items
+
+.redteam/tests/test_adversarial_pairing_guard.py ...........             [  3%]
+.redteam/tests/test_agent_pair_rescue_phase_order.py ...                 [  4%]
+.redteam/tests/test_agent_tool_keys.py ...                               [  4%]
+.redteam/tests/test_agents_generic_prompts.py ........                   [  7%]
+.redteam/tests/test_ask_user_approve_snapshot.py ..                      [  7%]
+.redteam/tests/test_base_branch_pin.py .......                           [  9%]
+.redteam/tests/test_branch_switch_stash.py ......                        [ 11%]
+.redteam/tests/test_claude_reviewer_adapter.py ..........                [ 14%]
+.redteam/tests/test_codex_main_wiring.py ....                            [ 15%]
+.redteam/tests/test_config.py .............                              [ 19%]
+.redteam/tests/test_config_cli.py ....................                   [ 24%]
+.redteam/tests/test_create_pr_preflight.py ........                      [ 27%]
+.redteam/tests/test_engine_loader.py ..                                  [ 27%]
+.redteam/tests/test_gateless_default_common_path.py .......              [ 29%]
+.redteam/tests/test_goal_dag_scheduler.py ............                   [ 33%]
+.redteam/tests/test_goal_manifest_validation.py ...........              [ 36%]
+.redteam/tests/test_goal_stacked_branching.py ..........                 [ 39%]
+.redteam/tests/test_implementer_commit.py .............                  [ 42%]
+.redteam/tests/test_install.py .......................                   [ 49%]
+.redteam/tests/test_mode_aware_prompts.py ....                           [ 50%]
+.redteam/tests/test_new_task.py ......                                   [ 52%]
+.redteam/tests/test_orchestrator_config.py ......                        [ 54%]
+.redteam/tests/test_pinned_base_freeze_guard.py ........                 [ 56%]
+.redteam/tests/test_pipeline_mode.py .......                             [ 58%]
+.redteam/tests/test_plugin_packaging.py .......                          [ 60%]
+.redteam/tests/test_pr_branch.py ..                                      [ 60%]
+.redteam/tests/test_preimplement_snapshot_invariant.py .....             [ 62%]
+.redteam/tests/test_progress_surface.py .....                            [ 63%]
+.redteam/tests/test_rescue_at_two_failures.py .                          [ 64%]
+.redteam/tests/test_rescue_loop_bounded.py ...                           [ 64%]
+.redteam/tests/test_review_command.py ........                           [ 67%]
+.redteam/tests/test_review_output_validity_mandate.py ...                [ 68%]
+.redteam/tests/test_review_round_archive.py ...                          [ 68%]
+.redteam/tests/test_reviewer_adapter.py ............................     [ 76%]
+.redteam/tests/test_reviewer_fallback.py ...............                 [ 81%]
+.redteam/tests/test_run_claude_model.py ............                     [ 84%]
+.redteam/tests/test_state_bootstrap.py .....                             [ 86%]
+.redteam/tests/test_tdd_approved_review_routes_to_create_pr.py .         [ 86%]
+.redteam/tests/test_tdd_commit_discipline.py ...........                 [ 89%]
+.redteam/tests/test_tier_routing_config.py ................              [ 94%]
+.redteam/tests/test_tier_routing_orchestrator.py .........               [ 96%]
+.redteam/tests/test_verify_command_config.py ............                [100%]
+
+============================= 350 passed in 9.85s ==============================
+✅ verify.sh OK
+
+[exit 0]
+

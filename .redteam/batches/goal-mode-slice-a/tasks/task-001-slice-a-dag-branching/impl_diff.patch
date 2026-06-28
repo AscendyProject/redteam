@@ -1,0 +1,1920 @@
+diff --git a/.redteam/batches/goal-mode-slice-a/tasks/task-001-slice-a-dag-branching/input.md b/.redteam/batches/goal-mode-slice-a/tasks/task-001-slice-a-dag-branching/input.md
+new file mode 100644
+index 0000000..52d6295
+--- /dev/null
++++ b/.redteam/batches/goal-mode-slice-a/tasks/task-001-slice-a-dag-branching/input.md
+@@ -0,0 +1,117 @@
++# Slice A: single-parent DAG manifest + task-on-task branching
++
++Implements **Slice A** of the goal-mode design (#94). The accepted umbrella design
++is `docs/decisions/2026-06-27-goal-mode-design.md` — read it; this brief is the
++Slice A cut of it. Security-adjacent (extends the #91 `base_branch` pin), so this
++task goes through `plan_review` before any code.
++
++## Goal
++A batch may carry an optional `goal.json` manifest declaring a **single-parent
++forest** of task dependencies; the orchestrator runs dependent tasks **stacked on
++their parent's task branch** (so each dependent's reviewed range and PR base are
++exactly its delta), with fail-closed guards so a moved/stale parent can never
++silently produce a wrong stacked PR. Absent `goal.json`, behavior is byte-for-byte
++unchanged. **No auto-merge** — the draft-PR stack stays the human checkpoint.
++
++## What to build
++1. **Manifest schema + up-front validation (§1a).** Optional `goal.json` at batch
++   root: `{ "goal": str, "ceilings": {...}, "tasks": { "<task-id>": {"depends_on":
++   [...]} } }`. When present, validate the WHOLE manifest in `process_batch`
++   BEFORE seeding any state or running any task, and **abort the entire goal batch
++   (fail closed)** on any of: unknown task ref in `depends_on`, self-dependency,
++   duplicate task IDs, a task key with no matching on-disk task dir, **≥2 entries
++   in any `depends_on`** (v1 single-parent rule), or a cycle (toposort; back-edge
++   → abort). Stdlib only (`json` + trivial toposort). `ceilings` is parsed/stored
++   but NOT enforced here (that is Slice C) — accept and ignore beyond schema.
++2. **Dependency-aware layered scheduler (§1b).** Run in topo layers: a task is
++   runnable only when its parent (if any) is `done`. Independent roots run as
++   today. A task whose parent is not `done` (deferred/failed/blocked) is **skipped
++   as `blocked_on_dependency`** — not run — and other chains continue.
++3. **Pin-before-branch, branch-from-the-pin (§1c).** Reorder `process_task` so the
++   resolved base (parent's branch `<branch_prefix>/<parent_id>` for a dependent,
++   else `cfg.project.base_branch`) is pinned into `state["base_branch"]` FIRST,
++   then `_ensure_task_branch` is called with that pinned base — not live config.
++   The scheduler passes the resolved parent in; `process_task` does not re-read the
++   manifest. Preserve the existing "pin once / legacy-unpinned-with-writable-phase
++   fails closed" invariant.
++4. **Ancestry fail-closed on reused branches (§1d).** Before running a dependent
++   whose task branch already exists, verify `git merge-base --is-ancestor
++   <pinned-base> <task-branch>`; if the branch does NOT descend from the pinned
++   parent, fail closed (defer with a clear reason). **Never auto-delete** the
++   consumer's branch.
++5. **Freeze guard centralized at the read path (§1e).** At pin time record
++   `state["base_branch_sha"]` = parent branch tip SHA. Put the freeze check INSIDE
++   `pinned_base_branch(state, repo)` itself (thread the `repo` path in; callers
++   have it): the accessor re-resolves the live parent tip and **raises (fails
++   closed)** if it differs from the recorded SHA. Do NOT enumerate call sites — the
++   centralized accessor makes every reader (`review_code`, `create_pr`, tier guard,
++   `implement`, the TDD `write_test` path, and any future reader) fail closed
++   automatically. Root tasks: base is config base, no SHA recorded, guard is a
++   no-op.
++6. **Parent-aware pull skip (§1f).** The existing unconditional
++   `git pull --ff-only origin <base>` (`orchestrator.py:777`) must be SKIPPED when
++   the base is a parent task branch (local-branch-authoritative). Decide this on an
++   **explicit `base_is_parent` signal** the scheduler already knows (or membership
++   in the manifest-derived parent-branch set) — **NOT** a
++   `base_branch.startswith(f"{branch_prefix}/")` string match, which could collide
++   with a project's real remote config base.
++
++## Constraints
++- **Engine stays project-agnostic; stdlib-only; zero runtime deps.** No
++  project/stack fingerprints in `.redteam/workflows/`.
++- **Backward compatible:** absent `goal.json`, `process_batch`/`process_task`
++  behave exactly as today (flat, sorted, independent; existing tests stay green).
++- **Preserve the #91 pin invariants** and the `_writable_phase_started`
++  fail-closed legacy guard. Centralizing the freeze check must not weaken pin-once.
++- **No auto-merge, no auto-delete of consumer branches, no force-push.**
++- Match existing orchestrator/phase-runner style; minimum code.
++
++## Out of scope
++- The goal→task **decomposer** and decomposition review (Slice B).
++- **Ceilings enforcement** + goal-level done-criterion (Slice C) — parse-and-ignore
++  `ceilings` only.
++- **Multi-parent / integration-branch** DAGs (≥2 deps fails closed; future work).
++- Changing the standalone `review` command / `cmd_review` (not pipeline consumers).
++- Auto-retarget of stacked PRs after bottom-up merges (operator-manual in v1).
++
++## Affected files
++- `.redteam/workflows/orchestrator.py` — `process_batch` (manifest load +
++  validation + layered scheduler), `process_task` (pin-before-branch, parent
++  resolution, ancestry check), `_ensure_task_branch` (pull-skip signal), tier
++  guard already consumes the pin.
++- `.redteam/workflows/phase_runners/_base.py` — `pinned_base_branch` (thread
++  `repo`, add the centralized freeze guard); a small `git rev-parse` helper.
++- Possibly `.redteam/workflows/config.py` if a manifest/scheduler knob is needed
++  (prefer not to add config surface).
++- Tests under `.redteam/tests/` — new manifest/scheduler/branching invariant tests.
++- Callers of `pinned_base_branch` across `phase_runners/*` get the new `repo` arg.
++
++## Verification
++- `bash .redteam/scripts/verify.sh` stays green (ruff check + ruff format --check +
++  pytest), including `test_agents_generic_prompts.py` and `test_install.py`.
++- New tests assert the real invariants (not just manifest parsing):
++  - pinned base (parent branch) is what `_ensure_task_branch` checks out from;
++  - a pre-existing wrong-base task branch fails closed (§1d);
++  - a moved parent tip fails closed (§1e) — specifically a tip moved AFTER
++    `implement`, before `review_code` AND before `create_pr`, fails closed at each;
++  - the centralized guard also fails closed on the TDD `write_test` path (assert
++    via that path, not just agent-pair phases);
++  - a moved remote parent-task branch does NOT mutate the local parent (pull
++    skipped — §1f);
++  - `create_pr` receives the parent branch as `--base`; review range is
++    `parent...HEAD`;
++  - manifest validation aborts the whole batch on cycle / unknown ref / self-dep /
++    dup / ≥2 deps, seeding NO state;
++  - absent `goal.json` → behavior byte-for-byte unchanged (backward-compat test).
++
++## Risks
++- Threading `repo` into `pinned_base_branch` touches every caller — must stay a
++  pure additive arg without changing existing call semantics for root tasks.
++- The `base_is_parent` signal must be plumbed from the scheduler to the
++  pull-skip site without `process_task` re-reading the manifest (§1c keeps that
++  boundary). If plumbing proves awkward, surface it at the gate rather than
++  falling back to a prefix-string match.
++- Centralizing a `git rev-parse` inside the pin accessor adds a subprocess call
++  per pin read; confirm the read frequency is per-phase (handful), not hot-loop.
++- Backward-compat surface is large (every existing batch test) — the absent-
++  manifest path must be provably unchanged.
+diff --git a/.redteam/tests/test_base_branch_pin.py b/.redteam/tests/test_base_branch_pin.py
+index badfd63..5e4ca43 100644
+--- a/.redteam/tests/test_base_branch_pin.py
++++ b/.redteam/tests/test_base_branch_pin.py
+@@ -37,14 +37,15 @@ def _base_mod():
+ 
+ def test_pinned_base_branch_returns_the_pin():
+     base = _base_mod()
+-    assert base.pinned_base_branch({"base_branch": "develop"}) == "develop"
++    # Pass repo=Path("/fake") — no base_branch_sha in state, so freeze guard is a no-op
++    assert base.pinned_base_branch({"base_branch": "develop"}, Path("/fake")) == "develop"
+ 
+ 
+ def test_pinned_base_branch_fails_closed_when_absent_or_invalid():
+     base = _base_mod()
+     for bad in ({}, {"base_branch": ""}, {"base_branch": None}, {"base_branch": 123}):
+         with pytest.raises(ValueError, match="base_branch is not pinned"):
+-            base.pinned_base_branch(bad)
++            base.pinned_base_branch(bad, Path("/fake"))
+ 
+ 
+ def test_writable_phase_started_counts_any_signal(tmp_path):
+diff --git a/.redteam/tests/test_goal_dag_scheduler.py b/.redteam/tests/test_goal_dag_scheduler.py
+new file mode 100644
+index 0000000..8aaff36
+--- /dev/null
++++ b/.redteam/tests/test_goal_dag_scheduler.py
+@@ -0,0 +1,325 @@
++"""Slice A — topo-layered DAG scheduler: ordering, blocked_on_dependency skip,
++transitive cascade, independent-chain continuation, _run_pipeline exit code, and
++absent-manifest backward compat.
++"""
++
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++
++def _orch():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++# ---------- helpers ----------
++
++
++def _make_batch(tmp_path: Path, task_ids: list[str], goal_json: str | None = None) -> Path:
++    batch_dir = tmp_path / "batch"
++    tasks_root = batch_dir / "tasks"
++    for tid in task_ids:
++        td = tasks_root / tid
++        td.mkdir(parents=True)
++        (td / "input.md").write_text("brief", encoding="utf-8")
++    if goal_json is not None:
++        (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++    return batch_dir
++
++
++def _simple_manifest(deps: dict[str, list[str]]) -> str:
++    tasks = {tid: {"depends_on": parents} for tid, parents in deps.items()}
++    return json.dumps({"goal": "test", "tasks": tasks})
++
++
++# ---------- _topo_layers unit tests ----------
++
++
++def test_topo_layers_roots_first():
++    orch = _orch()
++    deps = {"a": None, "b": "a", "c": "b"}
++    layers = orch._topo_layers(deps)
++    assert layers[0] == ["a"]
++    assert layers[1] == ["b"]
++    assert layers[2] == ["c"]
++
++
++def test_topo_layers_multiple_roots_sorted():
++    orch = _orch()
++    deps = {"task-b": None, "task-a": None, "task-c": "task-a"}
++    layers = orch._topo_layers(deps)
++    assert layers[0] == ["task-a", "task-b"]  # sorted
++    assert layers[1] == ["task-c"]
++
++
++# ---------- process_batch topo scheduling ----------
++
++
++def test_roots_run_first_dependents_after_parent_done(tmp_path, monkeypatch):
++    """Roots run in layer 0; dependents run only after their parent is done."""
++    orch = _orch()
++    run_order: list[str] = []
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        run_order.append(td.name)
++        return "done"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    assert run_order.index("task-a") < run_order.index("task-b")
++    assert results["task-a"] == "done"
++    assert results["task-b"] == "done"
++
++
++def test_parent_deferred_blocks_child(tmp_path, monkeypatch):
++    """A child is blocked_on_dependency when its parent is deferred (not done)."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        if td.name == "task-a":
++            return "deferred"
++        return "done"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    assert results["task-a"] == "deferred"
++    assert results["task-b"] == "blocked_on_dependency"
++
++
++def test_parent_error_blocks_child(tmp_path, monkeypatch):
++    """A child is blocked_on_dependency when its parent returns error."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        if td.name == "task-a":
++            return "error"
++        return "done"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    assert results["task-b"] == "blocked_on_dependency"
++
++
++def test_parent_blocked_on_human_gate_blocks_child(tmp_path, monkeypatch):
++    """A child is blocked_on_dependency when parent is blocked_on_human_gate."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        if td.name == "task-a":
++            return "blocked_on_human_gate"
++        return "done"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    assert results["task-b"] == "blocked_on_dependency"
++
++
++def test_transitive_cascade(tmp_path, monkeypatch):
++    """Grandparent deferred → grandchild also blocked_on_dependency (transitive)."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        if td.name == "task-a":
++            return "deferred"
++        # task-b would also be blocked, so process_task shouldn't be called for it
++        return "done"  # pragma: no cover
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"], "task-c": ["task-b"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b", "task-c"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    assert results["task-a"] == "deferred"
++    assert results["task-b"] == "blocked_on_dependency"
++    assert results["task-c"] == "blocked_on_dependency"
++
++
++def test_independent_chains_continue(tmp_path, monkeypatch):
++    """One chain blocked does not stop an independent chain."""
++    orch = _orch()
++    ran: list[str] = []
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        ran.append(td.name)
++        if td.name == "task-x":
++            return "deferred"
++        return "done"
++
++    # Two independent chains: x→y and a→b
++    goal = _simple_manifest(
++        {
++            "task-x": [],
++            "task-y": ["task-x"],
++            "task-a": [],
++            "task-b": ["task-a"],
++        }
++    )
++    batch_dir = _make_batch(tmp_path, ["task-x", "task-y", "task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    # x-chain blocked
++    assert results["task-x"] == "deferred"
++    assert results["task-y"] == "blocked_on_dependency"
++    # a-chain continues
++    assert results["task-a"] == "done"
++    assert results["task-b"] == "done"
++    assert "task-a" in ran
++    assert "task-b" in ran
++
++
++def test_dep_blocked_does_not_invoke_process_task(tmp_path, monkeypatch):
++    """process_task is NOT called for a blocked_on_dependency task."""
++    orch = _orch()
++    called: list[str] = []
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        called.append(td.name)
++        return "deferred"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    orch.process_batch(batch_dir)
++
++    # process_task called for task-a but NOT task-b (blocked)
++    assert "task-a" in called
++    assert "task-b" not in called
++
++
++# ---------- _run_pipeline exit code ----------
++
++
++def test_run_pipeline_dep_blocked_not_exit_1(tmp_path, monkeypatch):
++    """_run_pipeline returns exit code 0 when the only non-done tasks are
++    blocked_on_dependency (not blocked_on_human_gate), matching the deferred behavior."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        if td.name == "task-a":
++            return "deferred"
++        return "done"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    rc = orch._run_pipeline(batch_dir, label="test")
++    assert rc == 0  # dep_blocked alone doesn't cause exit 1
++
++
++def test_run_pipeline_dep_blocked_summary_printed(tmp_path, monkeypatch, capsys):
++    """_run_pipeline prints the blocked_on_dependency summary line."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        if td.name == "task-a":
++            return "deferred"
++        return "done"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    orch._run_pipeline(batch_dir, label="test")
++    captured = capsys.readouterr()
++    assert "blocked_on_dependency" in captured.err
++
++
++# ---------- scheduler passes correct base args ----------
++
++
++def test_dependent_task_receives_parent_branch_as_base(tmp_path, monkeypatch):
++    """process_task for a dependent task gets resolved_base = parent branch and base_is_parent=True."""
++    orch = _orch()
++    received: dict = {}
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        received[td.name] = {"resolved_base": resolved_base, "base_is_parent": base_is_parent}
++        return "done"
++
++    goal = _simple_manifest({"task-a": [], "task-b": ["task-a"]})
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    # Need a real config for branch_prefix. Use a minimal one.
++    (tmp_path / "batch" / ".redteam").mkdir(exist_ok=True)
++    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path / "batch")
++    (tmp_path / "batch" / ".redteam" / "config.toml").write_text(
++        '[project]\nbranch_prefix = "redteam"\n', encoding="utf-8"
++    )
++
++    orch.process_batch(batch_dir)
++
++    # task-a: root task, no parent
++    assert received["task-a"]["base_is_parent"] is False
++    # task-b: dependent on task-a → base is redteam/task-a
++    assert received["task-b"]["base_is_parent"] is True
++    assert received["task-b"]["resolved_base"] == "redteam/task-a"
+diff --git a/.redteam/tests/test_goal_manifest_validation.py b/.redteam/tests/test_goal_manifest_validation.py
+new file mode 100644
+index 0000000..a4101ab
+--- /dev/null
++++ b/.redteam/tests/test_goal_manifest_validation.py
+@@ -0,0 +1,254 @@
++"""Slice A — goal.json manifest schema + up-front fail-closed validation.
++
++Tests that _load_goal_manifest raises on every invalid input and that
++process_batch aborts the whole batch without seeding or running any task
++when the manifest is invalid.
++"""
++
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++
++import pytest
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++
++def _orch():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++# ---------- helpers ----------
++
++
++def _make_batch(tmp_path: Path, task_ids: list[str], goal_json: str | None = None) -> Path:
++    """Create a minimal batch dir with empty task dirs (no state/input)."""
++    batch_dir = tmp_path / "batch"
++    tasks_root = batch_dir / "tasks"
++    for tid in task_ids:
++        (tasks_root / tid).mkdir(parents=True)
++    if goal_json is not None:
++        (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++    return batch_dir
++
++
++# ---------- _load_goal_manifest unit tests ----------
++
++
++def test_malformed_json_raises():
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        bad = dp / "goal.json"
++        bad.write_text("{not valid json", encoding="utf-8")
++        with pytest.raises(ValueError):
++            orch._load_goal_manifest(dp, bad)
++
++
++def test_duplicate_task_id_detected_pre_collapse():
++    """object_pairs_hook detects duplicate 'tasks' keys BEFORE Python's dict collapses them."""
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        (dp / "tasks" / "task-a").mkdir(parents=True)
++        # JSON with duplicate task-a key inside 'tasks'
++        raw = '{"goal": "g", "tasks": {"task-a": {"depends_on": []}, "task-a": {"depends_on": []}}}'
++        goal = dp / "goal.json"
++        goal.write_text(raw, encoding="utf-8")
++        with pytest.raises(ValueError, match="duplicate key"):
++            orch._load_goal_manifest(dp, goal)
++
++
++def test_unknown_depends_on_ref_raises():
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        (dp / "tasks" / "task-a").mkdir(parents=True)
++        data = {"goal": "g", "tasks": {"task-a": {"depends_on": ["nonexistent"]}}}
++        goal = dp / "goal.json"
++        goal.write_text(json.dumps(data), encoding="utf-8")
++        with pytest.raises(ValueError, match="unknown task"):
++            orch._load_goal_manifest(dp, goal)
++
++
++def test_self_dependency_raises():
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        (dp / "tasks" / "task-a").mkdir(parents=True)
++        data = {"goal": "g", "tasks": {"task-a": {"depends_on": ["task-a"]}}}
++        goal = dp / "goal.json"
++        goal.write_text(json.dumps(data), encoding="utf-8")
++        with pytest.raises(ValueError, match="self-dependency"):
++            orch._load_goal_manifest(dp, goal)
++
++
++def test_multi_parent_rejected():
++    """len(depends_on) >= 2 fails closed."""
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        for tid in ("task-a", "task-b", "task-c"):
++            (dp / "tasks" / tid).mkdir(parents=True)
++        data = {
++            "goal": "g",
++            "tasks": {
++                "task-a": {"depends_on": []},
++                "task-b": {"depends_on": []},
++                "task-c": {"depends_on": ["task-a", "task-b"]},
++            },
++        }
++        goal = dp / "goal.json"
++        goal.write_text(json.dumps(data), encoding="utf-8")
++        with pytest.raises(ValueError, match="single-parent"):
++            orch._load_goal_manifest(dp, goal)
++
++
++def test_missing_task_dir_raises():
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        # Only create task-a dir, but manifest references task-b too
++        (dp / "tasks" / "task-a").mkdir(parents=True)
++        data = {
++            "goal": "g",
++            "tasks": {
++                "task-a": {"depends_on": []},
++                "task-b": {"depends_on": ["task-a"]},  # task-b dir doesn't exist
++            },
++        }
++        goal = dp / "goal.json"
++        goal.write_text(json.dumps(data), encoding="utf-8")
++        with pytest.raises(ValueError, match="no on-disk directory"):
++            orch._load_goal_manifest(dp, goal)
++
++
++def test_cycle_detection_raises():
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        for tid in ("task-a", "task-b"):
++            (dp / "tasks" / tid).mkdir(parents=True)
++        data = {
++            "goal": "g",
++            "tasks": {
++                "task-a": {"depends_on": ["task-b"]},
++                "task-b": {"depends_on": ["task-a"]},
++            },
++        }
++        goal = dp / "goal.json"
++        goal.write_text(json.dumps(data), encoding="utf-8")
++        with pytest.raises(ValueError, match="cycle"):
++            orch._load_goal_manifest(dp, goal)
++
++
++def test_ceilings_non_object_raises():
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        (dp / "tasks" / "task-a").mkdir(parents=True)
++        data = {"goal": "g", "ceilings": "not-an-object", "tasks": {"task-a": {"depends_on": []}}}
++        goal = dp / "goal.json"
++        goal.write_text(json.dumps(data), encoding="utf-8")
++        with pytest.raises(ValueError, match="ceilings"):
++            orch._load_goal_manifest(dp, goal)
++
++
++def test_valid_manifest_parses_ok():
++    """A valid single-parent manifest parses without error."""
++    orch = _orch()
++    import tempfile
++
++    with tempfile.TemporaryDirectory() as d:
++        dp = Path(d)
++        for tid in ("task-a", "task-b", "task-c"):
++            (dp / "tasks" / tid).mkdir(parents=True)
++        data = {
++            "goal": "do something",
++            "ceilings": {"max_cost": 10},
++            "tasks": {
++                "task-a": {"depends_on": []},
++                "task-b": {"depends_on": ["task-a"]},
++                "task-c": {"depends_on": ["task-b"]},
++            },
++        }
++        goal = dp / "goal.json"
++        goal.write_text(json.dumps(data), encoding="utf-8")
++        result = orch._load_goal_manifest(dp, goal)
++        assert result["deps"]["task-a"] is None
++        assert result["deps"]["task-b"] == "task-a"
++        assert result["deps"]["task-c"] == "task-b"
++        assert result["ceilings"] == {"max_cost": 10}
++
++
++# ---------- process_batch integration: fail-closed when manifest is invalid ----------
++
++
++def test_process_batch_invalid_manifest_no_state_seeded(tmp_path, monkeypatch):
++    """Invalid goal.json aborts the batch: no task state is seeded, process_task never called."""
++    orch = _orch()
++    process_task_calls: list = []
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: process_task_calls.append(a) or "done")
++
++    batch_dir = _make_batch(tmp_path, ["task-a"], goal_json='{"bad json":')
++    results = orch.process_batch(batch_dir)
++
++    # process_task never invoked
++    assert process_task_calls == []
++    # All entries are error strings
++    for val in results.values():
++        assert val.startswith("error:")
++    # No state.json seeded in any task dir
++    assert not (batch_dir / "tasks" / "task-a" / "state.json").exists()
++
++
++def test_process_batch_absent_manifest_flat_mode(tmp_path, monkeypatch):
++    """No goal.json → flat mode: same task order and process_task invocations as before."""
++    orch = _orch()
++    visited: list[str] = []
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, **kw):
++        visited.append(td.name)
++        return "done"
++
++    batch_dir = _make_batch(tmp_path, ["task-b", "task-a"])
++    # Give each task an input.md so seeding is triggered
++    for tid in ("task-a", "task-b"):
++        (batch_dir / "tasks" / tid / "input.md").write_text("brief", encoding="utf-8")
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    # Both tasks ran (flat mode)
++    assert set(visited) == {"task-a", "task-b"}
++    # Sorted lexicographic order (list_tasks behavior)
++    assert visited == sorted(visited)
++    assert results == {"task-a": "done", "task-b": "done"}
++    # No base_is_parent kwarg passed in flat mode (fake_task accepts **kw and kw is empty)
+diff --git a/.redteam/tests/test_goal_stacked_branching.py b/.redteam/tests/test_goal_stacked_branching.py
+new file mode 100644
+index 0000000..6609c9f
+--- /dev/null
++++ b/.redteam/tests/test_goal_stacked_branching.py
+@@ -0,0 +1,367 @@
++"""Slice A — pin-before-branch ordering, ancestry fail-closed, pull-skip,
++and create_pr parent-branch wiring.
++"""
++
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++
++def _orch():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++# ---------- helpers ----------
++
++
++def _make_state(task_id: str, *, next_phase: str = "plan_outcome") -> dict:
++    return {
++        "task_id": task_id,
++        "mode": "agent-pair",
++        "phase": "created",
++        "phases_completed": [],
++        "next_phase": next_phase,
++        "retries": {},
++        "max_retries_per_phase": 2,
++    }
++
++
++def _setup_task(tmp_path: Path, orch, monkeypatch, task_id: str, **state_extra):
++    task_dir = tmp_path / "batch" / "tasks" / task_id
++    task_dir.mkdir(parents=True)
++    state = _make_state(task_id)
++    state.update(state_extra)
++    (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
++    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
++    return task_dir
++
++
++# ---------- IR-001: fail-closed when existing state mismatches resolved_base ----------
++
++
++def test_existing_state_base_branch_mismatch_fails_closed(monkeypatch, tmp_path):
++    """When a task already has base_branch in state but it doesn't match the
++    scheduler's resolved_base (e.g. previously seeded as flat), process_task
++    must fail closed rather than silently using the stale base."""
++    orch = _orch()
++
++    (tmp_path / ".redteam").mkdir()
++    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
++    # Pre-seed state with a DIFFERENT base_branch than what the scheduler resolved
++    task_dir = _setup_task(
++        tmp_path,
++        orch,
++        monkeypatch,
++        "task-001",
++        base_branch="main",  # stale flat base
++        base_branch_sha="sha_old",
++    )
++
++    outcome = orch.process_task(
++        task_dir,
++        resolved_base="redteam/parent-task",  # scheduler says this
++        base_is_parent=True,
++    )
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert outcome == "error"
++    assert saved["last_failure_reason"] == "base_branch_mismatch"
++    assert "stale" in saved["last_failure_log"] or "mismatch" in saved["last_failure_log"]
++
++
++def test_existing_state_missing_sha_fails_closed(monkeypatch, tmp_path):
++    """When a dependent task already has base_branch matching resolved_base but
++    lacks base_branch_sha (e.g. seeded before SHA freeze guard was introduced),
++    process_task must fail closed."""
++    orch = _orch()
++
++    (tmp_path / ".redteam").mkdir()
++    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
++    # Pre-seed with correct base_branch but NO sha
++    task_dir = _setup_task(
++        tmp_path,
++        orch,
++        monkeypatch,
++        "task-001",
++        base_branch="redteam/parent-task",  # correct base, but no SHA
++    )
++
++    outcome = orch.process_task(
++        task_dir,
++        resolved_base="redteam/parent-task",
++        base_is_parent=True,
++    )
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert outcome == "error"
++    assert saved["last_failure_reason"] == "base_sha_missing"
++
++
++# ---------- pin-before-branch ordering ----------
++
++
++def test_base_branch_pinned_before_ensure_task_branch(monkeypatch, tmp_path):
++    """state['base_branch'] is pinned BEFORE _ensure_task_branch is called,
++    using the resolved_base argument, not live config."""
++    orch = _orch()
++    call_order: list[str] = []
++    received_base: dict = {}
++
++    (tmp_path / ".redteam").mkdir()
++    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
++    task_dir = _setup_task(tmp_path, orch, monkeypatch, "task-001")
++
++    def fake_branch(task_id, repo, branch_prefix, base_branch, **kw):
++        # By the time this is called, state['base_branch'] must already be pinned
++        saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++        call_order.append("ensure_branch")
++        received_base["pinned_before_call"] = saved.get("base_branch")
++        received_base["arg"] = base_branch
++        return f"{branch_prefix}/{task_id}"
++
++    monkeypatch.setattr(orch, "_ensure_task_branch", fake_branch)
++    # Mock git_rev_parse so the SHA recording step succeeds (no real git repo in tmp_path)
++    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "fake_sha_pin_test")
++    # Halt after branch setup by having the first phase runner stop
++    monkeypatch.setitem(
++        orch.PHASE_RUNNERS,
++        "plan_outcome",
++        lambda td, st: {"status": "ask_user", "feedback": "stop", "log": "", "diff": ""},
++    )
++
++    orch.process_task(task_dir, resolved_base="redteam/parent-task", base_is_parent=True)
++
++    # base_branch was pinned in state BEFORE ensure_task_branch was called
++    assert call_order == ["ensure_branch"]
++    assert received_base["pinned_before_call"] == "redteam/parent-task"
++    assert received_base["arg"] == "redteam/parent-task"
++
++
++def test_base_branch_sha_recorded_at_pin_time(monkeypatch, tmp_path):
++    """For dependent tasks, base_branch_sha is recorded at pin time."""
++    orch = _orch()
++
++    (tmp_path / ".redteam").mkdir()
++    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
++    task_dir = _setup_task(tmp_path, orch, monkeypatch, "task-001")
++
++    monkeypatch.setattr(orch, "_ensure_task_branch", lambda tid, repo, bp, bb, **kw: f"{bp}/{tid}")
++    # Mock git_rev_parse to return a known SHA
++    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "abc123")
++    monkeypatch.setitem(
++        orch.PHASE_RUNNERS,
++        "plan_outcome",
++        lambda td, st: {"status": "ask_user", "feedback": "stop", "log": "", "diff": ""},
++    )
++
++    orch.process_task(task_dir, resolved_base="redteam/parent-task", base_is_parent=True)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert saved.get("base_branch_sha") == "abc123"
++
++
++def test_root_task_no_base_branch_sha(monkeypatch, tmp_path):
++    """Root tasks (base_is_parent=False) do NOT record base_branch_sha."""
++    orch = _orch()
++
++    (tmp_path / ".redteam").mkdir()
++    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
++    task_dir = _setup_task(tmp_path, orch, monkeypatch, "task-001")
++
++    monkeypatch.setattr(orch, "_ensure_task_branch", lambda tid, repo, bp, bb, **kw: f"{bp}/{tid}")
++    monkeypatch.setitem(
++        orch.PHASE_RUNNERS,
++        "plan_outcome",
++        lambda td, st: {"status": "ask_user", "feedback": "stop", "log": "", "diff": ""},
++    )
++
++    orch.process_task(task_dir)  # no base_is_parent → root task
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "base_branch_sha" not in saved
++
++
++# ---------- ancestry check ----------
++
++
++def test_ancestry_check_defers_when_branch_wrong_base(monkeypatch, tmp_path):
++    """If the existing task branch does NOT descend from the pinned parent,
++    process_task defers with a clear reason and never deletes the branch."""
++    orch = _orch()
++
++    (tmp_path / ".redteam").mkdir()
++    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
++    task_dir = _setup_task(tmp_path, orch, monkeypatch, "task-001")
++
++    branch_calls: list[list] = []
++
++    def fake_subprocess_run(argv, **kwargs):
++        branch_calls.append(list(argv))
++        if argv[:3] == ["git", "rev-parse", "--verify"]:
++            return SimpleNamespace(returncode=0, stdout="", stderr="")  # branch exists
++        if argv[:2] == ["git", "merge-base"]:
++            return SimpleNamespace(returncode=1, stdout="", stderr="")  # NOT ancestor
++        return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++    monkeypatch.setattr(orch.subprocess, "run", fake_subprocess_run)
++
++    outcome = orch.process_task(
++        task_dir,
++        resolved_base="redteam/parent-task",
++        base_is_parent=True,
++    )
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert outcome == "deferred"
++    assert saved["last_failure_reason"] == "dependent_branch_not_descended_from_parent"
++    assert "parent" in saved["last_failure_log"]
++    # No git branch delete command was issued
++    delete_calls = [c for c in branch_calls if "branch" in c and "-D" in c]
++    assert delete_calls == []
++
++
++def test_ancestry_check_skipped_when_branch_does_not_exist(monkeypatch, tmp_path):
++    """If the task branch doesn't exist yet, no ancestry check is done."""
++    orch = _orch()
++
++    (tmp_path / ".redteam").mkdir()
++    (tmp_path / ".redteam" / "config.toml").write_text('[project]\nbranch_prefix = "redteam"\n', encoding="utf-8")
++    task_dir = _setup_task(tmp_path, orch, monkeypatch, "task-001")
++
++    anc_called = []
++
++    def fake_subprocess_run(argv, **kwargs):
++        if argv[:2] == ["git", "merge-base"]:
++            anc_called.append(argv)
++        if argv[:3] == ["git", "rev-parse", "--verify"]:
++            return SimpleNamespace(returncode=1, stdout="", stderr="")  # branch does NOT exist
++        if argv[:3] == ["git", "stash", "push"]:
++            return SimpleNamespace(returncode=0, stdout="No local changes to save", stderr="")
++        if argv[:3] == ["git", "rev-parse"]:
++            # git_rev_parse for SHA recording
++            return SimpleNamespace(returncode=0, stdout="abc123\n", stderr="")
++        return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++    monkeypatch.setattr(orch.subprocess, "run", fake_subprocess_run)
++    monkeypatch.setitem(
++        orch.PHASE_RUNNERS,
++        "plan_outcome",
++        lambda td, st: {"status": "ask_user", "feedback": "stop", "log": "", "diff": ""},
++    )
++
++    outcome = orch.process_task(task_dir, resolved_base="redteam/parent-task", base_is_parent=True)
++
++    # Did not defer due to ancestry (branch didn't exist)
++    assert anc_called == []
++    assert outcome == "blocked_on_human_gate"  # stopped at ask_user gate
++
++
++# ---------- pull-skip for base_is_parent ----------
++
++
++def test_ensure_task_branch_pull_skipped_when_base_is_parent(monkeypatch, tmp_path):
++    """When base_is_parent=True, the git pull --ff-only is skipped."""
++    orch = _orch()
++    pull_calls: list = []
++
++    def fake_run(argv, **kwargs):
++        if argv[:3] == ["git", "pull", "--ff-only"]:
++            pull_calls.append(argv)
++        if argv[:3] == ["git", "stash", "push"]:
++            return SimpleNamespace(returncode=0, stdout="No local changes to save", stderr="")
++        if argv[:3] == ["git", "rev-parse", "--verify"]:
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++        return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++    monkeypatch.setattr(orch.subprocess, "run", fake_run)
++
++    orch._ensure_task_branch("task-001", tmp_path, base_is_parent=True)
++
++    assert pull_calls == [], "pull should be skipped when base_is_parent=True"
++
++
++def test_ensure_task_branch_pull_issued_when_not_base_is_parent(monkeypatch, tmp_path):
++    """When base_is_parent=False (default), the git pull --ff-only IS issued."""
++    orch = _orch()
++    pull_calls: list = []
++
++    def fake_run(argv, **kwargs):
++        if argv[:3] == ["git", "pull", "--ff-only"]:
++            pull_calls.append(argv)
++        if argv[:3] == ["git", "stash", "push"]:
++            return SimpleNamespace(returncode=0, stdout="No local changes to save", stderr="")
++        if argv[:3] == ["git", "rev-parse", "--verify"]:
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++        return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++    monkeypatch.setattr(orch.subprocess, "run", fake_run)
++
++    orch._ensure_task_branch("task-001", tmp_path, base_is_parent=False)
++
++    assert len(pull_calls) == 1
++
++
++# ---------- create_pr receives parent branch as --base ----------
++
++
++def test_create_pr_run_uses_pinned_base_from_state(monkeypatch, tmp_path):
++    """create_pr.run derives the --base from state via pinned_base_branch(state, repo),
++    not from a hardcoded value. Exercises the actual call-site wiring in run()."""
++    from types import SimpleNamespace
++    import phase_runners.create_pr as create_pr_mod
++
++    parent_branch = "redteam/task-parent"
++    task_dir = tmp_path / "task-child"
++    task_dir.mkdir()
++
++    # Stable SHA — freeze guard should pass
++    state = {
++        "base_branch": parent_branch,
++        "base_branch_sha": "abc123",
++        "branch": "redteam/task-child",
++    }
++
++    captured_prompts: list[str] = []
++
++    # Patch git_rev_parse in _base so freeze guard sees a matching SHA
++    import phase_runners._base as base_mod
++
++    monkeypatch.setattr(base_mod, "git_rev_parse", lambda ref, repo: "abc123")
++
++    # Patch preflight to pass
++    monkeypatch.setattr(create_pr_mod, "_preflight_pr_auth", lambda cwd: None)
++
++    # Patch load_config
++    monkeypatch.setattr(
++        create_pr_mod,
++        "load_config",
++        lambda repo: SimpleNamespace(project=SimpleNamespace(branch_prefix="redteam")),
++    )
++
++    # Patch repo_root
++    monkeypatch.setattr(create_pr_mod, "repo_root", lambda: tmp_path)
++
++    # Capture the prompt via the adapter
++    class FakeAdapter:
++        def invoke(self, *, role, agent, prompt, cwd):
++            captured_prompts.append(prompt)
++            # Return a non-zero code so run() doesn't need pr_url.txt
++            return {"returncode": 1, "stdout": "", "stderr": "no-op"}
++
++    monkeypatch.setattr(create_pr_mod, "get_worker_adapter", lambda state: FakeAdapter())
++
++    create_pr_mod.run(task_dir, state)
++
++    assert captured_prompts, "adapter was never invoked — wiring is broken"
++    prompt = captured_prompts[0]
++    assert f"--base {parent_branch}" in prompt, f"Expected '--base {parent_branch}' in prompt, got: {prompt!r}"
++    assert f"against base branch `{parent_branch}`" in prompt
+diff --git a/.redteam/tests/test_pinned_base_freeze_guard.py b/.redteam/tests/test_pinned_base_freeze_guard.py
+new file mode 100644
+index 0000000..58c3dde
+--- /dev/null
++++ b/.redteam/tests/test_pinned_base_freeze_guard.py
+@@ -0,0 +1,177 @@
++"""Slice A — centralized freeze guard inside pinned_base_branch.
++
++Tests that the accessor raises when the parent tip SHA differs from the recorded
++value, and is a no-op for root tasks (no SHA). Also verifies that the guard is
++exercised from the review_code, write_test, and create_pr call sites, so every
++reader fails closed automatically.
++"""
++
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++from typing import Any
++
++import pytest
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++
++def _base():
++    import _engine
++
++    return _engine.base()
++
++
++def _orch():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++# ---------- accessor unit tests ----------
++
++
++def test_freeze_guard_no_op_for_root_task():
++    """Root tasks have no base_branch_sha → freeze guard is a no-op."""
++    base = _base()
++    # No base_branch_sha → no git call needed, no error
++    result = base.pinned_base_branch({"base_branch": "main"}, Path("/fake-repo"))
++    assert result == "main"
++
++
++def test_freeze_guard_no_op_when_sha_empty_string():
++    """Empty-string base_branch_sha is treated as absent → no-op."""
++    base = _base()
++    result = base.pinned_base_branch({"base_branch": "main", "base_branch_sha": ""}, Path("/fake"))
++    assert result == "main"
++
++
++def test_freeze_guard_passes_when_sha_matches(monkeypatch):
++    """When the live SHA matches the recorded SHA, no error is raised."""
++    base = _base()
++    monkeypatch.setattr(base, "git_rev_parse", lambda ref, repo: "abc123")
++    state: dict[str, Any] = {"base_branch": "redteam/parent", "base_branch_sha": "abc123"}
++    result = base.pinned_base_branch(state, Path("/fake"))
++    assert result == "redteam/parent"
++
++
++def test_freeze_guard_raises_when_sha_moved(monkeypatch):
++    """Raises ValueError when parent tip moved (recorded vs live SHA differ)."""
++    base = _base()
++    monkeypatch.setattr(base, "git_rev_parse", lambda ref, repo: "new_sha_xyz")
++    state: dict[str, Any] = {"base_branch": "redteam/parent", "base_branch_sha": "old_sha_abc"}
++    with pytest.raises(ValueError, match="freeze guard"):
++        base.pinned_base_branch(state, Path("/fake"))
++
++
++def test_freeze_guard_raises_when_rev_parse_fails(monkeypatch):
++    """If git rev-parse fails (branch deleted?), accessor raises fail-closed."""
++    base = _base()
++
++    def _fail(ref, repo):
++        raise RuntimeError("git rev-parse failed (exit 128)")
++
++    monkeypatch.setattr(base, "git_rev_parse", _fail)
++    state: dict[str, Any] = {"base_branch": "redteam/parent", "base_branch_sha": "some_sha"}
++    with pytest.raises(ValueError, match="freeze guard"):
++        base.pinned_base_branch(state, Path("/fake"))
++
++
++# ---------- freeze guard from review_code call site ----------
++
++
++def test_freeze_guard_triggered_from_review_code(monkeypatch):
++    """review_code.run raises when the freeze guard detects a moved parent tip."""
++    import phase_runners.review_code as rc
++
++    # Patch pinned_base_branch on the module to simulate a SHA drift
++    def _frozen(state, repo):
++        raise ValueError("freeze guard: parent branch tip moved")
++
++    monkeypatch.setattr(rc, "pinned_base_branch", _frozen)
++
++    state: dict[str, Any] = {
++        "mode": "agent-pair",
++        "base_branch": "redteam/parent",
++        "base_branch_sha": "old",
++    }
++    result = rc.run(Path("/fake/task"), state)
++    # Should surface as an error (not a crash)
++    assert result["status"] == "error"
++    assert "freeze guard" in result["feedback"]
++
++
++# ---------- freeze guard from write_test call site ----------
++
++
++def test_freeze_guard_triggered_from_write_test(monkeypatch):
++    """write_test.run raises when the freeze guard detects a moved parent tip."""
++    import phase_runners.write_test as wt
++
++    def _frozen(state, repo):
++        raise ValueError("freeze guard: parent branch tip moved")
++
++    monkeypatch.setattr(wt, "pinned_base_branch", _frozen)
++
++    # write_test.run also needs project_config and get_worker_adapter — mock them minimally
++    def _fake_project_config():
++        from types import SimpleNamespace
++
++        return SimpleNamespace(
++            test_dir=".redteam/tests",
++            test_file_glob="test_*.py",
++            test_conventions_file=".redteam/docs/test-conventions.md",
++            verify_command="pytest",
++            verification_allowlist=["pytest"],
++        )
++
++    monkeypatch.setattr(wt, "project_config", _fake_project_config)
++
++    state: dict[str, Any] = {
++        "base_branch": "redteam/parent",
++        "base_branch_sha": "old",
++        "tdd_test_files": None,
++    }
++    result = wt.run(Path("/fake/task"), state)
++    assert result["status"] == "error"
++    assert "freeze guard" in result["feedback"]
++
++
++# ---------- freeze guard from create_pr call site ----------
++
++
++def test_freeze_guard_triggered_from_create_pr(monkeypatch, tmp_path):
++    """create_pr.run propagates the freeze guard error as a phase error."""
++    import phase_runners.create_pr as cp
++
++    def _frozen(state, repo):
++        raise ValueError("freeze guard: parent branch tip moved")
++
++    monkeypatch.setattr(cp, "pinned_base_branch", _frozen)
++
++    # Mock the preflight to pass (focus on the freeze guard)
++    monkeypatch.setattr(cp, "_preflight_pr_auth", lambda cwd: None)
++
++    # Mock load_config to return a minimal object
++    def _fake_load_config(repo):
++        return SimpleNamespace(project=SimpleNamespace(branch_prefix="redteam"))
++
++    monkeypatch.setattr(cp, "load_config", _fake_load_config)
++    monkeypatch.setattr(cp, "repo_root", lambda: tmp_path)
++
++    state: dict[str, Any] = {
++        "base_branch": "redteam/parent",
++        "base_branch_sha": "old",
++        "task_id": "task-child",
++        "branch": "redteam/task-child",
++    }
++    task_dir = tmp_path / "task-child"
++    task_dir.mkdir()
++
++    result = cp.run(task_dir, state)
++    assert result["status"] == "error"
++    assert "freeze guard" in result["feedback"]
+diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
+index f3f083d..3898eb7 100644
+--- a/.redteam/workflows/orchestrator.py
++++ b/.redteam/workflows/orchestrator.py
+@@ -46,6 +46,7 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
+     PhaseResult,
+     compute_branch_changed_paths,
+     extract_verification_commands,
++    git_rev_parse,
+     pinned_base_branch,
+     repo_root,
+     validate_verification_commands,
+@@ -723,23 +724,163 @@ def _route_to_rescue_or_defer(
+     return None
+ 
+ 
++# ---------- goal manifest (optional goal.json at batch root) ----------
++
++
++def _check_no_cycle(deps: dict[str, str | None]) -> None:
++    """Raise ValueError if deps contains a dependency cycle (DFS back-edge detection).
++
++    deps is {task_id: parent_id_or_None}. Single-parent constraint means each node has
++    at most one outgoing edge; a cycle requires a chain A→B→…→A."""
++    WHITE, GRAY, BLACK = 0, 1, 2
++    color: dict[str, int] = {t: WHITE for t in deps}
++
++    def _visit(node: str) -> None:
++        color[node] = GRAY
++        parent = deps.get(node)
++        if parent is not None:
++            state_c = color.get(parent, BLACK)
++            if state_c == GRAY:
++                raise ValueError(f"dependency cycle detected: {node!r} → {parent!r}")
++            if state_c == WHITE:
++                _visit(parent)
++        color[node] = BLACK
++
++    for node in list(deps):
++        if color[node] == WHITE:
++            _visit(node)
++
++
++def _load_goal_manifest(batch_dir: Path, goal_path: Path) -> dict[str, Any]:
++    """Load and validate goal.json. Returns a dict with 'goal', 'ceilings', 'deps'.
++
++    Validation is fail-closed: any error aborts the whole batch (caller must not seed
++    or run any task when this raises). Duplicate task IDs are detected via
++    object_pairs_hook on the raw pair stream before Python's dict collapses them.
++    """
++    try:
++        raw = goal_path.read_text(encoding="utf-8")
++    except OSError as exc:
++        raise ValueError(f"could not read goal.json: {exc}") from exc
++
++    # Duplicate-key detection runs on the raw (key, value) pair stream
++    def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
++        seen: dict[str, Any] = {}
++        for k, v in pairs:
++            if k in seen:
++                raise ValueError(f"duplicate key in goal.json: {k!r}")
++            seen[k] = v
++        return seen
++
++    try:
++        data = json.loads(raw, object_pairs_hook=_pairs_hook)
++    except ValueError:
++        raise  # re-raise: covers both json.JSONDecodeError and our duplicate-key ValueError
++
++    if not isinstance(data, dict):
++        raise ValueError("goal.json must be a JSON object")
++
++    # ceilings: parsed/stored but not enforced (Slice C); must be a JSON object if present
++    ceilings = data.get("ceilings")
++    if ceilings is not None and not isinstance(ceilings, dict):
++        raise ValueError("goal.json 'ceilings' must be a JSON object if present")
++
++    tasks_raw = data.get("tasks")
++    if not isinstance(tasks_raw, dict):
++        raise ValueError("goal.json must have a 'tasks' object")
++    if not tasks_raw:
++        raise ValueError("goal.json 'tasks' must not be empty")
++
++    task_ids = set(tasks_raw.keys())
++    deps: dict[str, str | None] = {}
++
++    for task_id, task_data in tasks_raw.items():
++        if not isinstance(task_data, dict):
++            raise ValueError(f"tasks.{task_id!r} value must be a JSON object")
++
++        depends_on = task_data.get("depends_on", [])
++        if not isinstance(depends_on, list):
++            raise ValueError(f"tasks.{task_id!r}.depends_on must be a list")
++
++        # v1 single-parent rule: two or more parents fails closed
++        if len(depends_on) >= 2:
++            raise ValueError(
++                f"tasks.{task_id!r}.depends_on has {len(depends_on)} entries; "
++                "only single-parent dependencies are supported in v1 (max 1 entry)"
++            )
++
++        if depends_on:
++            parent_id = depends_on[0]
++            if not isinstance(parent_id, str):
++                raise ValueError(f"tasks.{task_id!r}.depends_on[0] must be a string task ID")
++            if parent_id == task_id:
++                raise ValueError(f"tasks.{task_id!r} declares a self-dependency")
++            if parent_id not in task_ids:
++                raise ValueError(f"tasks.{task_id!r}.depends_on references unknown task {parent_id!r}")
++            deps[task_id] = parent_id
++        else:
++            deps[task_id] = None
++
++        # Every manifest task must have a matching on-disk task directory
++        task_dir_check = batch_dir / "tasks" / task_id
++        if not task_dir_check.is_dir():
++            raise ValueError(f"tasks.{task_id!r} has no on-disk directory at {task_dir_check}")
++
++    # Cycle detection
++    _check_no_cycle(deps)
++
++    return {"goal": data.get("goal", ""), "ceilings": ceilings, "deps": deps}
++
++
++def _topo_layers(deps: dict[str, str | None]) -> list[list[str]]:
++    """Return topological layers from a single-parent deps map {task_id: parent_or_None}.
++
++    Roots (no parent) form layer 0; their children form layer 1, etc. Tasks within
++    each layer are sorted to match the list_tasks lexicographic order."""
++    children: dict[str, list[str]] = {t: [] for t in deps}
++    current_layer: list[str] = []
++    for t, p in deps.items():
++        if p is None:
++            current_layer.append(t)
++        else:
++            children[p].append(t)
++
++    layers: list[list[str]] = []
++    while current_layer:
++        layers.append(sorted(current_layer))
++        next_layer: list[str] = []
++        for t in current_layer:
++            next_layer.extend(children.get(t, []))
++        current_layer = next_layer
++    return layers
++
++
+ # ---------- per-task driver ----------
+ 
+ TaskOutcome = Literal[
+     "done",
+     "blocked_on_human_gate",
++    "blocked_on_dependency",
+     "deferred",
+     "error",
+ ]
+ 
+ 
+-def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam", base_branch: str = "main") -> str:
++def _ensure_task_branch(
++    task_id: str,
++    repo: Path,
++    branch_prefix: str = "redteam",
++    base_branch: str = "main",
++    *,
++    base_is_parent: bool = False,
++) -> str:
+     """Ensure we're on the per-task branch `<branch_prefix>/<task_id>` before phases run.
+ 
+     Steps:
+       1. Stash local tracked/untracked changes so branch checkout is not blocked
+       2. Checkout `base_branch` (clean slate per task)
+-      3. Pull --ff-only (best effort; OK if no remote)
++      3. Pull --ff-only origin <base_branch> — SKIPPED when base_is_parent is True
++         (a parent task branch is local-authoritative; pulling would clobber it)
+       4. Create or switch to <branch_prefix>/<task_id>
+       5. Pop the stash back onto the selected task branch
+ 
+@@ -774,12 +915,13 @@ def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam"
+             check=True,
+         )
+ 
+-        subprocess.run(
+-            ["git", "pull", "--ff-only", "origin", base_branch],
+-            cwd=str(repo),
+-            check=False,
+-            capture_output=True,
+-        )
++        if not base_is_parent:
++            subprocess.run(
++                ["git", "pull", "--ff-only", "origin", base_branch],
++                cwd=str(repo),
++                check=False,
++                capture_output=True,
++            )
+ 
+         rev_parse = subprocess.run(
+             ["git", "rev-parse", "--verify", branch],
+@@ -819,18 +961,131 @@ def _ensure_task_branch(task_id: str, repo: Path, branch_prefix: str = "redteam"
+     return branch
+ 
+ 
+-def process_task(task_dir: Path) -> TaskOutcome:
+-    """Drive a single task through PHASE_ORDER until it blocks, errors, or finishes."""
++def process_task(
++    task_dir: Path,
++    *,
++    resolved_base: str | None = None,
++    base_is_parent: bool = False,
++) -> TaskOutcome:
++    """Drive a single task through PHASE_ORDER until it blocks, errors, or finishes.
++
++    resolved_base: pre-resolved base branch (parent task branch for dependents, else
++        None → falls back to cfg.project.base_branch). Passed in by the scheduler from
++        the manifest; process_task never re-reads goal.json itself.
++    base_is_parent: True when base is a parent task branch (local-authoritative).
++        Controls: SHA recording at pin time, ancestry pre-check, pull-skip in
++        _ensure_task_branch.
++    """
+     state = load_state(task_dir)
+     state["mode"] = _mode(state)
++    repo = repo_root()  # pin once; used throughout this function
+ 
+     # Ensure correct branch before any phase runs.
+     # Skip if task is already done or deferred (no work to do).
+     next_phase_check = state.get("next_phase")
+     if next_phase_check not in ("done", "deferred"):
+-        cfg = load_config(repo_root())
++        cfg = load_config(repo)
++
++        # 1. Pin the reviewed-range base branch FIRST, before _ensure_task_branch (#91
++        #    reorder). Pinning must precede the branch-setup so the checkout uses the
++        #    pinned value, not a live-config re-read. A LEGACY in-flight task already past
++        #    a writable phase with no pin FAILS CLOSED rather than backfilling from the
++        #    current config (which the worker may already have moved).
++        if "base_branch" not in state:
++            if _writable_phase_started(state, task_dir):
++                state["last_failure_reason"] = "unpinned_base_branch"
++                state["last_failure_log"] = (
++                    "state.base_branch was never pinned and a writable phase has already run; "
++                    "refusing to derive the reviewed range from live config (the worker could "
++                    "have moved it). Start this task fresh."
++                )
++                state["next_phase"] = "deferred"
++                save_state(task_dir, state)
++                return "error"
++            _effective_base = resolved_base if resolved_base is not None else cfg.project.base_branch
++            state["base_branch"] = _effective_base
++            # For dependent tasks: record parent tip SHA for the centralized freeze guard
++            if base_is_parent:
++                try:
++                    state["base_branch_sha"] = git_rev_parse(state["base_branch"], repo)
++                except RuntimeError as _sha_exc:
++                    state["last_failure_reason"] = "base_sha_failed"
++                    state["last_failure_log"] = f"could not record parent branch SHA for freeze guard: {_sha_exc!r}"
++                    state["next_phase"] = "deferred"
++                    save_state(task_dir, state)
++                    return "error"
++            save_state(task_dir, state)
++        elif base_is_parent:
++            # Existing state for a dependent task: verify it is consistent with the
++            # scheduler's resolved parent base. A previously-seeded flat task (or one
++            # manually pre-seeded with a different base) must not silently run against
++            # the wrong base or bypass the SHA freeze guard — fail closed in both cases.
++            if state["base_branch"] != resolved_base:
++                state["last_failure_reason"] = "base_branch_mismatch"
++                state["last_failure_log"] = (
++                    f"state.base_branch={state['base_branch']!r} does not match the "
++                    f"scheduler-resolved parent base {resolved_base!r}. The task may have "
++                    "been previously started flat or pre-seeded with a different base. "
++                    "Refusing to continue — resolve the mismatch manually."
++                )
++                state["next_phase"] = "deferred"
++                save_state(task_dir, state)
++                return "error"
++            if "base_branch_sha" not in state:
++                state["last_failure_reason"] = "base_sha_missing"
++                state["last_failure_log"] = (
++                    f"state.base_branch_sha is absent for dependent task with parent base "
++                    f"{state['base_branch']!r}. The SHA freeze guard cannot be enforced. "
++                    "Refusing to continue — start this task fresh."
++                )
++                state["next_phase"] = "deferred"
++                save_state(task_dir, state)
++                return "error"
++
++        # 2. Ancestry check for dependent tasks (every start/resume): if the task branch
++        #    already exists, it must descend from the pinned parent. Never auto-delete.
++        if base_is_parent:
++            _tb = f"{cfg.project.branch_prefix}/{task_dir.name}"
++            _vp = subprocess.run(
++                ["git", "rev-parse", "--verify", _tb],
++                cwd=str(repo),
++                capture_output=True,
++                check=False,
++            )
++            if _vp.returncode == 0:
++                _anc = subprocess.run(
++                    ["git", "merge-base", "--is-ancestor", state["base_branch"], _tb],
++                    cwd=str(repo),
++                    capture_output=True,
++                    check=False,
++                )
++                if _anc.returncode != 0:
++                    state["last_failure_reason"] = "dependent_branch_not_descended_from_parent"
++                    state["last_failure_log"] = (
++                        f"task branch {_tb!r} does not descend from pinned parent "
++                        f"{state['base_branch']!r}. The branch was not deleted — resolve manually."
++                    )
++                    state["next_phase"] = "deferred"
++                    save_state(task_dir, state)
++                    return "deferred"
++
++        # 3. Switch to / create the task branch using the pinned base
+         try:
+-            branch = _ensure_task_branch(task_dir.name, repo_root(), cfg.project.branch_prefix, cfg.project.base_branch)
++            if base_is_parent:
++                branch = _ensure_task_branch(
++                    task_dir.name,
++                    repo,
++                    cfg.project.branch_prefix,
++                    state["base_branch"],
++                    base_is_parent=True,
++                )
++            else:
++                branch = _ensure_task_branch(
++                    task_dir.name,
++                    repo,
++                    cfg.project.branch_prefix,
++                    state["base_branch"],
++                )
+             state["branch"] = branch
+             save_state(task_dir, state)
+         except (subprocess.CalledProcessError, RuntimeError) as e:
+@@ -847,27 +1102,6 @@ def process_task(task_dir: Path) -> TaskOutcome:
+             save_state(task_dir, state)
+             return "error"
+ 
+-        # Pin the reviewed-range base branch ONCE, pre-worker (#91). Every per-task
+-        # consumer — the review diff base, the committed-range / changed-paths helpers,
+-        # the PR base — reads this pinned value (via pinned_base_branch) instead of live
+-        # config, so a worker that edits .redteam/config.toml [project].base_branch mid-task
+-        # cannot move the reviewed range or make the PR base differ from it. A LEGACY
+-        # in-flight task already past a writable phase with no pin FAILS CLOSED rather than
+-        # backfilling from the current config (which the worker may already have moved).
+-        if "base_branch" not in state:
+-            if _writable_phase_started(state, task_dir):
+-                state["last_failure_reason"] = "unpinned_base_branch"
+-                state["last_failure_log"] = (
+-                    "state.base_branch was never pinned and a writable phase has already run; "
+-                    "refusing to derive the reviewed range from live config (the worker could "
+-                    "have moved it). Start this task fresh."
+-                )
+-                state["next_phase"] = "deferred"
+-                save_state(task_dir, state)
+-                return "error"
+-            state["base_branch"] = cfg.project.base_branch
+-            save_state(task_dir, state)
+-
+         fm_tier, fm_paths, fm_mode = _parse_input_frontmatter(task_dir)
+         is_fresh_task = not state.get("phases_completed")
+ 
+@@ -1114,9 +1348,9 @@ def process_task(task_dir: Path) -> TaskOutcome:
+         # lighter review/gates already taken can't be retrofitted mid-run; that
+         # auto-escalation is a separate, deferred feature).
+         if phase == "create_pr" and "tier" in state:
+-            cfg = load_config(repo_root())
++            cfg = load_config(repo)
+             try:
+-                effective = resolve_tier(cfg, state["tier"], _changed_paths(repo_root(), pinned_base_branch(state)))
++                effective = resolve_tier(cfg, state["tier"], _changed_paths(repo, pinned_base_branch(state, repo)))
+             except ValueError as e:
+                 state["last_failure_reason"] = "tier_resolution_failed"
+                 state["last_failure_log"] = str(e)
+@@ -1343,22 +1577,74 @@ def _seed_state(task_dir: Path) -> None:
+     save_state(task_dir, state)
+ 
+ 
++def _run_one_task(task_dir: Path, **kwargs: Any) -> str:
++    """Seed-if-needed and run a single task dir. Returns the TaskOutcome string or
++    an error string. Extracted so both the flat and the topo-layered schedulers share
++    the same seeding + exception-capture logic."""
++    if not (task_dir / "state.json").is_file() and not (task_dir / "input.md").is_file():
++        return "no_input_md"
++    try:
++        if not (task_dir / "state.json").is_file():
++            _seed_state(task_dir)
++        return process_task(task_dir, **kwargs)
++    except Exception as e:  # surfaced to user via status report
++        return f"error: {e!r}"
++
++
+ def process_batch(batch_dir: Path) -> dict[str, str]:
++    """Run all tasks in the batch.
++
++    If an optional `goal.json` manifest is present at batch_dir/goal.json, it is
++    loaded and validated BEFORE any task state is seeded or any task runs. Any
++    validation error aborts the whole batch (fail-closed, no seeding). When the
++    manifest is absent, behavior is byte-for-byte identical to the original flat mode.
++    """
+     results: dict[str, str] = {}
+-    for task_dir in list_tasks(batch_dir):
+-        # A task dir with neither state.json nor input.md is not initializable.
+-        if not (task_dir / "state.json").is_file() and not (task_dir / "input.md").is_file():
+-            results[task_dir.name] = "no_input_md"
+-            continue
++
++    # Optional goal manifest
++    goal_path = batch_dir / "goal.json"
++    if goal_path.is_file():
+         try:
+-            # Auto-seed from the template on first run when a brief exists. Kept
+-            # inside the try so a corrupt template fails this task only, not the
+-            # whole batch.
+-            if not (task_dir / "state.json").is_file():
+-                _seed_state(task_dir)
+-            results[task_dir.name] = process_task(task_dir)
+-        except Exception as e:  # surfaced to user via status report
+-            results[task_dir.name] = f"error: {e!r}"
++            manifest = _load_goal_manifest(batch_dir, goal_path)
++        except ValueError as exc:
++            # Fail closed: abort the entire batch without seeding or running anything
++            for task_dir in list_tasks(batch_dir):
++                results[task_dir.name] = f"error: {exc!r}"
++            return results
++
++        cfg = load_config(repo_root())
++        deps = manifest["deps"]  # {task_id: parent_id_or_None}
++        tasks_root = batch_dir / "tasks"
++
++        for layer in _topo_layers(deps):
++            for task_id in layer:
++                task_dir = tasks_root / task_id
++                parent_id = deps.get(task_id)
++
++                # Cascade: skip if parent is not done
++                if parent_id is not None:
++                    if results.get(parent_id) != "done":
++                        results[task_id] = "blocked_on_dependency"
++                        continue
++
++                # Determine resolved base and base_is_parent signal for this task
++                if parent_id is not None:
++                    resolved_base = f"{cfg.project.branch_prefix}/{parent_id}"
++                    base_is_parent = True
++                else:
++                    resolved_base = cfg.project.base_branch
++                    base_is_parent = False
++
++                results[task_id] = _run_one_task(
++                    task_dir,
++                    resolved_base=resolved_base,
++                    base_is_parent=base_is_parent,
++                )
++        return results
++
++    # Flat mode (no manifest) — byte-for-byte identical to the original behavior
++    for task_dir in list_tasks(batch_dir):
++        results[task_dir.name] = _run_one_task(task_dir)
+     return results
+ 
+ 
+@@ -1409,6 +1695,7 @@ def _run_pipeline(batch_dir: Path, *, label: str) -> int:
+     _print_results(results)
+     blocked = [n for n, s in results.items() if s == "blocked_on_human_gate"]
+     deferred = [n for n, s in results.items() if s == "deferred"]
++    dep_blocked = [n for n, s in results.items() if s == "blocked_on_dependency"]
+     if blocked:
+         print()
+         print(
+@@ -1421,6 +1708,12 @@ def _run_pipeline(batch_dir: Path, *, label: str) -> int:
+             f"⚠  {len(deferred)} task(s) moved to deferred_requirements. Inspect their state.json and decide manually.",
+             file=sys.stderr,
+         )
++    if dep_blocked:
++        print()
++        print(
++            f"⏭  {len(dep_blocked)} task(s) skipped (blocked_on_dependency — parent not done).",
++            file=sys.stderr,
++        )
+     return 0 if not blocked else 1
+ 
+ 
+diff --git a/.redteam/workflows/phase_runners/_base.py b/.redteam/workflows/phase_runners/_base.py
+index 513ab20..314240e 100644
+--- a/.redteam/workflows/phase_runners/_base.py
++++ b/.redteam/workflows/phase_runners/_base.py
+@@ -322,19 +322,54 @@ def compute_repo_diff(cwd: Path | None = None) -> str:
+     return proc.stdout
+ 
+ 
+-def pinned_base_branch(state: dict[str, Any]) -> str:
++def git_rev_parse(ref: str, repo: Path) -> str:
++    """Return the full SHA of a git ref. Raises RuntimeError on failure (ref not found or git error).
++    Used by the orchestrator pin step and the freeze guard inside `pinned_base_branch`."""
++    proc = subprocess.run(
++        ["git", "rev-parse", ref],
++        cwd=str(repo),
++        capture_output=True,
++        text=True,
++        encoding="utf-8",
++        check=False,
++    )
++    if proc.returncode != 0:
++        raise RuntimeError(f"git rev-parse {ref!r} failed (exit {proc.returncode})")
++    return proc.stdout.strip()
++
++
++def pinned_base_branch(state: dict[str, Any], repo: Path) -> str:
+     """The reviewed-range base branch PINNED at task-branch creation (#91), read by
+     every per-task consumer instead of live config so a mid-task edit to config.toml's
+     `[project].base_branch` can't move the reviewed range or the PR base. Fail closed:
+     raise if the pin is absent — the orchestrator pins it before any writable phase and
+     fails closed for legacy unpinned state, so a missing pin here is a contract
+-    violation, never a silent fall back to (possibly worker-moved) live config."""
++    violation, never a silent fall back to (possibly worker-moved) live config.
++
++    Centralized freeze guard: when `state["base_branch_sha"]` is recorded (dependent
++    tasks only), re-resolves the live parent branch tip and raises if it moved. Root
++    tasks (no recorded SHA) skip the guard — base is a config branch, no freeze needed.
++    """
+     base = state.get("base_branch")
+     if not isinstance(base, str) or not base:
+         raise ValueError(
+             "state.base_branch is not pinned; refusing to derive the reviewed range from "
+             "live config (#91). The orchestrator pins it before any writable phase runs."
+         )
++    sha = state.get("base_branch_sha")
++    if isinstance(sha, str) and sha:
++        try:
++            live_sha = git_rev_parse(base, repo)
++        except RuntimeError as exc:
++            raise ValueError(
++                f"freeze guard: could not re-resolve parent branch {base!r} to verify its tip: {exc}"
++            ) from exc
++        if live_sha != sha:
++            raise ValueError(
++                f"freeze guard: parent branch {base!r} tip moved from {sha!r} to {live_sha!r} "
++                "after this task was pinned (amended or force-pushed). "
++                "Do NOT proceed — the reviewed range and the PR base are no longer consistent."
++            )
+     return base
+ 
+ 
+diff --git a/.redteam/workflows/phase_runners/create_pr.py b/.redteam/workflows/phase_runners/create_pr.py
+index ca0172d..e1aad48 100644
+--- a/.redteam/workflows/phase_runners/create_pr.py
++++ b/.redteam/workflows/phase_runners/create_pr.py
+@@ -164,7 +164,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+ 
+     # #91: the PR base is the per-task PINNED base, not live config — so a worker that
+     # edited config.toml's base_branch can't make the PR base differ from the reviewed range.
+-    prompt = _pr_author_prompt(task_id, task_dir, branch, pinned_base_branch(state))
++    try:
++        _base = pinned_base_branch(state, rr)
++    except ValueError as exc:
++        msg = str(exc)
++        return PhaseResult(status="error", feedback=msg, log=msg, diff=compute_repo_diff(cwd=rr))
++    prompt = _pr_author_prompt(task_id, task_dir, branch, _base)
+ 
+     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+     diff = compute_repo_diff(cwd=rr)
+diff --git a/.redteam/workflows/phase_runners/implement.py b/.redteam/workflows/phase_runners/implement.py
+index 0f5beca..73ce4f4 100644
+--- a/.redteam/workflows/phase_runners/implement.py
++++ b/.redteam/workflows/phase_runners/implement.py
+@@ -169,7 +169,7 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
+     def _in_task_dir(p: str) -> bool:
+         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
+ 
+-    base_branch = pinned_base_branch(state)
++    base_branch = pinned_base_branch(state, cwd)
+     new_untracked = untracked_files(cwd) - before_untracked
+     seen: set[str] = set()
+     to_stage: list[str] = []
+@@ -268,7 +268,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
+ 
+     rr = repo_root()
+-    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
++    base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
+     # Snapshot untracked files BEFORE the worker runs so the commit step can stage
+     # exactly what it creates (current − before), never a pre-existing untracked file.
+     try:
+@@ -387,7 +387,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
+ 
+     rr = repo_root()
+-    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
++    base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
+     # Snapshot + validate the verify command BEFORE the implementer runs, so a
+     # same-round edit to config.toml's verify_command cannot self-neuter the
+     # gate (IR-001). The agent-pair path snapshots at plan time for the same
+diff --git a/.redteam/workflows/phase_runners/review_code.py b/.redteam/workflows/phase_runners/review_code.py
+index cec454a..85b5f91 100644
+--- a/.redteam/workflows/phase_runners/review_code.py
++++ b/.redteam/workflows/phase_runners/review_code.py
+@@ -40,7 +40,12 @@ def _code_review_prompt(task_dir: Path, base_branch: str) -> str:
+ 
+ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     if state.get("mode") == "agent-pair":
+-        base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
++        rr = repo_root()
++        try:
++            base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
++        except ValueError as exc:
++            msg = str(exc)
++            return PhaseResult(status="error", feedback=msg, log=msg, diff=compute_repo_diff(cwd=rr))
+         diff = compute_repo_diff(cwd=repo_root())
+         review_path = task_dir / "code_review.md"
+ 
+diff --git a/.redteam/workflows/phase_runners/write_test.py b/.redteam/workflows/phase_runners/write_test.py
+index 62a6ba0..cf3afc9 100644
+--- a/.redteam/workflows/phase_runners/write_test.py
++++ b/.redteam/workflows/phase_runners/write_test.py
+@@ -99,7 +99,11 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
+ 
+     rr = repo_root()
+-    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
++    try:
++        base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
++    except ValueError as exc:
++        msg = str(exc)
++        return PhaseResult(status="error", feedback=msg, log=msg, diff="")
+     # Shape-validate the persisted manifest (path-injection defense, existence-INDEPENDENT
+     # so an owned-but-deleted test still validates) BEFORE invoking the worker.
+     try:

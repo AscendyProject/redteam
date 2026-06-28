@@ -322,19 +322,54 @@ def compute_repo_diff(cwd: Path | None = None) -> str:
     return proc.stdout
 
 
-def pinned_base_branch(state: dict[str, Any]) -> str:
+def git_rev_parse(ref: str, repo: Path) -> str:
+    """Return the full SHA of a git ref. Raises RuntimeError on failure (ref not found or git error).
+    Used by the orchestrator pin step and the freeze guard inside `pinned_base_branch`."""
+    proc = subprocess.run(
+        ["git", "rev-parse", ref],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git rev-parse {ref!r} failed (exit {proc.returncode})")
+    return proc.stdout.strip()
+
+
+def pinned_base_branch(state: dict[str, Any], repo: Path) -> str:
     """The reviewed-range base branch PINNED at task-branch creation (#91), read by
     every per-task consumer instead of live config so a mid-task edit to config.toml's
     `[project].base_branch` can't move the reviewed range or the PR base. Fail closed:
     raise if the pin is absent — the orchestrator pins it before any writable phase and
     fails closed for legacy unpinned state, so a missing pin here is a contract
-    violation, never a silent fall back to (possibly worker-moved) live config."""
+    violation, never a silent fall back to (possibly worker-moved) live config.
+
+    Centralized freeze guard: when `state["base_branch_sha"]` is recorded (dependent
+    tasks only), re-resolves the live parent branch tip and raises if it moved. Root
+    tasks (no recorded SHA) skip the guard — base is a config branch, no freeze needed.
+    """
     base = state.get("base_branch")
     if not isinstance(base, str) or not base:
         raise ValueError(
             "state.base_branch is not pinned; refusing to derive the reviewed range from "
             "live config (#91). The orchestrator pins it before any writable phase runs."
         )
+    sha = state.get("base_branch_sha")
+    if isinstance(sha, str) and sha:
+        try:
+            live_sha = git_rev_parse(base, repo)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"freeze guard: could not re-resolve parent branch {base!r} to verify its tip: {exc}"
+            ) from exc
+        if live_sha != sha:
+            raise ValueError(
+                f"freeze guard: parent branch {base!r} tip moved from {sha!r} to {live_sha!r} "
+                "after this task was pinned (amended or force-pushed). "
+                "Do NOT proceed — the reviewed range and the PR base are no longer consistent."
+            )
     return base
 
 

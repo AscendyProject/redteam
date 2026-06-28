@@ -99,7 +99,11 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     prompt = build_prompt_with_feedback(base, state.get("last_failure_log"))
 
     rr = repo_root()
-    base_branch = pinned_base_branch(state)  # #91: pinned pre-worker, not live config
+    try:
+        base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
+    except ValueError as exc:
+        msg = str(exc)
+        return PhaseResult(status="error", feedback=msg, log=msg, diff="")
     # Shape-validate the persisted manifest (path-injection defense, existence-INDEPENDENT
     # so an owned-but-deleted test still validates) BEFORE invoking the worker.
     try:

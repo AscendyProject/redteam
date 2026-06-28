@@ -164,7 +164,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     # #91: the PR base is the per-task PINNED base, not live config — so a worker that
     # edited config.toml's base_branch can't make the PR base differ from the reviewed range.
-    prompt = _pr_author_prompt(task_id, task_dir, branch, pinned_base_branch(state))
+    try:
+        _base = pinned_base_branch(state, rr)
+    except ValueError as exc:
+        msg = str(exc)
+        return PhaseResult(status="error", feedback=msg, log=msg, diff=compute_repo_diff(cwd=rr))
+    prompt = _pr_author_prompt(task_id, task_dir, branch, _base)
 
     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)

@@ -37,14 +37,15 @@ def _base_mod():
 
 def test_pinned_base_branch_returns_the_pin():
     base = _base_mod()
-    assert base.pinned_base_branch({"base_branch": "develop"}) == "develop"
+    # Pass repo=Path("/fake") — no base_branch_sha in state, so freeze guard is a no-op
+    assert base.pinned_base_branch({"base_branch": "develop"}, Path("/fake")) == "develop"
 
 
 def test_pinned_base_branch_fails_closed_when_absent_or_invalid():
     base = _base_mod()
     for bad in ({}, {"base_branch": ""}, {"base_branch": None}, {"base_branch": 123}):
         with pytest.raises(ValueError, match="base_branch is not pinned"):
-            base.pinned_base_branch(bad)
+            base.pinned_base_branch(bad, Path("/fake"))
 
 
 def test_writable_phase_started_counts_any_signal(tmp_path):
