@@ -1,0 +1,389 @@
+diff --git a/.redteam/batches/fix-112-untracked-baseline/tasks/task-001-untracked-baseline-pin/input.md b/.redteam/batches/fix-112-untracked-baseline/tasks/task-001-untracked-baseline-pin/input.md
+new file mode 100644
+index 0000000..f02441d
+--- /dev/null
++++ b/.redteam/batches/fix-112-untracked-baseline/tasks/task-001-untracked-baseline-pin/input.md
+@@ -0,0 +1,98 @@
++# Pin the implement untracked baseline once per task (#112)
++
++## Goal
++A NEW file the implementer creates in an `implement` round must never be permanently
++masked out of the committed review range when the orchestrator process is interrupted
++(kill / detach / monitor relaunch / crash) between the worker creating the file and the
++WIP commit. After the fix, a restart re-enters `implement`, re-attributes the
++task's own previously-created-but-uncommitted file, commits it, and the integrity gate
++(#50) passes — while a user's genuine pre-task untracked scratch is still excluded.
++
++## What to build
++Today `implement._run_agent_pair` (and the TDD `_run_implement` path) capture
++`before_untracked = untracked_files(rr)` **fresh at the start of every round**, right
++before invoking the worker. `_commit_worker_diff` then stages
++`new_untracked = current_untracked - before_untracked`. This per-round re-capture
++conflates two different things:
++- the user's pre-existing untracked scratch (must STAY excluded), and
++- a file *this task's own implementer* created in a PRIOR round that never got committed
++  because the process died before `_commit_worker_diff` ran.
++
++After a restart the latter is already in the tree, lands in `before_untracked`, and is
++masked out of `new_untracked` forever. The integrity gate then correctly flags it as a
++stray uncommitted scope file and fails the phase — but the harness owns commits, not the
++implementer, so every retry re-captures the same masking baseline and re-defers. The
++task dead-ends at `deferred` with "commit these" feedback the implementer is
++structurally unable to satisfy.
++
++Fix (per the issue): capture the untracked baseline **once per task, at first
++`implement` entry, and persist it in `state.json`** (e.g.
++`state["implement_untracked_baseline"]`, stored as a sorted list since JSON has no set),
++instead of re-capturing it live each round. On every subsequent round / after a restart,
++LOAD the persisted baseline instead of re-snapshotting. Then
++`new_untracked = current_untracked - persisted_baseline` correctly attributes everything
++the task created across all rounds and across a restart, while still excluding the user's
++genuine pre-task scratch. Apply to BOTH implement paths (agent-pair and TDD) via a single
++shared helper so the two cannot drift.
++
++## Constraints
++- **Security boundary — touches the reviewed-range integrity contract (cf. #50/#91).
++  plan_review FIRST before any code.**
++- Engine stays project-agnostic and stdlib-only (zero runtime deps). No project/stack
++  fingerprints in `.redteam/workflows/`.
++- Preserve the existing exclusions that already have tests: the task-dir scratch filter
++  (`_in_task_dir`), GITIGNORED files (`--exclude-standard`), and a user's pre-existing
++  untracked scratch must all keep behaving exactly as before
++  (`test_pre_existing_untracked_is_not_swept_into_the_commit` must stay green).
++- The baseline must be captured at the FIRST implement entry only — once set in
++  `state.json`, later rounds must not overwrite it (idempotent set-once).
++- Consider the trust model: the worker has Write/Bash and runs every round. The baseline
++  is consumed each round from `state.json`. Spell out in the plan whether a worker that
++  mutates `state.json` between rounds could poison the baseline (mask its own new file
++  out of the reviewed range), and if so, how the fix stays fail-closed against that —
++  mirror the #91/IR-006 "pin a pre-worker snapshot the worker can't move" discipline.
++- Legacy in-flight tasks (state.json predating this key) must fail closed or degrade
++  safely, not crash — match how the existing `verify_allowlist`-missing legacy branch is
++  handled.
++
++## Out of scope
++- The complementary idea in the issue (have the harness auto-stage stray untracked files
++  that fall within outcome.md's Affected files) — NOT this task; keep the fix to the
++  baseline-pin.
++- #109 (worker timeout) — separate interrupt-robustness bug, do not touch.
++- The known by-name-diff limitation for a pre-existing untracked file that is later
++  modified in place (documented in `_commit_worker_diff`'s docstring) — unchanged.
++
++## Affected files
++- `.redteam/workflows/phase_runners/implement.py` — the two `before_untracked =
++  untracked_files(rr)` capture sites (agent-pair ~L275, TDD ~L412) and the
++  `_commit_worker_diff` signature/usage at ~L321 / ~L436. Likely a new small helper to
++  get-or-set the persisted baseline.
++- Possibly `.redteam/workflows/phase_runners/_base.py` if the get-or-set helper belongs
++  with the other shared git/state helpers (`untracked_files` lives there).
++- New/extended test file under `.redteam/tests/` for the regression.
++
++## Verification
++- `bash .redteam/scripts/verify.sh` (ruff check + ruff format --check + full pytest)
++  stays green; the current suite must not regress.
++- A new regression test reproduces the issue deterministically with REAL git (only the
++  worker + verify stubbed, in the style of the existing implement tests): a file left
++  untracked at round start (simulating a prior interrupted round that this task created)
++  is committed into the range on the next round and the integrity gate passes — i.e. it
++  appears in the committed `base...HEAD` range, NOT deferred.
++- A test asserting the inverse still holds: a user's genuine pre-existing untracked
++  scratch (NOT created by this task — i.e. present before the persisted baseline was set)
++  stays excluded from the commit.
++- A test asserting set-once idempotency: the baseline persisted on the first round is not
++  overwritten on a later round even though the live untracked set has changed.
++
++## Risks
++- Baseline poisoning via worker-mutated `state.json` (see Constraints) — the plan must
++  resolve whether this is a real hole and pick a fail-closed design; the human will
++  weigh the chosen approach at the gate.
++- This very fix is dogfooded through `implement`, which today carries the #112 bug, so
++  the dogfood run itself may hit the dead-end on a new test file across an interrupted
++  round (worked around in prior slices via a manual commit + hand-advance). That is an
++  operational note for the run, not a change to the fix's scope.
++- Exact line numbers above are from the current `main` and may shift; the planner/
++  implementer should re-locate by symbol, not line.
+diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
+index 2d62f1e..7386648 100644
+--- a/.redteam/workflows/orchestrator.py
++++ b/.redteam/workflows/orchestrator.py
+@@ -51,8 +51,10 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
+     extract_verification_commands,
+     git_rev_parse,
+     incomplete_briefs,
++    persist_state,
+     pinned_base_branch,
+     repo_root,
++    utc_now,
+     validate_verification_commands,
+ )
+ from adapters import (  # type: ignore[import-not-found]  # noqa: E402
+@@ -155,10 +157,6 @@ REVIEWER_PHASES: frozenset[str] = frozenset({"plan_review", "review_code"})
+ # ---------- state I/O ----------
+ 
+ 
+-def utc_now() -> str:
+-    return datetime.now(timezone.utc).isoformat()
+-
+-
+ def load_state(task_dir: Path) -> dict[str, Any]:
+     state_path = task_dir / "state.json"
+     if not state_path.exists():
+@@ -175,14 +173,13 @@ def load_state(task_dir: Path) -> dict[str, Any]:
+ 
+ 
+ def save_state(task_dir: Path, state: dict[str, Any]) -> None:
+-    state["updated_at"] = utc_now()
+-    payload = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
+-    tmp = task_dir / "state.json.tmp"
+-    tmp.write_text(payload, encoding="utf-8")
+-    tmp.replace(task_dir / "state.json")
+-    # state.json is the source of truth and is now durably written. progress.md is
+-    # a best-effort human-facing mirror (#49) — a rendering error must NEVER break a
+-    # phase transition, so it runs after persistence and swallows everything.
++    # Atomic state.json write (delegates to the shared persist_state helper so the
++    # implement runners can flush the untracked baseline with the same logic without
++    # going through the orchestrator). state.json is the source of truth and is now
++    # durably written. progress.md is a best-effort human-facing mirror (#49) — a
++    # rendering error must NEVER break a phase transition, so it runs after
++    # persistence and swallows everything.
++    persist_state(task_dir, state)
+     try:
+         _write_progress(task_dir, state)
+     except Exception:  # noqa: BLE001 — progress.md is non-critical; never fail a transition
+diff --git a/.redteam/workflows/phase_runners/_base.py b/.redteam/workflows/phase_runners/_base.py
+index 3e0f8bf..330b8a9 100644
+--- a/.redteam/workflows/phase_runners/_base.py
++++ b/.redteam/workflows/phase_runners/_base.py
+@@ -16,6 +16,7 @@ import shlex
+ import subprocess
+ import sys
+ import time
++from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any, Literal, NotRequired, TypedDict
+ 
+@@ -769,3 +770,60 @@ def claude_model_for_role(state: dict, role: str) -> str | None:
+     if model == "codex":
+         return None
+     return model
++
++
++def utc_now() -> str:
++    """Current UTC time as an ISO-8601 string. Single monkeypatchable symbol shared
++    by persist_state and orchestrator.save_state so the parity test can fix the clock."""
++    return datetime.now(timezone.utc).isoformat()
++
++
++def persist_state(task_dir: Path, state: dict[str, Any]) -> None:
++    """Atomic state.json write — the pure-persistence half of save_state.
++
++    Sets ``state["updated_at"]`` to the current UTC time and atomically replaces
++    ``task_dir/state.json`` via a .tmp rename. Does NOT render progress.md —
++    progress.md is an orchestrator-only concern (operator surface + best-effort
++    swallow). Shared by the implement runners so they can durably flush the
++    untracked baseline BEFORE the worker runs (#112), independent of the
++    orchestrator's full save_state path.
++    """
++    state["updated_at"] = utc_now()
++    payload = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
++    tmp = task_dir / "state.json.tmp"
++    tmp.write_text(payload, encoding="utf-8")
++    tmp.replace(task_dir / "state.json")
++
++
++def get_or_set_untracked_baseline(state: dict[str, Any], cwd: Path, *, _untracked_fn: Any = None) -> set[str]:
++    """Set-once read-or-snapshot of ``state["implement_untracked_baseline"]``.
++
++    **Key-present (set-once path):** if ``state["implement_untracked_baseline"]``
++    is already a ``list``, returns it as a ``set`` WITHOUT calling
++    ``untracked_files`` and WITHOUT mutating the stored value. This is the
++    authoritative set-once gate — no prior-run signal (implement_round_count,
++    phases_completed, verification.last_run_at, etc.) is consulted; the sole
++    criterion is key presence as a list.
++
++    **Key-absent (first-entry path):** calls ``untracked_files(cwd)`` exactly
++    once, stores the sorted ``list[str]`` back into
++    ``state["implement_untracked_baseline"]``, and returns the matching set.
++
++    **Does NOT persist** — the caller is responsible for calling
++    ``persist_state(task_dir, state)`` immediately after, so the baseline
++    survives a crash that kills the worker between file-create and
++    ``_commit_worker_diff`` (IR-006 pre-worker discipline).
++
++    ``_untracked_fn`` is an internal seam for callers (e.g. implement.py) that
++    need the baseline snapshot to use the caller-module's patchable
++    ``untracked_files`` binding rather than this module's binding — so a test
++    that patches ``phase_runners.implement.untracked_files`` reaches the right
++    function. Defaults to this module's ``untracked_files``.
++    """
++    existing = state.get("implement_untracked_baseline")
++    if isinstance(existing, list):
++        return set(existing)
++    _fn = _untracked_fn if _untracked_fn is not None else untracked_files
++    files = _fn(cwd)
++    state["implement_untracked_baseline"] = sorted(files)
++    return files
+diff --git a/.redteam/workflows/phase_runners/implement.py b/.redteam/workflows/phase_runners/implement.py
+index 73ce4f4..4396081 100644
+--- a/.redteam/workflows/phase_runners/implement.py
++++ b/.redteam/workflows/phase_runners/implement.py
+@@ -15,6 +15,8 @@ from ._base import (
+     build_prompt_with_feedback,
+     commit_paths,
+     compute_repo_diff,
++    get_or_set_untracked_baseline,
++    persist_state,
+     pinned_base_branch,
+     project_config,
+     run_git_checked,
+@@ -241,6 +243,42 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
+     return sorted(stray)
+ 
+ 
++def _uncommitted_outside_scope_files(cwd: Path, task_dir: Path, proj: Any, baseline: set[str]) -> list[str]:
++    """NEW untracked files OUTSIDE source_dirs/test_dir that are not in the baseline
++    and not under the task dir — Layer 2 of the two-layer integrity gate (#112).
++
++    Uses the module-level ``untracked_files`` (same ``--exclude-standard`` semantics
++    as ``_commit_worker_diff``'s untracked capture) and returns paths in
++    ``current_untracked - baseline`` that are not under ``task_dir``, not under any
++    ``proj.source_dirs`` root, and not under ``proj.test_dir``. Fail-closed on a
++    non-zero git exit via ``untracked_files`` (raises RuntimeError, omits stderr —
++    IR-002). Using the module-level ``untracked_files`` name also makes this function
++    patchable in tests that patch ``phase_runners.implement.untracked_files``.
++    Stdlib-only.
++    """
++    current = untracked_files(cwd)
++    new_files = current - baseline
++
++    try:
++        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
++    except ValueError:
++        task_rel = None
++
++    def _in_task_dir(p: str) -> bool:
++        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
++
++    def _root(r: str) -> str:
++        r = r.replace("\\", "/")
++        return r if r.endswith("/") else r + "/"
++
++    scope_roots = [_root(r) for r in (*proj.source_dirs, proj.test_dir)]
++
++    def _in_scope(p: str) -> bool:
++        return any(p.replace("\\", "/").startswith(root) for root in scope_roots)
++
++    return sorted(p for p in new_files if not _in_task_dir(p) and not _in_scope(p))
++
++
+ def _agent_pair_base_prompt(task_dir: Path, proj: Any) -> str:
+     """Agent-pair implement prompt. plan_review.md / code_review.md are OPTIONAL —
+     a review=false tier runs plan_outcome→implement with neither — so they are
+@@ -269,10 +307,14 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+ 
+     rr = repo_root()
+     base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
+-    # Snapshot untracked files BEFORE the worker runs so the commit step can stage
+-    # exactly what it creates (current − before), never a pre-existing untracked file.
++    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
++    # the persisted value is re-used across restarts so a file created in a prior
++    # interrupted round is correctly re-attributed). Persist the baseline to
++    # state.json BEFORE invoking the worker so it survives a crash between
++    # file-create and _commit_worker_diff (IR-006 pre-worker discipline, #112).
+     try:
+-        before_untracked = untracked_files(rr)
++        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
++        persist_state(task_dir, state)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not snapshot the working tree before implement ({exc})."
+         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+@@ -330,23 +372,27 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     verification["last_diff_sha256"] = diff_sha
+ 
+     if rc == 0:
+-        # Integrity gate (#50): verification passed on the WORKTREE, but review_code
+-        # inspects the committed range. If the WIP commit left source/test changes
+-        # uncommitted, that range is stale — fail closed (don't hand a stale range to
+-        # the reviewer). status="error" routes through the generic retry, carrying the
+-        # stray-file list back to the implementer; a repeat defers/escalates normally.
++        # Two-layer integrity gate (#50 + #112): verification passed on the WORKTREE,
++        # but review_code inspects the COMMITTED range. Any uncommitted change makes
++        # that range stale — fail closed. Layer 1 (baseline-INDEPENDENT): source/test
++        # files still uncommitted after the WIP commit. Layer 2 (baseline-RELATIVE):
++        # new files outside source/test that are not in the persisted baseline (the
++        # worker created them but left them uncommitted). status="error" routes through
++        # the generic retry; a repeat defers/escalates normally (#50 review PR-001).
+         try:
+-            stray = _uncommitted_scope_files(rr, proj)
++            layer1 = _uncommitted_scope_files(rr, proj)
++            layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
+         except (OSError, RuntimeError) as exc:
+             # A git probe failed → can't confirm the committed range is fresh. Fail
+             # closed (don't approve a possibly-stale range); the generic retry path
+             # re-runs, a repeat defers (#50 review PR-001).
+             feedback = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
+             return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++        stray = sorted(set(layer1) | set(layer2))
+         if stray:
+             feedback = (
+-                "implement left source/test changes uncommitted after the WIP commit, so the "
+-                "reviewed range (git diff <base>...HEAD) would be STALE relative to the tree "
++                "implement left changes uncommitted after the [WIP] commit, so the reviewed range "
++                "`git diff <base>...HEAD` would be STALE relative to the tree "
+                 "verification just passed on. Uncommitted: " + ", ".join(stray) + ". Commit these "
+                 "(they belong in the implementation diff), or remove them — refusing to "
+                 "hand a stale committed range to review."
+@@ -405,11 +451,14 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         msg = f"invalid project.verify_command in config: {exc}"
+         return PhaseResult(status="error", feedback=msg, log=msg, diff="")
+ 
+-    # Snapshot untracked files BEFORE the worker runs so the commit step stages
+-    # exactly what implement creates (current − before); the test was already committed
+-    # by write_test, so it is not in `before` and is not re-handled here (#82).
++    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
++    # the persisted value is re-used across restarts). Persist BEFORE invoking the
++    # worker so the baseline survives a crash between file-create and
++    # _commit_worker_diff (#112 / IR-006). The test was already committed by
++    # write_test, so it is not in `before` and is not re-handled here (#82).
+     try:
+-        before_untracked = untracked_files(rr)
++        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
++        persist_state(task_dir, state)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not snapshot the working tree before implement ({exc})."
+         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+@@ -444,21 +493,25 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+ 
+     if rc == 0:
+-        # Integrity gate (#50): verify passed on the WORKTREE, but review_code inspects
+-        # the committed range. If anything source/test is left uncommitted, that range
+-        # is stale — fail closed. Also the safety net for a legacy in-flight tdd task
+-        # whose test was never committed (its untracked test trips this).
++        # Two-layer integrity gate (#50 + #112): verify passed on the WORKTREE, but
++        # review_code inspects the COMMITTED range. Layer 1 (baseline-INDEPENDENT):
++        # source/test files still uncommitted. Layer 2 (baseline-RELATIVE): new files
++        # outside source/test not in the persisted baseline. Also the safety net for a
++        # legacy in-flight tdd task whose test was never committed (trips Layer 1).
+         try:
+-            stray = _uncommitted_scope_files(rr, proj)
++            layer1 = _uncommitted_scope_files(rr, proj)
++            layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
+         except (OSError, RuntimeError) as exc:
+             fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
+             return PhaseResult(status="error", feedback=fb, log=fb, diff=diff)
++        stray = sorted(set(layer1) | set(layer2))
+         if stray:
+             feedback = (
+-                "implement left source/test changes uncommitted after the commit, so the reviewed "
+-                "range (git diff <base>...HEAD) would be STALE relative to the tree verify just "
+-                "passed on. Uncommitted: " + ", ".join(stray) + ". Commit these (they belong in the "
+-                "implementation diff), or remove them — refusing to hand a stale range to review."
++                "implement left changes uncommitted after the [WIP] commit, so the reviewed range "
++                "`git diff <base>...HEAD` would be STALE relative to the tree "
++                "verification just passed on. Uncommitted: " + ", ".join(stray) + ". Commit these "
++                "(they belong in the implementation diff), or remove them — refusing to "
++                "hand a stale committed range to review."
+             )
+             return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+         return PhaseResult(
