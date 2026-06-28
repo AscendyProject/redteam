@@ -1,0 +1,85 @@
+{
+  "task_id": "task-001-narrow-review-context-rounds",
+  "mode": "agent-pair",
+  "phase": "create_pr",
+  "phases_completed": [
+    "plan_outcome",
+    "plan_review",
+    "implement",
+    "review_code"
+  ],
+  "next_phase": "create_pr",
+  "decision": "pending",
+  "owner": "claude",
+  "reviewer": "codex",
+  "next_action": null,
+  "review_items": [
+    {
+      "id": "PR-001",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-001 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-002",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-002 severity:blocker status:resolved",
+      "carry_over_count": 0
+    }
+  ],
+  "verification": {
+    "commands": [
+      "bash .redteam/scripts/verify.sh"
+    ],
+    "last_exit_code": 0,
+    "last_output_path": "verification.log",
+    "last_run_at": "2026-06-28T14:44:11.197010+00:00",
+    "last_diff_sha256": "84cee24f4b80790a03d2120c70a86b5b203ec2ad5ae02454ae6da3dce711d355",
+    "verify_command": "bash .redteam/scripts/verify.sh",
+    "verify_allowlist": [
+      "pytest",
+      "ruff",
+      "mypy"
+    ]
+  },
+  "models": {
+    "planner": "claude-opus-4-7",
+    "implementer": "claude-sonnet-4-6",
+    "reviewer": "codex",
+    "rescue": "codex"
+  },
+  "escape": {
+    "ask_user": false,
+    "reason": null,
+    "return_phase": null
+  },
+  "implement_round_count": 1,
+  "tdd_test_files": [],
+  "retries": {
+    "plan_outcome": 1
+  },
+  "max_retries_per_phase": 2,
+  "last_failure_reason": null,
+  "last_failure_log": null,
+  "last_failure_diff": null,
+  "deferred_requirements": [],
+  "branch": "redteam/task-001-narrow-review-context-rounds",
+  "pr_url": null,
+  "created_at": "2026-06-28T14:28:38.239835+00:00",
+  "updated_at": "2026-06-28T14:45:09.694592+00:00",
+  "base_branch": "main",
+  "phase_started_at": "2026-06-28T14:45:09.694579+00:00",
+  "last_user_response": null,
+  "implement_untracked_baseline": [
+    ".redteam/batches/reduce-reviewer-cost-prop2/tasks/task-001-narrow-review-context-rounds/input.md",
+    ".redteam/batches/reduce-reviewer-cost-prop2/tasks/task-001-narrow-review-context-rounds/outcome.md",
+    ".redteam/batches/reduce-reviewer-cost-prop2/tasks/task-001-narrow-review-context-rounds/plan_review.md",
+    ".redteam/batches/reduce-reviewer-cost-prop2/tasks/task-001-narrow-review-context-rounds/plan_review.round1.md",
+    ".redteam/batches/reduce-reviewer-cost-prop2/tasks/task-001-narrow-review-context-rounds/state.json"
+  ],
+  "rescue_entry_count": 0
+}

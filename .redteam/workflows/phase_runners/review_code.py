@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from adapters import MANUAL_REQUIRED, get_reviewer_adapter, get_worker_adapter, 
 from ._base import (
     PhaseResult,
     compute_repo_diff,
+    git_rev_parse,
     parse_review_decision,
     pinned_base_branch,
     project_config,
@@ -38,6 +40,81 @@ def _code_review_prompt(task_dir: Path, base_branch: str) -> str:
     )
 
 
+def _is_ancestor(prior: str, repo: Path) -> bool:
+    """Return True if *prior* is an ancestor of HEAD (git merge-base exit 0).
+
+    Shell-free, encoding="utf-8".  Never raises — any error → False so the
+    caller transparently falls back to the full-diff path.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", prior, "HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _incremental_diff_nonempty(prior: str, repo: Path) -> bool:
+    """Return True if `git diff <prior>...HEAD` exits 0 with non-empty stdout.
+
+    Shell-free, encoding="utf-8".  Never raises — any error → False.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "diff", f"{prior}...HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        return proc.returncode == 0 and bool(proc.stdout)
+    except Exception:
+        return False
+
+
+def _narrowed_code_review_prompt(
+    task_dir: Path,
+    base_branch: str,
+    prior_rev: str,
+    open_items: list[dict],
+) -> str:
+    """Build the narrowed prompt for round-over-round incremental review.
+
+    The reviewer receives only the delta since the previously-reviewed
+    revision, plus the carried-over open findings to adjudicate.  The
+    pinned base stays in the prompt as context so the reviewer knows the
+    PR scope.  Output is byte-deterministic for a given input.
+    """
+    proj = project_config()
+    parts = [
+        f"Act as an adversarial code-security reviewer for the implementation of the task at "
+        f"{task_dir}/. Review `git diff {prior_rev}...HEAD`.",
+        f"Pinned base for the PR remains {base_branch}; the narrowed diff above is the "
+        f"round-over-round delta, not a replacement for the base.",
+        "",
+        "Carried-over open findings (adjudicate each as resolved or still open):",
+    ]
+    for item in open_items:
+        parts.append(
+            f"- {item.get('id')} severity:{item.get('severity')} status:{item.get('status')} — {item.get('summary')}"
+        )
+    parts += [
+        "",
+        f"Inputs: {task_dir}/outcome.md, {task_dir}/plan_review.md, {task_dir}/impl_diff.patch. "
+        f"Apply the review criteria described in .redteam/prompts/codex/code_review.md, the project "
+        f"security checklist at {proj.security_checklist}, and the project hard rules at "
+        f"{proj.context_file}, but DO NOT write any files or touch any sentinels — output the "
+        f"ENTIRE review to stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
+        f"CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with IR-NNN findings above it.",
+    ]
+    return "\n".join(parts)
+
+
 def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     if state.get("mode") == "agent-pair":
         rr = repo_root()
@@ -55,10 +132,28 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         manual_required = "review_code" in (state.get("manual_review_required") or {})
         adapter = get_reviewer_adapter(state)
         if adapter is not None and not manual_required:
+            # Choose narrowed vs full prompt.  Narrowing is allowed only when ALL
+            # four preconditions pass; any failure falls back to the full-diff
+            # path (fail toward MORE review, not less).
+            prior_rev = state.get("last_reviewed_rev")
+            open_items = [
+                i for i in (state.get("review_items") or []) if isinstance(i, dict) and i.get("status") == "open"
+            ]
+            use_narrowed = bool(
+                isinstance(prior_rev, str)
+                and prior_rev
+                and open_items
+                and _is_ancestor(prior_rev, rr)
+                and _incremental_diff_nonempty(prior_rev, rr)
+            )
+            if use_narrowed:
+                prompt = _narrowed_code_review_prompt(task_dir, base_branch, prior_rev, open_items)
+            else:
+                prompt = _code_review_prompt(task_dir, base_branch)
             result = review_with_fallback(
                 state,
                 role="review_code",
-                prompt=_code_review_prompt(task_dir, base_branch),
+                prompt=prompt,
                 cwd=repo_root(),
                 target={"kind": "branch_diff", "base": base_branch},
             )
@@ -73,6 +168,15 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                 return PhaseResult(status="error", feedback=feedback, log=review_text, diff=diff)
             decision = result["decision"]
             fallback_audit = result.get("fallback_audit")  # structured provenance, not text
+            # Capture the reviewed HEAD revision after a successful parsed round.
+            # MUST NOT be set on the MANUAL_REQUIRED or parse_status != "ok" paths
+            # above.  On RuntimeError (not a git repo / git unavailable) leave
+            # last_reviewed_rev untouched so the next round takes the full-diff path.
+            if decision in {"APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"}:
+                try:
+                    state["last_reviewed_rev"] = git_rev_parse("HEAD", rr)
+                except RuntimeError:
+                    pass
         else:
             review_text = read_text_if_exists(review_path)
             if review_text is None:
