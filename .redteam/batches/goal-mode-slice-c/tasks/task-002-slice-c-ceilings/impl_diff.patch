@@ -1,0 +1,1172 @@
+diff --git a/.redteam/tests/test_goal_ceilings_enforcement.py b/.redteam/tests/test_goal_ceilings_enforcement.py
+new file mode 100644
+index 0000000..24dbf8e
+--- /dev/null
++++ b/.redteam/tests/test_goal_ceilings_enforcement.py
+@@ -0,0 +1,451 @@
++"""Slice C — ceilings.max_tasks shape validation, enforcement, boundary, and
++backward-compat tests.
++
++Coverage:
++- max_tasks invalid shapes: 0, negatives, str, float, list, dict, None, bool (True/False)
++  each raise ValueError AND cause process_batch to abort fail-closed (no state seeded,
++  no task run).
++- bool rejection happens BEFORE the integer-range check (bool is-a-int in Python).
++- Enforcement: len(tasks) > max_tasks aborts the whole batch fail-closed.
++- Boundary: len(tasks) == max_tasks runs normally.
++- Backward compat: ceilings absent, or present without max_tasks, no new bound.
++- Unknown ceilings keys (max_cost, max_tokens, max_wall_seconds) are tolerate-and-ignore.
++"""
++
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++
++import pytest
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++
++def _orch():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++# ---------- helpers ----------
++
++
++def _make_batch(tmp_path: Path, task_ids: list[str], goal_json: str | None = None) -> Path:
++    """Create a minimal batch dir with task dirs (no state/input by default)."""
++    batch_dir = tmp_path / "batch"
++    tasks_root = batch_dir / "tasks"
++    for tid in task_ids:
++        (tasks_root / tid).mkdir(parents=True)
++    if goal_json is not None:
++        (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++    return batch_dir
++
++
++def _make_batch_with_input(tmp_path: Path, task_ids: list[str], goal_json: str | None = None) -> Path:
++    """Batch dir where every task has an input.md (so _run_one_task would proceed)."""
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json)
++    for tid in task_ids:
++        (batch_dir / "tasks" / tid / "input.md").write_text("brief", encoding="utf-8")
++    return batch_dir
++
++
++def _manifest(task_ids: list[str], ceilings: dict | None = None) -> str:
++    tasks = {tid: {"depends_on": []} for tid in task_ids}
++    data: dict = {"goal": "test", "tasks": tasks}
++    if ceilings is not None:
++        data["ceilings"] = ceilings
++    return json.dumps(data)
++
++
++# ---------- _load_goal_manifest shape validation: invalid max_tasks ----------
++
++
++@pytest.mark.parametrize(
++    "bad_value",
++    [
++        0,
++        -1,
++        -100,
++        "3",
++        "one",
++        3.0,
++        1.5,
++        [],
++        [1, 2],
++        {},
++        {"nested": 1},
++    ],
++)
++def test_max_tasks_invalid_shape_raises(tmp_path, bad_value):
++    """`max_tasks` with non-integer-ge-1 value causes _load_goal_manifest to raise."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path, ["task-a"])
++    data = {
++        "goal": "g",
++        "ceilings": {"max_tasks": bad_value},
++        "tasks": {"task-a": {"depends_on": []}},
++    }
++    goal = batch_dir / "goal.json"
++    goal.write_text(json.dumps(data), encoding="utf-8")
++    with pytest.raises(ValueError, match="max_tasks"):
++        orch._load_goal_manifest(batch_dir, goal)
++
++
++def test_max_tasks_none_raises(tmp_path):
++    """`max_tasks: null` (JSON null → Python None) causes ValueError."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path, ["task-a"])
++    # Write raw JSON with null value to distinguish from key-absent case
++    raw = '{"goal": "g", "ceilings": {"max_tasks": null}, "tasks": {"task-a": {"depends_on": []}}}'
++    goal = batch_dir / "goal.json"
++    goal.write_text(raw, encoding="utf-8")
++    with pytest.raises(ValueError, match="max_tasks"):
++        orch._load_goal_manifest(batch_dir, goal)
++
++
++def test_max_tasks_true_raises(tmp_path):
++    """`max_tasks: true` is rejected as a boolean, not silently coerced to 1."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path, ["task-a"])
++    data = {
++        "goal": "g",
++        "ceilings": {"max_tasks": True},
++        "tasks": {"task-a": {"depends_on": []}},
++    }
++    goal = batch_dir / "goal.json"
++    goal.write_text(json.dumps(data), encoding="utf-8")
++    with pytest.raises(ValueError, match="max_tasks"):
++        orch._load_goal_manifest(batch_dir, goal)
++
++
++def test_max_tasks_false_raises(tmp_path):
++    """`max_tasks: false` is also rejected as a boolean."""
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path, ["task-a"])
++    data = {
++        "goal": "g",
++        "ceilings": {"max_tasks": False},
++        "tasks": {"task-a": {"depends_on": []}},
++    }
++    goal = batch_dir / "goal.json"
++    goal.write_text(json.dumps(data), encoding="utf-8")
++    with pytest.raises(ValueError, match="max_tasks"):
++        orch._load_goal_manifest(batch_dir, goal)
++
++
++def test_bool_rejected_before_integer_range(tmp_path):
++    """`True` is rejected as a type error, not silently treated as 1 (bool-is-int trap)."""
++    # If the int-range check ran first, isinstance(True, int) is True and True >= 1
++    # would be True, so max_tasks=True would be accepted. The bool check must come first.
++    orch = _orch()
++    batch_dir = _make_batch(tmp_path, ["task-a"])
++    data = {
++        "goal": "g",
++        "ceilings": {"max_tasks": True},
++        "tasks": {"task-a": {"depends_on": []}},
++    }
++    goal = batch_dir / "goal.json"
++    goal.write_text(json.dumps(data), encoding="utf-8")
++    err = None
++    try:
++        orch._load_goal_manifest(batch_dir, goal)
++    except ValueError as e:
++        err = e
++    assert err is not None, "expected ValueError"
++    # The message should mention max_tasks (type error), not an integer-range message
++    assert "max_tasks" in str(err)
++
++
++# ---------- shape rejection flows through process_batch fail-closed ----------
++
++
++@pytest.mark.parametrize(
++    "bad_value",
++    [0, -1, "3", 3.0, True, False, None],
++)
++def test_invalid_max_tasks_process_batch_aborts_fail_closed(tmp_path, monkeypatch, bad_value):
++    """Invalid max_tasks aborts process_batch: no state seeded, no task run."""
++    orch = _orch()
++    process_task_calls: list = []
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: process_task_calls.append(a) or "done")
++
++    task_ids = ["task-a", "task-b"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    if bad_value is None:
++        raw = json.dumps(
++            {
++                "goal": "g",
++                "ceilings": {"max_tasks": None},
++                "tasks": {tid: {"depends_on": []} for tid in task_ids},
++            }
++        ).replace('"max_tasks": null', '"max_tasks": null')
++        # Use raw JSON to get actual null
++        raw = (
++            '{"goal":"g","ceilings":{"max_tasks":null},"tasks":{"task-a":{"depends_on":[]},"task-b":{"depends_on":[]}}}'
++        )
++    else:
++        raw = json.dumps(
++            {
++                "goal": "g",
++                "ceilings": {"max_tasks": bad_value},
++                "tasks": {tid: {"depends_on": []} for tid in task_ids},
++            }
++        )
++    (batch_dir / "goal.json").write_text(raw, encoding="utf-8")
++
++    results = orch.process_batch(batch_dir)
++
++    assert process_task_calls == [], "process_task must not be called on abort"
++    for val in results.values():
++        assert val.startswith("error:"), f"expected error entry, got {val!r}"
++    for tid in task_ids:
++        assert not (batch_dir / "tasks" / tid / "state.json").exists()
++
++
++# ---------- enforcement: len(tasks) > max_tasks ----------
++
++
++def test_task_count_exceeds_ceiling_raises(tmp_path):
++    """len(tasks) > max_tasks causes _load_goal_manifest to raise with a clear message."""
++    orch = _orch()
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch(tmp_path, task_ids)
++    data = {
++        "goal": "g",
++        "ceilings": {"max_tasks": 2},
++        "tasks": {tid: {"depends_on": []} for tid in task_ids},
++    }
++    goal = batch_dir / "goal.json"
++    goal.write_text(json.dumps(data), encoding="utf-8")
++    with pytest.raises(ValueError, match="3") as exc_info:
++        orch._load_goal_manifest(batch_dir, goal)
++    # Message should name both the count and the ceiling
++    msg = str(exc_info.value)
++    assert "max_tasks" in msg or "2" in msg
++
++
++def test_task_count_exceeds_ceiling_process_batch_aborts_fail_closed(tmp_path, monkeypatch):
++    """process_batch aborts when len(tasks) > max_tasks: no seeding, no task run."""
++    orch = _orch()
++    process_task_calls: list = []
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: process_task_calls.append(a) or "done")
++
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    goal_json = _manifest(task_ids, ceilings={"max_tasks": 2})
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    results = orch.process_batch(batch_dir)
++
++    assert process_task_calls == [], "process_task must not be called"
++    for val in results.values():
++        assert val.startswith("error:")
++    for tid in task_ids:
++        assert not (batch_dir / "tasks" / tid / "state.json").exists()
++
++
++def test_task_count_exceeds_ceiling_run_batch_returns_none_status(tmp_path, monkeypatch):
++    """_run_batch returns (error_results, None) when ceiling is violated."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: "done")
++
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    goal_json = _manifest(task_ids, ceilings={"max_tasks": 1})
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    results, goal_status = orch._run_batch(batch_dir)
++
++    assert goal_status is None
++    for val in results.values():
++        assert val.startswith("error:")
++
++
++# ---------- boundary: len(tasks) == max_tasks runs normally ----------
++
++
++def test_task_count_equals_ceiling_runs_normally(tmp_path, monkeypatch):
++    """len(tasks) == max_tasks is accepted; the batch proceeds through the scheduler."""
++    orch = _orch()
++    run_calls: list[str] = []
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, **kw):
++        run_calls.append(td.name)
++        return "done"
++
++    task_ids = ["task-a", "task-b"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    goal_json = _manifest(task_ids, ceilings={"max_tasks": 2})
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++
++    assert set(run_calls) == {"task-a", "task-b"}
++    assert results == {"task-a": "done", "task-b": "done"}
++
++
++def test_task_count_equals_ceiling_one_task(tmp_path, monkeypatch):
++    """Single-task manifest with max_tasks=1 (the minimum valid value) runs."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    batch_dir = _make_batch_with_input(tmp_path, ["task-a"])
++    goal_json = _manifest(["task-a"], ceilings={"max_tasks": 1})
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    results = orch.process_batch(batch_dir)
++
++    assert results == {"task-a": "done"}
++
++
++# ---------- backward compat: no new bound ----------
++
++
++def test_ceilings_absent_no_task_count_bound(tmp_path, monkeypatch):
++    """Manifest without a 'ceilings' key imposes no task-count bound."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    run_calls: list[str] = []
++
++    def fake_task(td, **kw):
++        run_calls.append(td.name)
++        return "done"
++
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    # No ceilings at all
++    goal_json = json.dumps({"goal": "test", "tasks": {tid: {"depends_on": []} for tid in task_ids}})
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++    assert set(run_calls) == set(task_ids)
++    assert all(v == "done" for v in results.values())
++
++
++def test_ceilings_present_without_max_tasks_no_bound(tmp_path, monkeypatch):
++    """ceilings object without a max_tasks key imposes no task-count bound."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    run_calls: list[str] = []
++
++    def fake_task(td, **kw):
++        run_calls.append(td.name)
++        return "done"
++
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    # ceilings present but no max_tasks key
++    goal_json = _manifest(task_ids, ceilings={"max_cost": 10})
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++    assert set(run_calls) == set(task_ids)
++    assert all(v == "done" for v in results.values())
++
++
++# ---------- unknown ceilings keys are tolerate-and-ignore ----------
++
++
++@pytest.mark.parametrize(
++    "extra_keys",
++    [
++        {"max_cost": 10},
++        {"max_tokens": 50000},
++        {"max_wall_seconds": 3600},
++        {"max_cost": 10, "max_tokens": 50000, "max_wall_seconds": 3600},
++    ],
++)
++def test_unknown_ceiling_keys_are_tolerated(tmp_path, monkeypatch, extra_keys):
++    """Token-budget and wall-clock shaped ceilings keys do not abort the batch."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    run_calls: list[str] = []
++
++    def fake_task(td, **kw):
++        run_calls.append(td.name)
++        return "done"
++
++    task_ids = ["task-a"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    goal_json = _manifest(task_ids, ceilings=extra_keys)
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    # Must not raise; batch runs normally
++    results = orch.process_batch(batch_dir)
++    assert run_calls == ["task-a"]
++    assert results == {"task-a": "done"}
++
++
++def test_unknown_ceiling_keys_with_valid_max_tasks(tmp_path, monkeypatch):
++    """Unknown keys alongside a valid max_tasks: the batch runs, ceiling is enforced."""
++    orch = _orch()
++
++    def fake_seed(td):
++        pass
++
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    task_ids = ["task-a"]
++    batch_dir = _make_batch_with_input(tmp_path, task_ids)
++    goal_json = _manifest(
++        task_ids,
++        ceilings={"max_tasks": 1, "max_cost": 10, "max_wall_seconds": 7200},
++    )
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    results = orch.process_batch(batch_dir)
++    assert results == {"task-a": "done"}
++
++
++def test_existing_slice_a_test_max_cost_still_passes(tmp_path):
++    """Slice A: ceilings with max_cost parses fine (unknown key, tolerate-and-ignore)."""
++    orch = _orch()
++    for tid in ("task-a", "task-b", "task-c"):
++        (tmp_path / "tasks" / tid).mkdir(parents=True)
++    data = {
++        "goal": "do something",
++        "ceilings": {"max_cost": 10},
++        "tasks": {
++            "task-a": {"depends_on": []},
++            "task-b": {"depends_on": ["task-a"]},
++            "task-c": {"depends_on": ["task-b"]},
++        },
++    }
++    goal = tmp_path / "goal.json"
++    goal.write_text(json.dumps(data), encoding="utf-8")
++    result = orch._load_goal_manifest(tmp_path, goal)
++    assert result["ceilings"] == {"max_cost": 10}
+diff --git a/.redteam/tests/test_goal_done_criterion.py b/.redteam/tests/test_goal_done_criterion.py
+new file mode 100644
+index 0000000..b8f1ebf
+--- /dev/null
++++ b/.redteam/tests/test_goal_done_criterion.py
+@@ -0,0 +1,534 @@
++"""Slice C — _compute_goal_status purity + correctness, _run_batch second-element
++semantics, _run_pipeline goal-line surface, and process_batch wrapper backward-compat.
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import re
++import sys
++from pathlib import Path
++from unittest.mock import patch
++
++import pytest
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++
++def _orch():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++# ---------- helpers ----------
++
++
++def _make_batch(tmp_path: Path, task_ids: list[str], goal_json: str | None = None) -> Path:
++    batch_dir = tmp_path / "batch"
++    tasks_root = batch_dir / "tasks"
++    for tid in task_ids:
++        td = tasks_root / tid
++        td.mkdir(parents=True)
++        (td / "input.md").write_text("brief", encoding="utf-8")
++    if goal_json is not None:
++        (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++    return batch_dir
++
++
++def _simple_manifest(task_ids: list[str]) -> str:
++    tasks = {tid: {"depends_on": []} for tid in task_ids}
++    return json.dumps({"goal": "test", "tasks": tasks})
++
++
++# ---------- _compute_goal_status: pure function tests ----------
++
++
++def test_compute_goal_status_all_done():
++    orch = _orch()
++    ids = ["task-a", "task-b"]
++    results = {"task-a": "done", "task-b": "done"}
++    gs = orch._compute_goal_status(results, ids)
++    assert gs.complete is True
++    assert gs.done_count == 2
++    assert gs.total == 2
++    assert gs.incomplete_ids == ()
++
++
++def test_compute_goal_status_none_done():
++    orch = _orch()
++    ids = ["task-a", "task-b"]
++    results = {"task-a": "error", "task-b": "deferred"}
++    gs = orch._compute_goal_status(results, ids)
++    assert gs.complete is False
++    assert gs.done_count == 0
++    assert gs.total == 2
++    assert set(gs.incomplete_ids) == {"task-a", "task-b"}
++
++
++def test_compute_goal_status_partial_done():
++    orch = _orch()
++    ids = ["task-a", "task-b", "task-c"]
++    results = {"task-a": "done", "task-b": "error", "task-c": "done"}
++    gs = orch._compute_goal_status(results, ids)
++    assert gs.complete is False
++    assert gs.done_count == 2
++    assert gs.total == 3
++    assert gs.incomplete_ids == ("task-b",)
++
++
++def test_compute_goal_status_empty_list():
++    orch = _orch()
++    gs = orch._compute_goal_status({}, [])
++    assert gs.complete is True
++    assert gs.done_count == 0
++    assert gs.total == 0
++    assert gs.incomplete_ids == ()
++
++
++def test_compute_goal_status_missing_result_key():
++    """A task ID not in results is treated as incomplete (results.get(id) returns None)."""
++    orch = _orch()
++    ids = ["task-a", "task-b"]
++    results = {"task-a": "done"}  # task-b absent
++    gs = orch._compute_goal_status(results, ids)
++    assert gs.complete is False
++    assert gs.done_count == 1
++    assert gs.incomplete_ids == ("task-b",)
++
++
++# ---------- _compute_goal_status: one explicit case per non-done result string ----------
++
++
++@pytest.mark.parametrize(
++    "result_str",
++    [
++        "blocked_on_dependency",
++        "deferred",
++        "error",
++        "blocked_on_human_gate",
++        "no_input_md",
++        "error: RuntimeError('boom')",  # f"error: {e!r}" shape from _run_one_task
++    ],
++)
++def test_compute_goal_status_each_non_done_string(result_str):
++    orch = _orch()
++    ids = ["task-a"]
++    results = {"task-a": result_str}
++    gs = orch._compute_goal_status(results, ids)
++    assert gs.complete is False
++    assert gs.done_count == 0
++    assert "task-a" in gs.incomplete_ids
++
++
++def test_compute_goal_status_incomplete_ids_in_dispatch_order():
++    """incomplete_ids are in manifest_task_ids order (not result-dict insertion order)."""
++    orch = _orch()
++    # Order the manifest_task_ids in a specific sequence
++    ids = ["task-c", "task-a", "task-b"]
++    results = {
++        "task-a": "no_input_md",
++        "task-b": "done",
++        "task-c": "error: RuntimeError('boom')",
++    }
++    gs = orch._compute_goal_status(results, ids)
++    assert gs.complete is False
++    assert gs.done_count == 1
++    # incomplete_ids should be in the order they appear in ids (task-c first, then task-a)
++    assert gs.incomplete_ids == ("task-c", "task-a")
++
++
++def test_compute_goal_status_mixed_case():
++    """Mixed results: done + no_input_md + error-prefixed + deferred → correct status."""
++    orch = _orch()
++    ids = ["task-a", "task-b", "task-c", "task-d"]
++    results = {
++        "task-a": "done",
++        "task-b": "no_input_md",
++        "task-c": "error: RuntimeError('boom')",
++        "task-d": "deferred",
++    }
++    gs = orch._compute_goal_status(results, ids)
++    assert gs.complete is False
++    assert gs.done_count == 1
++    assert gs.total == 4
++    assert gs.incomplete_ids == ("task-b", "task-c", "task-d")
++
++
++# ---------- _compute_goal_status: GoalStatus type contract ----------
++
++
++def test_goal_status_is_named_tuple():
++    """GoalStatus exposes .complete, .done_count, .total, .incomplete_ids."""
++    orch = _orch()
++    gs = orch._compute_goal_status({"task-a": "done"}, ["task-a"])
++    # All four attributes accessible
++    _ = gs.complete
++    _ = gs.done_count
++    _ = gs.total
++    _ = gs.incomplete_ids
++
++
++# ---------- _run_batch second-element contract ----------
++
++
++def test_run_batch_flat_mode_returns_none_status(tmp_path, monkeypatch):
++    """No goal.json → _run_batch returns (results, None)."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    batch_dir = tmp_path / "batch"
++    task_dir = batch_dir / "tasks" / "task-a"
++    task_dir.mkdir(parents=True)
++    (task_dir / "input.md").write_text("brief", encoding="utf-8")
++
++    results, goal_status = orch._run_batch(batch_dir)
++    assert goal_status is None
++    assert results == {"task-a": "done"}
++
++
++def test_run_batch_manifest_aborted_slice_a_cause_returns_none_status(tmp_path, monkeypatch):
++    """Slice A manifest error → _run_batch returns (error_results, None)."""
++    orch = _orch()
++    process_task_calls: list = []
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: process_task_calls.append(a) or "done")
++
++    batch_dir = _make_batch(tmp_path, ["task-a"])
++    (batch_dir / "goal.json").write_text("{bad json", encoding="utf-8")
++
++    results, goal_status = orch._run_batch(batch_dir)
++    assert goal_status is None
++    assert process_task_calls == []
++    for val in results.values():
++        assert val.startswith("error:")
++
++
++def test_run_batch_manifest_aborted_ceiling_cause_returns_none_status(tmp_path, monkeypatch):
++    """Ceiling violation → _run_batch returns (error_results, None)."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: "done")
++
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch(tmp_path, task_ids)
++    goal_json = json.dumps(
++        {
++            "goal": "g",
++            "ceilings": {"max_tasks": 2},
++            "tasks": {tid: {"depends_on": []} for tid in task_ids},
++        }
++    )
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    results, goal_status = orch._run_batch(batch_dir)
++    assert goal_status is None
++    for val in results.values():
++        assert val.startswith("error:")
++
++
++def test_run_batch_manifest_ran_returns_goal_status(tmp_path, monkeypatch):
++    """Successful manifest run → _run_batch returns (results, GoalStatus)."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    task_ids = ["task-a", "task-b"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=_simple_manifest(task_ids))
++
++    results, goal_status = orch._run_batch(batch_dir)
++    assert goal_status is not None
++    assert goal_status.complete is True
++    assert goal_status.done_count == 2
++    assert goal_status.total == 2
++    assert goal_status.incomplete_ids == ()
++
++
++def test_run_batch_manifest_ran_incomplete_returns_goal_status(tmp_path, monkeypatch):
++    """Manifest ran with a failure → GoalStatus reflects incomplete tasks."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++
++    task_ids = ["task-a", "task-b"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=_simple_manifest(task_ids))
++
++    def fake_task(td, **kw):
++        return "done" if td.name == "task-a" else "error"
++
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results, goal_status = orch._run_batch(batch_dir)
++    assert goal_status is not None
++    assert goal_status.complete is False
++    assert goal_status.done_count == 1
++    assert "task-b" in goal_status.incomplete_ids
++
++
++def test_run_batch_single_pass_load_goal_manifest_called_once(tmp_path, monkeypatch):
++    """_load_goal_manifest is called exactly once per _run_batch invocation."""
++    orch = _orch()
++    call_count = [0]
++    original = orch._load_goal_manifest
++
++    def counting_load(batch_dir, goal_path):
++        call_count[0] += 1
++        return original(batch_dir, goal_path)
++
++    monkeypatch.setattr(orch, "_load_goal_manifest", counting_load)
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    task_ids = ["task-a"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=_simple_manifest(task_ids))
++    orch._run_batch(batch_dir)
++
++    assert call_count[0] == 1, "_load_goal_manifest must be called exactly once"
++
++
++# ---------- process_batch wrapper backward-compat ----------
++
++
++def test_process_batch_returns_dict(tmp_path, monkeypatch):
++    """process_batch still returns dict[str, str] — the thin wrapper contract."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    task_ids = ["task-a", "task-b"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=_simple_manifest(task_ids))
++
++    results = orch.process_batch(batch_dir)
++    assert isinstance(results, dict)
++    assert results == {"task-a": "done", "task-b": "done"}
++
++
++def test_process_batch_slice_a_equality_assertions(tmp_path, monkeypatch):
++    """Existing Slice A equality assertions continue to pass via the thin wrapper."""
++    orch = _orch()
++    run_order: list[str] = []
++
++    def fake_seed(td):
++        pass
++
++    def fake_task(td, *, resolved_base=None, base_is_parent=False, **kw):
++        run_order.append(td.name)
++        return "done"
++
++    goal = json.dumps(
++        {
++            "goal": "test",
++            "tasks": {
++                "task-a": {"depends_on": []},
++                "task-b": {"depends_on": ["task-a"]},
++            },
++        }
++    )
++    batch_dir = _make_batch(tmp_path, ["task-a", "task-b"], goal_json=goal)
++    monkeypatch.setattr(orch, "_seed_state", fake_seed)
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    results = orch.process_batch(batch_dir)
++    assert run_order.index("task-a") < run_order.index("task-b")
++    assert results["task-a"] == "done"
++    assert results["task-b"] == "done"
++
++
++# ---------- _run_pipeline goal-line surface ----------
++
++
++def _capture_pipeline(orch, batch_dir):
++    """Run _run_pipeline and capture stdout as a list of lines."""
++    buf = io.StringIO()
++    with patch("sys.stdout", buf):
++        orch._run_pipeline(batch_dir, label="start")
++    return buf.getvalue().splitlines()
++
++
++def test_run_pipeline_flat_mode_no_goal_line(tmp_path, monkeypatch):
++    """Flat mode (no goal.json): no GOAL COMPLETE / GOAL INCOMPLETE line emitted."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    batch_dir = tmp_path / "batch"
++    task_dir = batch_dir / "tasks" / "task-a"
++    task_dir.mkdir(parents=True)
++    (task_dir / "input.md").write_text("brief", encoding="utf-8")
++
++    lines = _capture_pipeline(orch, batch_dir)
++    for line in lines:
++        assert not line.startswith("GOAL COMPLETE"), f"unexpected goal line: {line!r}"
++        assert not line.startswith("GOAL INCOMPLETE"), f"unexpected goal line: {line!r}"
++
++
++def test_run_pipeline_manifest_aborted_slice_a_no_goal_line(tmp_path, monkeypatch):
++    """Manifest-aborted (Slice A cause): no goal-level line is emitted."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: "done")
++
++    batch_dir = _make_batch(tmp_path, ["task-a"])
++    (batch_dir / "goal.json").write_text("{bad json", encoding="utf-8")
++
++    lines = _capture_pipeline(orch, batch_dir)
++    for line in lines:
++        assert not line.startswith("GOAL COMPLETE"), f"unexpected: {line!r}"
++        assert not line.startswith("GOAL INCOMPLETE"), f"unexpected: {line!r}"
++
++
++def test_run_pipeline_manifest_aborted_ceiling_no_goal_line(tmp_path, monkeypatch):
++    """Manifest-aborted (ceiling cause): no goal-level line is emitted."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "process_task", lambda *a, **kw: "done")
++
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch(tmp_path, task_ids)
++    goal_json = json.dumps(
++        {
++            "goal": "g",
++            "ceilings": {"max_tasks": 1},
++            "tasks": {tid: {"depends_on": []} for tid in task_ids},
++        }
++    )
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    lines = _capture_pipeline(orch, batch_dir)
++    for line in lines:
++        assert not line.startswith("GOAL COMPLETE"), f"unexpected: {line!r}"
++        assert not line.startswith("GOAL INCOMPLETE"), f"unexpected: {line!r}"
++
++
++_GOAL_COMPLETE_RE = re.compile(
++    r"^GOAL COMPLETE — draft-PR stack ready for human review \(\d+/\d+ tasks done; not merged\)$"
++)
++_GOAL_INCOMPLETE_RE = re.compile(r"^GOAL INCOMPLETE — \d+/\d+ done; incomplete: \S+(?:, \S+)*$")
++
++
++def test_run_pipeline_manifest_ran_complete_line(tmp_path, monkeypatch):
++    """Manifest-ran, all done: exactly one GOAL COMPLETE line after per-task output."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    task_ids = ["task-a", "task-b"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=_simple_manifest(task_ids))
++
++    lines = _capture_pipeline(orch, batch_dir)
++    goal_lines = [ln for ln in lines if ln.startswith("GOAL")]
++    assert len(goal_lines) == 1, f"expected 1 goal line, got {goal_lines}"
++    assert _GOAL_COMPLETE_RE.match(goal_lines[0]), f"format mismatch: {goal_lines[0]!r}"
++    # Must contain 2/2
++    assert "2/2" in goal_lines[0]
++
++
++def test_run_pipeline_manifest_ran_complete_line_is_last_non_empty(tmp_path, monkeypatch):
++    """GOAL COMPLETE line appears AFTER per-task result lines."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "done")
++
++    task_ids = ["task-a"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=_simple_manifest(task_ids))
++
++    lines = [ln for ln in _capture_pipeline(orch, batch_dir) if ln.strip()]
++    # The GOAL line must be the last non-empty line
++    assert lines[-1].startswith("GOAL COMPLETE"), f"last line: {lines[-1]!r}"
++
++
++def test_run_pipeline_manifest_ran_incomplete_line(tmp_path, monkeypatch):
++    """Manifest-ran, some failed: exactly one GOAL INCOMPLETE line with IDs."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=_simple_manifest(task_ids))
++
++    def fake_task(td, **kw):
++        return "done" if td.name == "task-a" else "error"
++
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    lines = _capture_pipeline(orch, batch_dir)
++    goal_lines = [ln for ln in lines if ln.startswith("GOAL")]
++    assert len(goal_lines) == 1, f"expected 1 goal line, got {goal_lines}"
++    assert _GOAL_INCOMPLETE_RE.match(goal_lines[0]), f"format mismatch: {goal_lines[0]!r}"
++    assert "task-b" in goal_lines[0]
++    assert "task-c" in goal_lines[0]
++    assert "1/3" in goal_lines[0]
++
++
++def test_run_pipeline_incomplete_names_no_input_md_and_error_prefix(tmp_path, monkeypatch):
++    """GOAL INCOMPLETE line names tasks with no_input_md AND error-prefixed results."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++
++    # task-a: done, task-b: no_input_md (remove its input.md), task-c: error from process_task
++    batch_dir = tmp_path / "batch"
++    tasks_root = batch_dir / "tasks"
++    for tid in ("task-a", "task-b", "task-c"):
++        (tasks_root / tid).mkdir(parents=True)
++    # Only task-a and task-c get input.md; task-b has neither state nor input → no_input_md
++    (tasks_root / "task-a" / "input.md").write_text("brief", encoding="utf-8")
++    (tasks_root / "task-c" / "input.md").write_text("brief", encoding="utf-8")
++
++    goal_json = json.dumps(
++        {
++            "goal": "test",
++            "tasks": {
++                "task-a": {"depends_on": []},
++                "task-b": {"depends_on": []},
++                "task-c": {"depends_on": []},
++            },
++        }
++    )
++    (batch_dir / "goal.json").write_text(goal_json, encoding="utf-8")
++
++    def fake_task(td, **kw):
++        if td.name == "task-a":
++            return "done"
++        raise RuntimeError("boom")
++
++    monkeypatch.setattr(orch, "process_task", fake_task)
++
++    lines = _capture_pipeline(orch, batch_dir)
++    goal_lines = [ln for ln in lines if ln.startswith("GOAL")]
++    assert len(goal_lines) == 1
++    line = goal_lines[0]
++    assert line.startswith("GOAL INCOMPLETE"), f"unexpected: {line!r}"
++    # Both task-b (no_input_md) and task-c (error-prefixed) must appear
++    assert "task-b" in line, f"task-b (no_input_md) not in: {line!r}"
++    assert "task-c" in line, f"task-c (error-prefixed) not in: {line!r}"
++    assert "task-a" not in line.split("incomplete:")[-1], "done task must not appear"
++
++
++def test_run_pipeline_incomplete_ids_in_topo_order(tmp_path, monkeypatch):
++    """incomplete_ids in the GOAL INCOMPLETE line are in _topo_layers dispatch order."""
++    orch = _orch()
++    monkeypatch.setattr(orch, "_seed_state", lambda td: None)
++
++    # Linear chain: task-a → task-b → task-c; task-a fails → task-b/c blocked
++    goal_json = json.dumps(
++        {
++            "goal": "test",
++            "tasks": {
++                "task-a": {"depends_on": []},
++                "task-b": {"depends_on": ["task-a"]},
++                "task-c": {"depends_on": ["task-b"]},
++            },
++        }
++    )
++    task_ids = ["task-a", "task-b", "task-c"]
++    batch_dir = _make_batch(tmp_path, task_ids, goal_json=goal_json)
++
++    monkeypatch.setattr(orch, "process_task", lambda td, **kw: "error")
++
++    lines = _capture_pipeline(orch, batch_dir)
++    goal_lines = [ln for ln in lines if ln.startswith("GOAL INCOMPLETE")]
++    assert len(goal_lines) == 1
++    # All three tasks are incomplete; task-a ran and errored; task-b/c blocked
++    # They should appear in topo order: task-a, task-b, task-c
++    incomplete_part = goal_lines[0].split("incomplete:")[-1].strip()
++    ids_in_line = [x.strip() for x in incomplete_part.split(",")]
++    assert ids_in_line.index("task-a") < ids_in_line.index("task-b")
++    assert ids_in_line.index("task-b") < ids_in_line.index("task-c")
+diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
+index 3898eb7..cb893a2 100644
+--- a/.redteam/workflows/orchestrator.py
++++ b/.redteam/workflows/orchestrator.py
+@@ -23,7 +23,7 @@ import time
+ import tomllib
+ from datetime import datetime, timezone
+ from pathlib import Path
+-from typing import Any, Callable, Literal
++from typing import Any, Callable, Literal, NamedTuple
+ 
+ # Make `phase_runners.*` importable when this file is invoked as a script
+ # (`python3 .redteam/workflows/orchestrator.py ...`) rather than via `python -m`.
+@@ -727,6 +727,38 @@ def _route_to_rescue_or_defer(
+ # ---------- goal manifest (optional goal.json at batch root) ----------
+ 
+ 
++class GoalStatus(NamedTuple):
++    """Immutable summary of a manifest batch run's done-criterion.
++
++    complete: True iff every manifest task ended with result "done".
++    done_count: number of manifest tasks whose result == "done".
++    total: total number of manifest tasks.
++    incomplete_ids: manifest task IDs whose result != "done", in dispatch order.
++    """
++
++    complete: bool
++    done_count: int
++    total: int
++    incomplete_ids: tuple[str, ...]
++
++
++def _compute_goal_status(results: dict[str, str], manifest_task_ids: list[str]) -> GoalStatus:
++    """Pure helper: compute goal-level done-criterion from in-memory results.
++
++    Side-effect free: reads no files, makes no subprocess calls.
++    Membership rule: a task is incomplete iff results.get(id) != "done".
++    """
++    total = len(manifest_task_ids)
++    incomplete = tuple(tid for tid in manifest_task_ids if results.get(tid) != "done")
++    done_count = total - len(incomplete)
++    return GoalStatus(
++        complete=len(incomplete) == 0,
++        done_count=done_count,
++        total=total,
++        incomplete_ids=incomplete,
++    )
++
++
+ def _check_no_cycle(deps: dict[str, str | None]) -> None:
+     """Raise ValueError if deps contains a dependency cycle (DFS back-edge detection).
+ 
+@@ -780,11 +812,22 @@ def _load_goal_manifest(batch_dir: Path, goal_path: Path) -> dict[str, Any]:
+     if not isinstance(data, dict):
+         raise ValueError("goal.json must be a JSON object")
+ 
+-    # ceilings: parsed/stored but not enforced (Slice C); must be a JSON object if present
++    # ceilings: must be a JSON object if present; max_tasks is validated and enforced
+     ceilings = data.get("ceilings")
+     if ceilings is not None and not isinstance(ceilings, dict):
+         raise ValueError("goal.json 'ceilings' must be a JSON object if present")
+ 
++    # Slice C: validate ceilings.max_tasks shape (unknown ceilings keys are tolerate-and-ignore)
++    max_tasks = None
++    if ceilings is not None and "max_tasks" in ceilings:
++        _mt = ceilings["max_tasks"]
++        # bool check BEFORE int: isinstance(True, int) is True in Python
++        if isinstance(_mt, bool):
++            raise ValueError(f"goal.json ceilings.max_tasks must be an integer >= 1, got {_mt!r}")
++        if not isinstance(_mt, int) or _mt < 1:
++            raise ValueError(f"goal.json ceilings.max_tasks must be an integer >= 1, got {_mt!r}")
++        max_tasks = _mt
++
+     tasks_raw = data.get("tasks")
+     if not isinstance(tasks_raw, dict):
+         raise ValueError("goal.json must have a 'tasks' object")
+@@ -792,6 +835,9 @@ def _load_goal_manifest(batch_dir: Path, goal_path: Path) -> dict[str, Any]:
+         raise ValueError("goal.json 'tasks' must not be empty")
+ 
+     task_ids = set(tasks_raw.keys())
++    # Enforce max_tasks ceiling (fail-closed, before any state is seeded or any task runs)
++    if max_tasks is not None and len(task_ids) > max_tasks:
++        raise ValueError(f"goal.json declares {len(task_ids)} tasks but ceilings.max_tasks={max_tasks}; batch aborted")
+     deps: dict[str, str | None] = {}
+ 
+     for task_id, task_data in tasks_raw.items():
+@@ -1591,17 +1637,20 @@ def _run_one_task(task_dir: Path, **kwargs: Any) -> str:
+         return f"error: {e!r}"
+ 
+ 
+-def process_batch(batch_dir: Path) -> dict[str, str]:
+-    """Run all tasks in the batch.
++def _run_batch(batch_dir: Path) -> tuple[dict[str, str], GoalStatus | None]:
++    """Real batch worker: load manifest once, run layered scheduler, compute goal status.
++
++    Returns (results, goal_status) where goal_status is:
++    - None: flat mode (no goal.json present), or manifest-aborted (validation error).
++    - GoalStatus: manifest loaded and ran successfully — derived in-memory, no re-read.
+ 
+-    If an optional `goal.json` manifest is present at batch_dir/goal.json, it is
+-    loaded and validated BEFORE any task state is seeded or any task runs. Any
+-    validation error aborts the whole batch (fail-closed, no seeding). When the
+-    manifest is absent, behavior is byte-for-byte identical to the original flat mode.
++    If an optional `goal.json` manifest is present, it is loaded and validated BEFORE
++    any task state is seeded or any task runs. Any validation error aborts the whole
++    batch (fail-closed, no seeding). When the manifest is absent, behavior is
++    byte-for-byte identical to the original flat mode.
+     """
+     results: dict[str, str] = {}
+ 
+-    # Optional goal manifest
+     goal_path = batch_dir / "goal.json"
+     if goal_path.is_file():
+         try:
+@@ -1610,7 +1659,7 @@ def process_batch(batch_dir: Path) -> dict[str, str]:
+             # Fail closed: abort the entire batch without seeding or running anything
+             for task_dir in list_tasks(batch_dir):
+                 results[task_dir.name] = f"error: {exc!r}"
+-            return results
++            return results, None
+ 
+         cfg = load_config(repo_root())
+         deps = manifest["deps"]  # {task_id: parent_id_or_None}
+@@ -1640,12 +1689,24 @@ def process_batch(batch_dir: Path) -> dict[str, str]:
+                     resolved_base=resolved_base,
+                     base_is_parent=base_is_parent,
+                 )
+-        return results
++
++        # Compute goal status from in-memory results + deps — no second disk read
++        manifest_task_ids = [tid for layer in _topo_layers(deps) for tid in layer]
++        return results, _compute_goal_status(results, manifest_task_ids)
+ 
+     # Flat mode (no manifest) — byte-for-byte identical to the original behavior
+     for task_dir in list_tasks(batch_dir):
+         results[task_dir.name] = _run_one_task(task_dir)
+-    return results
++    return results, None
++
++
++def process_batch(batch_dir: Path) -> dict[str, str]:
++    """Run all tasks in the batch. Returns per-task results.
++
++    Thin wrapper over _run_batch — preserves the dict[str, str] contract for all
++    callers and Slice A tests. Use _run_batch directly when GoalStatus is needed.
++    """
++    return _run_batch(batch_dir)[0]
+ 
+ 
+ # ---------- CLI ----------
+@@ -1691,7 +1752,7 @@ def _run_pipeline(batch_dir: Path, *, label: str) -> int:
+         print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
+         return 2
+     print(f"orchestrator {label}: {batch_dir}")
+-    results = process_batch(batch_dir)
++    results, goal_status = _run_batch(batch_dir)
+     _print_results(results)
+     blocked = [n for n, s in results.items() if s == "blocked_on_human_gate"]
+     deferred = [n for n, s in results.items() if s == "deferred"]
+@@ -1714,6 +1775,15 @@ def _run_pipeline(batch_dir: Path, *, label: str) -> int:
+             f"⏭  {len(dep_blocked)} task(s) skipped (blocked_on_dependency — parent not done).",
+             file=sys.stderr,
+         )
++    if goal_status is not None:
++        if goal_status.complete:
++            print(
++                f"GOAL COMPLETE — draft-PR stack ready for human review "
++                f"({goal_status.done_count}/{goal_status.total} tasks done; not merged)"
++            )
++        else:
++            incomplete_str = ", ".join(goal_status.incomplete_ids)
++            print(f"GOAL INCOMPLETE — {goal_status.done_count}/{goal_status.total} done; incomplete: {incomplete_str}")
+     return 0 if not blocked else 1
+ 
+ 
