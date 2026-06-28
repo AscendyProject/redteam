@@ -8,6 +8,7 @@ the next stdout line.
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
 import threading
 import time
@@ -130,6 +131,29 @@ class _BoundedWaitProc:
         return self.returncode
 
 
+class _WaitTimeoutProc:
+    """Fake proc whose stdout closes immediately but whose wait() raises TimeoutExpired.
+
+    Simulates the real scenario: child closed stdout (loop ended) but is still alive
+    so proc.wait(timeout=5) raises subprocess.TimeoutExpired instead of returning.
+    """
+
+    def __init__(self) -> None:
+        self.stdout = io.StringIO("")  # EOF immediately
+        self.stderr = io.StringIO("")
+        self.returncode = 0
+        self.kill_called = False
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is not None:
+            raise subprocess.TimeoutExpired("fake-cmd", timeout)
+        return self.returncode
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -223,6 +247,21 @@ def test_normal_path_wait_is_bounded(monkeypatch):
 
     assert result["returncode"] == 0
     assert proc.wait_received_timeout, "proc.wait() was called without a timeout — unbounded post-EOF wait"
+
+
+def test_post_eof_wait_timeout_returns_124(monkeypatch):
+    """If proc.wait(timeout=5) raises TimeoutExpired on the normal path (child closed
+    stdout but did not exit), run_claude must kill the child and return 124 fail-closed
+    — NOT propagate the exception."""
+    base = _load_base_module()
+    proc = _WaitTimeoutProc()
+
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **kw: proc)
+
+    result = base.run_claude(agent="test-agent", prompt="x", timeout_sec=30)
+
+    assert result["returncode"] == 124
+    assert proc.kill_called, "proc.kill() must be called when post-EOF wait times out"
 
 
 def test_exception_path_returns_125_and_cancels_timer(monkeypatch):

@@ -311,7 +311,22 @@ def run_claude(
                 parsed_json=final_result,
             )
 
-        proc.wait(timeout=5)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stderr_tail = proc.stderr.read() if proc.stderr else ""
+            print(
+                f"[{agent}] TIMEOUT after {timeout_sec}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            return ClaudeRunResult(
+                returncode=124,
+                stdout="".join(raw_lines),
+                stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
+                parsed_json=final_result,
+            )
         stderr_output = proc.stderr.read() if proc.stderr else ""
 
         return ClaudeRunResult(
