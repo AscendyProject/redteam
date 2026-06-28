@@ -15,7 +15,7 @@ import os
 import shlex
 import subprocess
 import sys
-import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
@@ -265,53 +265,63 @@ def run_claude(
             parsed_json=None,
         )
 
-    deadline = time.monotonic() + timeout_sec
     raw_lines: list[str] = []
     final_result: dict | None = None
+    timed_out = threading.Event()
+
+    def _kill_on_timeout() -> None:
+        timed_out.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout_sec, _kill_on_timeout)
 
     assert proc.stdout is not None  # subprocess.PIPE means stdout is a pipe
 
     print(f"[{agent}] starting…", file=sys.stderr, flush=True)
     try:
-        for line in proc.stdout:
-            if time.monotonic() > deadline:
-                proc.kill()
-                proc.wait(timeout=5)
-                stderr_tail = proc.stderr.read() if proc.stderr else ""
-                print(
-                    f"[{agent}] TIMEOUT after {timeout_sec}s",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                return ClaudeRunResult(
-                    returncode=124,
-                    stdout="".join(raw_lines),
-                    stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
-                    parsed_json=final_result,
-                )
-            raw_lines.append(line)
-            event = _print_stream_event(line, agent)
-            if event is not None and event.get("type") == "result":
-                final_result = event
-    except Exception as e:
-        proc.kill()
+        timer.start()
+        try:
+            for line in proc.stdout:
+                raw_lines.append(line)
+                event = _print_stream_event(line, agent)
+                if event is not None and event.get("type") == "result":
+                    final_result = event
+        except Exception as e:
+            proc.kill()
+            proc.wait(timeout=5)
+            return ClaudeRunResult(
+                returncode=125,
+                stdout="".join(raw_lines),
+                stderr=f"stream read error: {e!r}",
+                parsed_json=final_result,
+            )
+
+        if timed_out.is_set():
+            proc.wait(timeout=5)
+            stderr_tail = proc.stderr.read() if proc.stderr else ""
+            print(
+                f"[{agent}] TIMEOUT after {timeout_sec}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            return ClaudeRunResult(
+                returncode=124,
+                stdout="".join(raw_lines),
+                stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
+                parsed_json=final_result,
+            )
+
         proc.wait(timeout=5)
+        stderr_output = proc.stderr.read() if proc.stderr else ""
+
         return ClaudeRunResult(
-            returncode=125,
+            returncode=proc.returncode,
             stdout="".join(raw_lines),
-            stderr=f"stream read error: {e!r}",
+            stderr=stderr_output,
             parsed_json=final_result,
         )
-
-    proc.wait()
-    stderr_output = proc.stderr.read() if proc.stderr else ""
-
-    return ClaudeRunResult(
-        returncode=proc.returncode,
-        stdout="".join(raw_lines),
-        stderr=stderr_output,
-        parsed_json=final_result,
-    )
+    finally:
+        timer.cancel()
 
 
 def parse_review_decision(text: str) -> ReviewDecision:
