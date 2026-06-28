@@ -1,0 +1,84 @@
+# Operator decision (round 3) — PR-004 is correct; resolve it by PRESERVING the baseline-independent source/test floor (do NOT keep inventing a "legacy signal")
+
+PR-004 is accepted as a real regression risk, and the reviewer has now refuted
+every signal-based legacy detector in turn (`implement_round_count`,
+"commit beyond base", `verification.last_run_at`). **Stop trying to DETECT the
+pre-fix legacy crash window.** It has no reliable signal, and chasing one is why
+this keeps failing. Resolve PR-004 structurally instead, as follows. This is the
+operator's settled design — implement exactly this.
+
+## Root cause of the regression
+Widening the integrity gate to `current_untracked - baseline` (the PR-002
+alignment) makes the gate BASELINE-RELATIVE. Anything that ends up IN the
+baseline — whether by a legacy fresh-snapshot of an already-created file or by
+adversarial poisoning — is then excluded from BOTH `_commit_worker_diff` AND the
+gate. Today's `_uncommitted_scope_files` is BASELINE-INDEPENDENT for source/test
+(it lists untracked files under `source_dirs`/`test_dir` directly), so today such a
+file at least dead-ends VISIBLY. A purely baseline-relative gate would silently
+mask it. That is the regression the reviewer is pointing at, and it is real.
+
+## The fix — two-layer integrity gate (keep the floor, add the widening)
+Do NOT replace the source/test check with a baseline-relative one. Make the gate a
+UNION of two layers:
+
+1. **source/test floor — BASELINE-INDEPENDENT (preserve today's behavior verbatim).**
+   Keep the existing `_uncommitted_scope_files` direct check over
+   `source_dirs`/`test_dir` exactly as it is today (NOT minus baseline). This is the
+   realistic #112 surface — the masked file in this issue is a NEW TEST, which lives
+   under `test_dir`. So for the case that actually matters:
+   - key present (the #112 fix target): durable pin → file is NOT in baseline →
+     `_commit_worker_diff` stages it → recovers correctly.
+   - key absent + legacy pre-fix crash: even if the fresh snapshot re-masks the file
+     from the commit, the baseline-INDEPENDENT floor STILL flags it → the task
+     dead-ends visibly = "degrade safely", **no worse than today, NOT silently
+     masked**. This satisfies input.md:54 (legacy fails closed / degrades safely)
+     and input.md:4 (never PERMANENTLY+SILENTLY masked) for the source/test surface.
+   User scratch does not live under `source_dirs`/`test_dir`, so this floor does not
+   false-flag it (today's suite is green proof).
+
+2. **outside source/test — BASELINE-RELATIVE widening (the PR-002 coverage gain).**
+   ADD a check over non-ignored new files OUTSIDE `source_dirs`/`test_dir`, using
+   `current_untracked - baseline` with the SAME `task_dir`/gitignored exclusions as
+   `_commit_worker_diff`. This catches a NON-adversarial implementer-created file
+   outside source/test (e.g. a config/migration) in the normal key-present flow,
+   WITHOUT false-flagging the user's pre-existing scratch (it is in the baseline).
+
+The gate's intent is now faithful to `_commit_worker_diff`'s commit surface
+("everything the commit should have staged is verified committed"), and is in fact
+STRICTER than `_commit_worker_diff` for source/test (baseline-independent there).
+
+## Legacy handling — drop the signal detector entirely
+Because the source/test floor now degrades safely on its own, the key-absent path
+needs NO prior-run signal:
+- key present → reuse baseline (set-once).
+- key absent → take the first-entry snapshot (fresh). No round_count / no
+  commit-beyond-base / no last_run_at heuristic. Remove those branches from the plan.
+The ONLY residual after this is a pre-fix legacy (or adversarial) file OUTSIDE
+source/test that gets snapshotted into a fresh baseline. State this plainly as a
+known residual in the SAME class as the out-of-scope adversarial poisoning (a
+one-time pre-fix migration window for a file outside the source/test contract); it
+is not silently masked within the source/test surface this issue is about.
+
+## Net change vs. earlier rounds
+- KEEP: durable pre-worker pin via shared `persist_state` (crash robustness — the core fix).
+- KEEP: PR-002 honesty (adversarial `state.json` poisoning out of scope; follow-up issue).
+- CHANGE: integrity gate = source/test floor (baseline-INDEPENDENT, unchanged from today)
+  ∪ non-source/test widening (baseline-RELATIVE). NOT a single baseline-relative check.
+- REMOVE: all "legacy prior-run signal" detection (round_count / commit-beyond-base /
+  last_run_at). key-absent simply snapshots fresh; the floor is the safety net.
+
+## Tests
+- key present → recover: durable baseline persisted BEFORE worker; restart with the
+  worker's source/test file still untracked → it lands in `base...HEAD` and the gate
+  is clean. Both implement paths (agent-pair + TDD).
+- Legacy/no-key + a source/test file already untracked → the baseline-independent
+  floor FLAGS it (dead-ends), proving no silent masking / no regression vs. today.
+- Non-source/test widening: an uncommitted new file outside source/test (key-present
+  flow) is now flagged; a properly committed one passes; a user's pre-existing
+  scratch OUTSIDE source/test is NOT flagged (it is in the baseline).
+- Pre-existing user scratch under no special dir stays excluded from the commit
+  across ≥2 rounds (`test_pre_existing_untracked_is_not_swept_into_the_commit` green).
+- set-once idempotency: key present → no re-snapshot.
+- `persist_state` parity: `save_state` writes the same payload (fixed clock) and still renders progress.md.
+
+USER_DECISION: REVISE_PLAN

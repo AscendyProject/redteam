@@ -51,8 +51,10 @@ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E40
     extract_verification_commands,
     git_rev_parse,
     incomplete_briefs,
+    persist_state,
     pinned_base_branch,
     repo_root,
+    utc_now,
     validate_verification_commands,
 )
 from adapters import (  # type: ignore[import-not-found]  # noqa: E402
@@ -155,10 +157,6 @@ REVIEWER_PHASES: frozenset[str] = frozenset({"plan_review", "review_code"})
 # ---------- state I/O ----------
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def load_state(task_dir: Path) -> dict[str, Any]:
     state_path = task_dir / "state.json"
     if not state_path.exists():
@@ -175,14 +173,13 @@ def load_state(task_dir: Path) -> dict[str, Any]:
 
 
 def save_state(task_dir: Path, state: dict[str, Any]) -> None:
-    state["updated_at"] = utc_now()
-    payload = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
-    tmp = task_dir / "state.json.tmp"
-    tmp.write_text(payload, encoding="utf-8")
-    tmp.replace(task_dir / "state.json")
-    # state.json is the source of truth and is now durably written. progress.md is
-    # a best-effort human-facing mirror (#49) — a rendering error must NEVER break a
-    # phase transition, so it runs after persistence and swallows everything.
+    # Atomic state.json write (delegates to the shared persist_state helper so the
+    # implement runners can flush the untracked baseline with the same logic without
+    # going through the orchestrator). state.json is the source of truth and is now
+    # durably written. progress.md is a best-effort human-facing mirror (#49) — a
+    # rendering error must NEVER break a phase transition, so it runs after
+    # persistence and swallows everything.
+    persist_state(task_dir, state)
     try:
         _write_progress(task_dir, state)
     except Exception:  # noqa: BLE001 — progress.md is non-critical; never fail a transition
