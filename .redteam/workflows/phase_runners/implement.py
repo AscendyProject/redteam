@@ -30,6 +30,14 @@ from ._base import (
 
 AGENT_NAME = "implementer"
 
+# ---------------------------------------------------------------------------
+# Cross-run trust-root floor marker (#117).
+# In-memory ONLY — never serialized, never written to state.json, never read
+# from disk.  Reset on process exit.  Keyed by resolved task_dir Path so
+# same-process sibling tasks in goal-mode do not cross-pollinate.
+# ---------------------------------------------------------------------------
+_trusted_task_dirs: set[Path] = set()
+
 
 def _run_verify_sh(cwd: Path, argv: list[str]) -> tuple[int, str]:
     # `argv` is the pre-validated verify command, snapshotted BEFORE the
@@ -142,6 +150,69 @@ def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, c
         for p in current_tracked
         if not _in_task_dir(p) and not any(p.replace("\\", "/").startswith(root) for root in scope_roots)
     }
+
+
+def _cross_run_trust_root_floor(
+    state: dict[str, Any],
+    task_dir: Path,
+    cwd: Path,
+    proj: Any,
+    current_untracked: set[str],
+) -> set[str]:
+    """Cross-run trust-root floor (#117).
+
+    Returns the set of offending paths; an empty set means the floor passes.
+    Called at most once per task_dir per orchestrator process (the caller guards
+    with `_trusted_task_dirs`).
+
+    Two checks — either failing adds paths to the offending set:
+
+    1. **Live floor**: the current outside-scope, outside-task_dir untracked
+       surface (`current_untracked`) must be empty. A worker-created file that
+       survived across runs (or a pre-#112 migration-window crash residual)
+       is caught here.
+
+    2. **Stored-baseline contents floor**: `state["implement_untracked_baseline"]`
+       and `state["implement_tracked_baseline"]`, when key-present, must contain
+       no path outside source_dirs/test_dir and outside task_dir. A legitimately
+       stored baseline never contains such a path (the pre-worker floors ensure the
+       outside-scope surface is clean BEFORE the set-once snapshot is taken), so
+       any outside-scope entry is by construction worker-injected.
+
+    Uses the same `_scope_root` + `_in_task_dir` POSIX-prefix logic as
+    `_floor_outside_scope`, `_commit_worker_diff`, and
+    `_uncommitted_outside_scope_files` — one definition, no duplication.
+    """
+    try:
+        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
+    except ValueError:
+        task_rel = None
+
+    def _in_task_dir(p: str) -> bool:
+        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
+
+    scope_roots = [_scope_root(r) for r in (*proj.source_dirs, proj.test_dir)]
+
+    def _is_allowed(p: str) -> bool:
+        return _in_task_dir(p) or any(p.replace("\\", "/").startswith(root) for root in scope_roots)
+
+    offending: set[str] = set()
+
+    # Check 1 — live floor: outside-scope untracked surface must be empty.
+    for p in current_untracked:
+        if not _is_allowed(p):
+            offending.add(p)
+
+    # Check 2 — stored-baseline contents floor: no stored baseline entry may
+    # lie outside source_dirs/test_dir and outside task_dir.
+    for key in ("implement_untracked_baseline", "implement_tracked_baseline"):
+        stored = state.get(key)
+        if isinstance(stored, list):
+            for p in stored:
+                if not _is_allowed(p):
+                    offending.add(p)
+
+    return offending
 
 
 def _commit_worker_diff(
@@ -375,8 +446,32 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                 f"Out-of-scope tracked paths: {', '.join(sorted(outside_scope))}"
             )
             return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        # Cross-run trust-root floor (#117) — runs IFF task_dir is NOT yet in
+        # the in-memory marker set (i.e., first entry of this orchestrator
+        # process for this task).  On the failure path, returns BEFORE any
+        # baseline is persisted so a clean re-run is never self-locked.
+        #
+        # Same-user, stdlib-only, worker-needs-Bash ⇒ tamper PREVENTION of the
+        # on-disk baseline is impossible. The target is fail-closed
+        # tamper-DETECTION on cross-run consumption. Trust is re-derived from
+        # (a) the live outside-scope untracked surface AND (b) the stored
+        # baseline contents — outside-scope paths never legitimately appear in
+        # either, so the union of those two probes catches both the
+        # "future-create" and "leave-on-disk" variants of an adversarial
+        # baseline rewrite.
+        current_untracked_set = untracked_files(rr)
+        if task_dir not in _trusted_task_dirs:
+            offending = _cross_run_trust_root_floor(state, task_dir, rr, proj, current_untracked_set)
+            if offending:
+                fb = (
+                    "cross-run trust-root floor: outside-scope paths detected before "
+                    "worker invocation; commit or stash these files and re-run. "
+                    f"Offending paths: {', '.join(sorted(offending))}"
+                )
+                return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        _trusted_task_dirs.add(task_dir)
         before_tracked = get_or_set_tracked_baseline(state, rr, base_branch, _tracked_fn=lambda *_: current_tracked_set)
-        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
+        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=lambda _cwd: current_untracked_set)
         persist_state(task_dir, state)
     except (RuntimeError, OSError) as exc:
         fb = f"could not snapshot the working tree before implement ({exc})."
@@ -532,8 +627,29 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                 f"Out-of-scope tracked paths: {', '.join(sorted(outside_scope))}"
             )
             return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        # Cross-run trust-root floor (#117) — same as agent-pair path.
+        #
+        # Same-user, stdlib-only, worker-needs-Bash ⇒ tamper PREVENTION of the
+        # on-disk baseline is impossible. The target is fail-closed
+        # tamper-DETECTION on cross-run consumption. Trust is re-derived from
+        # (a) the live outside-scope untracked surface AND (b) the stored
+        # baseline contents — outside-scope paths never legitimately appear in
+        # either, so the union of those two probes catches both the
+        # "future-create" and "leave-on-disk" variants of an adversarial
+        # baseline rewrite.
+        current_untracked_set = untracked_files(rr)
+        if task_dir not in _trusted_task_dirs:
+            offending = _cross_run_trust_root_floor(state, task_dir, rr, proj, current_untracked_set)
+            if offending:
+                fb = (
+                    "cross-run trust-root floor: outside-scope paths detected before "
+                    "worker invocation; commit or stash these files and re-run. "
+                    f"Offending paths: {', '.join(sorted(offending))}"
+                )
+                return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        _trusted_task_dirs.add(task_dir)
         before_tracked = get_or_set_tracked_baseline(state, rr, base_branch, _tracked_fn=lambda *_: current_tracked_set)
-        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
+        before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=lambda _cwd: current_untracked_set)
         persist_state(task_dir, state)
     except (RuntimeError, OSError) as exc:
         fb = f"could not snapshot the working tree before implement ({exc})."
