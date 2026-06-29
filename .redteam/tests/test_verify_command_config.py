@@ -168,14 +168,18 @@ def test_legacy_run_snapshots_verify_before_implementer() -> None:
 
     def _fake_run(argv, **kwargs):
         # Capture the VERIFY invocation only — the harness now also runs `git` calls
-        # (building the tdd review patch, #82) after verify, which would otherwise
-        # overwrite the captured argv.
-        if argv and argv[0] != "git":
+        # (building the tdd review patch, #82; the pre-worker tracked/untracked
+        # baseline probes, #91 Part A) which would otherwise overwrite the captured
+        # argv. The git probes must report a CLEAN tree (empty stdout) so the
+        # baseline snapshot succeeds — a non-empty stdout would be parsed as a
+        # changed path and trip the out-of-scope floor.
+        is_git = bool(argv) and argv[0] == "git"
+        if not is_git:
             captured["argv"] = argv
 
         class _P:
             returncode = 0
-            stdout = "ok"
+            stdout = "" if is_git else "ok"
             stderr = ""
 
         return _P()

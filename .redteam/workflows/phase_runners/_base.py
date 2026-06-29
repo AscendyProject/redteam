@@ -702,6 +702,27 @@ def untracked_files(cwd: Path) -> set[str]:
     return {p for p in out.split("\0") if p}
 
 
+def _tracked_changed_paths(cwd: Path, base_branch: str) -> list[str]:
+    """Tracked paths changed on the branch (committed + unstaged + staged), NUL-safe
+    and FAIL-CLOSED — raises on a git error instead of reading partial stdout, so the
+    staging set can't silently miss a file. `base_branch` is the per-task PINNED base
+    (#91), not live config. Single definition shared by ``implement.py`` (staging +
+    pre-worker floor) and ``get_or_set_tracked_baseline`` (#91 Part A)."""
+    seen: set[str] = set()
+    paths: list[str] = []
+    for args in (
+        ["diff", "-z", "--name-only", f"{base_branch}...HEAD"],
+        ["diff", "-z", "--name-only"],
+        ["diff", "-z", "--name-only", "--cached"],
+    ):
+        out = run_git_checked(["-c", "core.quotepath=false", *args], cwd).stdout
+        for p in out.split("\0"):
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+    return paths
+
+
 def commit_paths(cwd: Path, paths: list[str], message: str) -> bool:
     """Stage and commit EXACTLY `paths` and nothing else. Returns whether a commit was
     made. Fail-closed: any git error raises. A `path` that no longer exists stages as a
@@ -872,3 +893,40 @@ def get_or_set_untracked_baseline(state: dict[str, Any], cwd: Path, *, _untracke
     files = _fn(cwd)
     state["implement_untracked_baseline"] = sorted(files)
     return files
+
+
+def get_or_set_tracked_baseline(
+    state: dict[str, Any], cwd: Path, base_branch: str, *, _tracked_fn: Any = None
+) -> set[str]:
+    """Set-once read-or-snapshot of ``state["implement_tracked_baseline"]``.
+
+    **Key-present (set-once path):** if ``state["implement_tracked_baseline"]``
+    is already a ``list``, returns it as a ``set`` WITHOUT calling
+    ``_tracked_changed_paths`` and WITHOUT mutating the stored value. The sole
+    criterion is key presence as a list; no prior-run signal is consulted.
+
+    **Key-absent (first-entry path):** calls ``_tracked_changed_paths(cwd,
+    base_branch)`` exactly once, stores the sorted ``list[str]`` back into
+    ``state["implement_tracked_baseline"]``, and returns the matching set.
+
+    **Does NOT persist** — the caller is responsible for calling
+    ``persist_state(task_dir, state)`` immediately after, so the baseline
+    survives a crash that kills the worker between file-create and
+    ``_commit_worker_diff`` (IR-006 pre-worker discipline).
+
+    ``_tracked_fn`` is an internal seam: when supplied it is called INSTEAD of
+    the live ``_tracked_changed_paths`` probe on the key-absent path (so the
+    runner can hand in an already-computed fresh probe to avoid a redundant git
+    call, and so a test that patches the caller-module's binding reaches the right
+    function). On the key-present path the helper returns the stored value WITHOUT
+    touching ``_tracked_fn``. Stdlib-only; NUL-safe; ``-c core.quotepath=false``;
+    fail-closed on git error (the underlying ``_tracked_changed_paths`` raises
+    ``RuntimeError``, omits stderr — IR-002).
+    """
+    existing = state.get("implement_tracked_baseline")
+    if isinstance(existing, list):
+        return set(existing)
+    _fn = _tracked_fn if _tracked_fn is not None else _tracked_changed_paths
+    files = _fn(cwd, base_branch)
+    state["implement_tracked_baseline"] = sorted(files)
+    return set(files)

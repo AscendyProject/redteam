@@ -83,7 +83,9 @@ def test_agent_pair_commits_tracked_and_new_untracked(monkeypatch, tmp_path):
             # nothing untracked before invoke; one new file after
             return _ok("app/new.py\0" if phase["invoked"] else "")
         if _tracked_probe(argv):
-            return _ok("app/x.py\0")  # one tracked change
+            # the worker's tracked change — empty pre-worker so the #91 Part A baseline
+            # is clean and the change is attributed to the worker, not the operator.
+            return _ok("app/x.py\0" if phase["invoked"] else "")
         if _is(argv, "--literal-pathspecs", "add"):
             phase["staged_stdin"] = kwargs.get("input")
             phase["add_argv"] = argv
@@ -114,14 +116,15 @@ def test_pre_existing_untracked_is_not_swept_into_the_commit(monkeypatch, tmp_pa
     task_dir.mkdir()
     repo = tmp_path / "repo"
     repo.mkdir()
-    phase = {"staged_stdin": None}
-    _wire(implement, monkeypatch, repo)
+    phase = {"staged_stdin": None, "invoked": False}
+    _wire(implement, monkeypatch, repo, on_invoke=lambda phase=phase: phase.__setitem__("invoked", True))
 
     def fake_run(argv, **kwargs):
         if _untracked_probe(argv):
             return _ok("app/preexisting.py\0")  # present BOTH before and after → delta is empty
         if _tracked_probe(argv):
-            return _ok("app/x.py\0")
+            # the worker's tracked change — empty pre-worker (#91 Part A clean baseline)
+            return _ok("app/x.py\0" if phase["invoked"] else "")
         if _is(argv, "--literal-pathspecs", "add"):
             phase["staged_stdin"] = kwargs.get("input")
             return _ok()
@@ -200,7 +203,9 @@ def test_fails_closed_when_git_add_fails(monkeypatch, tmp_path):
 
 def test_fails_closed_when_a_staging_probe_fails(monkeypatch, tmp_path):
     """If a tracked-path probe itself errors, the staging set is incomplete — fail
-    closed rather than committing a partial set."""
+    closed. With the #91 Part A pre-worker tracked snapshot, the same probe now runs
+    BEFORE the worker (floor + baseline), so the error surfaces there: the worker is
+    never invoked and no partial commit is made."""
     implement = _load_implement_module()
     task_dir = tmp_path / "t"
     task_dir.mkdir()
@@ -219,7 +224,7 @@ def test_fails_closed_when_a_staging_probe_fails(monkeypatch, tmp_path):
     result = implement._run_agent_pair(task_dir, _state())
 
     assert result["status"] == "error"
-    assert "could not commit" in result["feedback"]
+    assert "could not snapshot the working tree" in result["feedback"]
     assert "index.lock" not in result["feedback"]
 
 
@@ -363,8 +368,12 @@ def test_task_dir_artifacts_are_excluded_from_the_commit(monkeypatch, tmp_path):
             # after invoke: a new source file AND a new task-dir artifact (impl_diff.patch)
             return _ok("app/new.py\0.redteam/batches/b/tasks/task-001/impl_diff.patch\0" if phase["invoked"] else "")
         if _tracked_probe(argv):
-            # a tracked source change AND a tracked task-dir artifact
-            return _ok("app/x.py\0.redteam/batches/b/tasks/task-001/outcome.md\0")
+            # pre-worker: a pre-existing TRACKED task-dir artifact (must be exempt from the
+            # out-of-scope floor — it is the harness's own trail, not operator WIP);
+            # post-worker: the worker's source change too. Both task-dir artifacts must be
+            # excluded from the staged commit set.
+            art = ".redteam/batches/b/tasks/task-001/outcome.md"
+            return _ok(f"app/x.py\0{art}\0" if phase["invoked"] else f"{art}\0")
         if _is(argv, "--literal-pathspecs", "add"):
             phase["staged_stdin"] = kwargs.get("input")
             return _ok()

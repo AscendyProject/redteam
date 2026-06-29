@@ -12,9 +12,11 @@ from adapters import get_worker_adapter
 
 from ._base import (
     PhaseResult,
+    _tracked_changed_paths,
     build_prompt_with_feedback,
     commit_paths,
     compute_repo_diff,
+    get_or_set_tracked_baseline,
     get_or_set_untracked_baseline,
     persist_state,
     pinned_base_branch,
@@ -110,24 +112,36 @@ def _write_current_diff(task_dir: Path, cwd: Path, base_branch: str, diff: str |
     return diff, digest
 
 
-def _tracked_changed_paths(cwd: Path, base_branch: str) -> list[str]:
-    """Tracked paths changed on the branch (committed + unstaged + staged), NUL-safe
-    and FAIL-CLOSED — unlike `compute_branch_changed_paths` this raises on a git error
-    instead of reading partial stdout, so the staging set can't silently miss a file.
-    `base_branch` is the per-task PINNED base (#91), not live config."""
-    seen: set[str] = set()
-    paths: list[str] = []
-    for args in (
-        ["diff", "-z", "--name-only", f"{base_branch}...HEAD"],
-        ["diff", "-z", "--name-only"],
-        ["diff", "-z", "--name-only", "--cached"],
-    ):
-        out = run_git_checked(["-c", "core.quotepath=false", *args], cwd).stdout
-        for p in out.split("\0"):
-            if p and p not in seen:
-                seen.add(p)
-                paths.append(p)
-    return paths
+def _scope_root(r: str) -> str:
+    """Normalize a source/test dir root to a trailing-slash POSIX prefix.
+    Used by the pre-worker out-of-scope tracked floor (#91 Part A)."""
+    r = r.replace("\\", "/")
+    return r if r.endswith("/") else r + "/"
+
+
+def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, cwd: Path) -> set[str]:
+    """Pre-worker out-of-scope tracked floor (#91 Part A): the operator's tracked paths
+    changed vs the pinned base that lie OUTSIDE source_dirs/test_dir. The task dir is
+    EXEMPT — its files (outcome.md, state.json, the *_review.md trail) are the harness's
+    own decision trail, excluded here for the same reason `_commit_worker_diff` and the
+    Layer-2 untracked gate (`_uncommitted_outside_scope_files`) exclude them: a consumer
+    who commits their batch dir onto the task branch must not be falsely refused over the
+    harness's own artifacts. Genuine operator tracked WIP outside scope still trips the
+    floor. Mirrors the `_in_task_dir` POSIX-prefix logic used by those two functions."""
+    try:
+        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
+    except ValueError:
+        task_rel = None
+
+    def _in_task_dir(p: str) -> bool:
+        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
+
+    scope_roots = [_scope_root(r) for r in (*proj.source_dirs, proj.test_dir)]
+    return {
+        p
+        for p in current_tracked
+        if not _in_task_dir(p) and not any(p.replace("\\", "/").startswith(root) for root in scope_roots)
+    }
 
 
 def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before_untracked: set[str]) -> None:
@@ -148,13 +162,31 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
     unintended files. Fail-closed: any git failure raises (the caller turns it into a
     phase error) rather than proceeding to review on a stale/incomplete range.
 
-    Known limitation: a snapshot diffs by NAME, so a file that was ALREADY untracked
-    before the worker ran and is then *modified* in place (not created) is not
-    detected — it stays in `before`, so `current - before` excludes it. This is a
-    pathological case (the implementer is scoped to outcome.md's Affected files; a
-    pre-existing untracked file is the user's own scratch, not task scope) and such a
-    change would not be in the PR anyway; closing it would require content-hashing the
-    whole untracked set, which is disproportionate here.
+    `before_tracked` (#91 Part A) is read from ``state["implement_tracked_baseline"]``
+    (the in-memory dict — NOT re-read from disk, so the same-round TOCTOU safety of
+    IR-006 is preserved; the worker runs as a separate subprocess and cannot modify the
+    in-memory Python dict). ``set(_tracked_changed_paths(now)) - before_tracked`` is
+    exactly the tracked changes the implementer made this round, so the operator's
+    pre-existing tracked modifications are not swept into the task commit.
+
+    Known limitation — untracked side: a snapshot diffs by NAME, so a file that was
+    ALREADY untracked before the worker ran and is then *modified* in place (not
+    created) is not detected — it stays in `before_untracked`, so `current -
+    before_untracked` excludes it. This is a pathological case (the implementer is
+    scoped to outcome.md's Affected files; a pre-existing untracked file is the
+    user's own scratch, not task scope) and such a change would not be in the PR
+    anyway; closing it would require content-hashing the whole untracked set, which
+    is disproportionate here.
+
+    Known limitation — tracked side: the tracked baseline is also a snapshot by NAME.
+    If the operator modified a tracked file in place BEFORE the worker AND the worker
+    then *also* modifies that same file, the path is in ``before_tracked``, so
+    ``now − before_tracked`` excludes the worker's change to it. The out-of-scope floor
+    (run pre-worker) already removes the most damaging case (an operator pre-edit
+    outside source/test scope); the residual is an in-scope tracked file the operator
+    pre-edited — itself anomalous since the worker is scoped to outcome.md's Affected
+    files. Closing it would require content-hashing the whole tracked set, which is
+    judged disproportionate here.
     """
     state["implement_round_count"] = int(state.get("implement_round_count") or 0) + 1
     round_n = int(state["implement_round_count"])
@@ -172,10 +204,15 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
 
     base_branch = pinned_base_branch(state, cwd)
+    # Read the tracked baseline from the in-memory state dict (set before the worker
+    # ran; the worker is a separate subprocess and cannot modify this Python dict, so
+    # this is same-round TOCTOU-safe per IR-006 — no disk re-read).
+    before_tracked: set[str] = set(state.get("implement_tracked_baseline") or [])
     new_untracked = untracked_files(cwd) - before_untracked
+    tracked_delta = set(_tracked_changed_paths(cwd, base_branch)) - before_tracked
     seen: set[str] = set()
     to_stage: list[str] = []
-    for path in _tracked_changed_paths(cwd, base_branch) + sorted(new_untracked):
+    for path in sorted(tracked_delta) + sorted(new_untracked):
         if path not in seen and not _in_task_dir(path):  # filter BOTH tracked + new untracked
             seen.add(path)
             to_stage.append(path)
@@ -185,7 +222,9 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
         _write_current_diff(task_dir, cwd, base_branch)
 
 
-def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
+def _uncommitted_scope_files(
+    cwd: Path, proj: Any, before_tracked: frozenset[str] | set[str] = frozenset()
+) -> list[str]:
     """Source/test files still uncommitted AFTER the WIP commit (#50).
 
     `_commit_worker_diff` stages the implementer's tracked changes PLUS the files
@@ -193,9 +232,23 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     This is defense-in-depth: if anything source/test still shows uncommitted (a
     failed commit, a file changed after the snapshot), the committed range
     `git diff <base>...HEAD` the reviewer inspects would be STALE relative to the tree
-    verification just passed on (verify ran on the dirty worktree). Returns
-    the uncommitted *source/test* files across all three states that would diverge
-    the committed range from the worktree verification ran on:
+    verification just passed on (verify ran on the dirty worktree).
+
+    `before_tracked` (#91 Part A) is the pre-worker tracked baseline — the operator's
+    OWN pre-existing tracked modifications, captured before the worker ran. Those paths
+    are DELIBERATELY left uncommitted (subtracted in `_commit_worker_diff` so the
+    operator's WIP is never swept into the task commit), so they must NOT be read as
+    "implement left changes uncommitted": excluding them here is the tracked-side
+    corollary of the #112 untracked baseline (Layer 2 already excludes the untracked
+    baseline). The reviewed range is stale relative to verify's worktree by exactly the
+    operator's own WIP — which is intentionally out of the task PR, not the worker's
+    output. This is additive: a tracked file the WORKER changed is NOT in
+    `before_tracked` (the baseline is set-once pre-worker), so a real worker-left-it
+    -uncommitted bug is still caught. Default `frozenset()` keeps legacy 2-arg callers
+    (baseline-independent) behaving exactly as before.
+
+    Returns the uncommitted *source/test* files across all three states that would
+    diverge the committed range from the worktree verification ran on:
       - staged-but-uncommitted (`git diff --cached`): defense-in-depth — the commit
         is fail-closed now, but a hook or partial commit could still leave staged
         changes out of HEAD, so this stays caught here;
@@ -239,7 +292,11 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
         return r if r.endswith("/") else r + "/"
 
     roots = [_root(r) for r in (*proj.source_dirs, proj.test_dir)]
-    stray = {path for path in candidates if any(path.replace("\\", "/").startswith(root) for root in roots)}
+    stray = {
+        path
+        for path in candidates
+        if path not in before_tracked and any(path.replace("\\", "/").startswith(root) for root in roots)
+    }
     return sorted(stray)
 
 
@@ -307,12 +364,26 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     rr = repo_root()
     base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
-    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
-    # the persisted value is re-used across restarts so a file created in a prior
-    # interrupted round is correctly re-attributed). Persist the baseline to
-    # state.json BEFORE invoking the worker so it survives a crash between
-    # file-create and _commit_worker_diff (IR-006 pre-worker discipline, #112).
+    # Pre-worker baseline snapshot (#91 Part A + #112):
+    #   1. Fresh tracked probe for the out-of-scope floor (fail-closed on git error).
+    #   2. Out-of-scope floor: if any tracked path lies outside source_dirs/test_dir,
+    #      refuse and tell the operator to stash/commit — WITHOUT persisting a baseline
+    #      so a clean re-run is never self-locked (PR-001 fix).
+    #   3. Set-once tracked baseline (key-absent → store; key-present → reuse stored).
+    #   4. Set-once untracked baseline.
+    #   5. Single persist covering BOTH baselines.
     try:
+        current_tracked = _tracked_changed_paths(rr, base_branch)
+        current_tracked_set = set(current_tracked)
+        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr)
+        if outside_scope:
+            fb = (
+                "refusing to sweep operator tracked WIP into the task commit; "
+                "commit or stash your unrelated tracked WIP before re-running. "
+                f"Out-of-scope tracked paths: {', '.join(sorted(outside_scope))}"
+            )
+            return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        before_tracked = get_or_set_tracked_baseline(state, rr, base_branch, _tracked_fn=lambda *_: current_tracked_set)
         before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
         persist_state(task_dir, state)
     except (RuntimeError, OSError) as exc:
@@ -380,7 +451,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         # worker created them but left them uncommitted). status="error" routes through
         # the generic retry; a repeat defers/escalates normally (#50 review PR-001).
         try:
-            layer1 = _uncommitted_scope_files(rr, proj)
+            layer1 = _uncommitted_scope_files(rr, proj, before_tracked)
             layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
         except (OSError, RuntimeError) as exc:
             # A git probe failed → can't confirm the committed range is fresh. Fail
@@ -451,12 +522,25 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         msg = f"invalid project.verify_command in config: {exc}"
         return PhaseResult(status="error", feedback=msg, log=msg, diff="")
 
-    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
-    # the persisted value is re-used across restarts). Persist BEFORE invoking the
-    # worker so the baseline survives a crash between file-create and
-    # _commit_worker_diff (#112 / IR-006). The test was already committed by
-    # write_test, so it is not in `before` and is not re-handled here (#82).
+    # Pre-worker baseline snapshot (#91 Part A + #112), same as agent-pair path:
+    #   1. Fresh tracked probe for the out-of-scope floor (fail-closed on git error).
+    #   2. Out-of-scope floor: if any tracked path lies outside source_dirs/test_dir,
+    #      refuse — WITHOUT persisting a baseline so a clean re-run is never self-locked.
+    #   3. Set-once tracked baseline. 4. Set-once untracked baseline. 5. Single persist.
+    # The test was already committed by write_test (#82); it is therefore in the tracked
+    # baseline (not new_untracked) and flows through the normal tracked-delta path.
     try:
+        current_tracked = _tracked_changed_paths(rr, base_branch)
+        current_tracked_set = set(current_tracked)
+        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr)
+        if outside_scope:
+            fb = (
+                "refusing to sweep operator tracked WIP into the task commit; "
+                "commit or stash your unrelated tracked WIP before re-running. "
+                f"Out-of-scope tracked paths: {', '.join(sorted(outside_scope))}"
+            )
+            return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        before_tracked = get_or_set_tracked_baseline(state, rr, base_branch, _tracked_fn=lambda *_: current_tracked_set)
         before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
         persist_state(task_dir, state)
     except (RuntimeError, OSError) as exc:
@@ -499,7 +583,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         # outside source/test not in the persisted baseline. Also the safety net for a
         # legacy in-flight tdd task whose test was never committed (trips Layer 1).
         try:
-            layer1 = _uncommitted_scope_files(rr, proj)
+            layer1 = _uncommitted_scope_files(rr, proj, before_tracked)
             layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
         except (OSError, RuntimeError) as exc:
             fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
