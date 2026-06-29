@@ -1,0 +1,1369 @@
+diff --git a/.redteam/tests/test_agents_generic_prompts.py b/.redteam/tests/test_agents_generic_prompts.py
+index 265c030..912fc22 100644
+--- a/.redteam/tests/test_agents_generic_prompts.py
++++ b/.redteam/tests/test_agents_generic_prompts.py
+@@ -154,6 +154,7 @@ def test_implement_agent_pair_prompt_injects_foreign_config(tmp_path) -> None:
+         patch("phase_runners.implement.repo_root", return_value=tmp_path),
+         patch("phase_runners.implement.compute_repo_diff", return_value=""),
+         patch("phase_runners.implement.untracked_files", return_value=set()),
++        patch("phase_runners.implement._tracked_changed_paths", return_value=[]),
+         patch("phase_runners.implement._commit_worker_diff", lambda *a, **k: None),
+         patch("phase_runners.implement._uncommitted_scope_files", return_value=[]),
+         patch("phase_runners.implement._write_current_diff", return_value=("", "sha")),
+diff --git a/.redteam/tests/test_implement_untracked_baseline_pin.py b/.redteam/tests/test_implement_untracked_baseline_pin.py
+index 51bc587..3cb2402 100644
+--- a/.redteam/tests/test_implement_untracked_baseline_pin.py
++++ b/.redteam/tests/test_implement_untracked_baseline_pin.py
+@@ -469,7 +469,7 @@ def test_layer2_outside_scope_uncommitted_flagged(monkeypatch, tmp_path):
+     # — here we test Layer 2's detection capability)
+     real_commit = impl._commit_worker_diff
+ 
+-    def commit_no_migration(td, state, cwd, before):
++    def commit_no_migration(td, state, cwd, before, before_tracked):
+         # Run real commit but the migration was untracked so it would be picked up
+         # normally. To test Layer 2 detection, we want it to remain untracked.
+         # We achieve this by: letting _commit_worker_diff run normally (it commits
+@@ -477,7 +477,7 @@ def test_layer2_outside_scope_uncommitted_flagged(monkeypatch, tmp_path):
+         # WILL commit it. So for this test to isolate Layer 2, we need the migration
+         # to NOT be committed.
+         # Instead: let real commit run but afterward unstage the migration.
+-        real_commit(td, state, cwd, before)
++        real_commit(td, state, cwd, before, before_tracked)
+         # Now reset the migration commit so it's untracked again (simulating missed commit)
+         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
+ 
+@@ -594,8 +594,8 @@ def test_feedback_wording_layer2_only_no_source_test_claim(monkeypatch, tmp_path
+ 
+     real_commit = impl._commit_worker_diff
+ 
+-    def commit_skip_migration(td, state, cwd, before):
+-        real_commit(td, state, cwd, before)
++    def commit_skip_migration(td, state, cwd, before, before_tracked):
++        real_commit(td, state, cwd, before, before_tracked)
+         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
+ 
+     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_migration)
+@@ -640,8 +640,8 @@ def test_feedback_wording_layer1_only_agent_pair(monkeypatch, tmp_path):
+ 
+     real_commit = impl._commit_worker_diff
+ 
+-    def commit_skip_source(td, state, cwd, before):
+-        real_commit(td, state, cwd, before)
++    def commit_skip_source(td, state, cwd, before, before_tracked):
++        real_commit(td, state, cwd, before, before_tracked)
+         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
+ 
+     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_source)
+@@ -684,8 +684,8 @@ def test_feedback_wording_both_layers_names_all_files(monkeypatch, tmp_path):
+ 
+     real_commit = impl._commit_worker_diff
+ 
+-    def commit_skip_all(td, state, cwd, before):
+-        real_commit(td, state, cwd, before)
++    def commit_skip_all(td, state, cwd, before, before_tracked):
++        real_commit(td, state, cwd, before, before_tracked)
+         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
+ 
+     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_all)
+@@ -739,8 +739,8 @@ def test_feedback_wording_tdd_path(monkeypatch, tmp_path):
+ 
+     real_commit = impl._commit_worker_diff
+ 
+-    def commit_skip_migration(td, state, cwd, before):
+-        real_commit(td, state, cwd, before)
++    def commit_skip_migration(td, state, cwd, before, before_tracked):
++        real_commit(td, state, cwd, before, before_tracked)
+         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
+ 
+     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_migration)
+diff --git a/.redteam/tests/test_implementer_commit.py b/.redteam/tests/test_implementer_commit.py
+index 3e187fa..c9327cf 100644
+--- a/.redteam/tests/test_implementer_commit.py
++++ b/.redteam/tests/test_implementer_commit.py
+@@ -83,7 +83,9 @@ def test_agent_pair_commits_tracked_and_new_untracked(monkeypatch, tmp_path):
+             # nothing untracked before invoke; one new file after
+             return _ok("app/new.py\0" if phase["invoked"] else "")
+         if _tracked_probe(argv):
+-            return _ok("app/x.py\0")  # one tracked change
++            # the worker's tracked change — empty pre-worker so the #91 Part A baseline
++            # is clean and the change is attributed to the worker, not the operator.
++            return _ok("app/x.py\0" if phase["invoked"] else "")
+         if _is(argv, "--literal-pathspecs", "add"):
+             phase["staged_stdin"] = kwargs.get("input")
+             phase["add_argv"] = argv
+@@ -114,14 +116,15 @@ def test_pre_existing_untracked_is_not_swept_into_the_commit(monkeypatch, tmp_pa
+     task_dir.mkdir()
+     repo = tmp_path / "repo"
+     repo.mkdir()
+-    phase = {"staged_stdin": None}
+-    _wire(implement, monkeypatch, repo)
++    phase = {"staged_stdin": None, "invoked": False}
++    _wire(implement, monkeypatch, repo, on_invoke=lambda phase=phase: phase.__setitem__("invoked", True))
+ 
+     def fake_run(argv, **kwargs):
+         if _untracked_probe(argv):
+             return _ok("app/preexisting.py\0")  # present BOTH before and after → delta is empty
+         if _tracked_probe(argv):
+-            return _ok("app/x.py\0")
++            # the worker's tracked change — empty pre-worker (#91 Part A clean baseline)
++            return _ok("app/x.py\0" if phase["invoked"] else "")
+         if _is(argv, "--literal-pathspecs", "add"):
+             phase["staged_stdin"] = kwargs.get("input")
+             return _ok()
+@@ -200,7 +203,9 @@ def test_fails_closed_when_git_add_fails(monkeypatch, tmp_path):
+ 
+ def test_fails_closed_when_a_staging_probe_fails(monkeypatch, tmp_path):
+     """If a tracked-path probe itself errors, the staging set is incomplete — fail
+-    closed rather than committing a partial set."""
++    closed. With the #91 Part A pre-worker tracked snapshot, the same probe now runs
++    BEFORE the worker (floor + baseline), so the error surfaces there: the worker is
++    never invoked and no partial commit is made."""
+     implement = _load_implement_module()
+     task_dir = tmp_path / "t"
+     task_dir.mkdir()
+@@ -219,7 +224,7 @@ def test_fails_closed_when_a_staging_probe_fails(monkeypatch, tmp_path):
+     result = implement._run_agent_pair(task_dir, _state())
+ 
+     assert result["status"] == "error"
+-    assert "could not commit" in result["feedback"]
++    assert "could not snapshot the working tree" in result["feedback"]
+     assert "index.lock" not in result["feedback"]
+ 
+ 
+@@ -363,8 +368,12 @@ def test_task_dir_artifacts_are_excluded_from_the_commit(monkeypatch, tmp_path):
+             # after invoke: a new source file AND a new task-dir artifact (impl_diff.patch)
+             return _ok("app/new.py\0.redteam/batches/b/tasks/task-001/impl_diff.patch\0" if phase["invoked"] else "")
+         if _tracked_probe(argv):
+-            # a tracked source change AND a tracked task-dir artifact
+-            return _ok("app/x.py\0.redteam/batches/b/tasks/task-001/outcome.md\0")
++            # pre-worker: a pre-existing TRACKED task-dir artifact (must be exempt from the
++            # out-of-scope floor — it is the harness's own trail, not operator WIP);
++            # post-worker: the worker's source change too. Both task-dir artifacts must be
++            # excluded from the staged commit set.
++            art = ".redteam/batches/b/tasks/task-001/outcome.md"
++            return _ok(f"app/x.py\0{art}\0" if phase["invoked"] else f"{art}\0")
+         if _is(argv, "--literal-pathspecs", "add"):
+             phase["staged_stdin"] = kwargs.get("input")
+             return _ok()
+diff --git a/.redteam/tests/test_tracked_baseline_attribution.py b/.redteam/tests/test_tracked_baseline_attribution.py
+new file mode 100644
+index 0000000..75166a0
+--- /dev/null
++++ b/.redteam/tests/test_tracked_baseline_attribution.py
+@@ -0,0 +1,878 @@
++"""Regression tests for #91 Part A — tracked-change attribution to the worker.
++
++Covers:
++- get_or_set_tracked_baseline helper (key-absent, key-present, idempotency, no-persist)
++- Out-of-scope tracked WIP → fail closed, no persisted baseline (PR-001 fix) — both paths
++- Out-of-scope floor uses FRESH probe, not stored baseline — both paths
++- Operator in-scope pre-edit NOT attributed to worker — both paths (real git)
++- Worker's own tracked changes still land — both paths (real git)
++- Set-once / resume: tracked baseline survives interrupted round — both paths
++- Clean-tree run unchanged (real git)
++- Pinned base usage: no live config bleed
++- _commit_worker_diff before_tracked passthrough (via state["implement_tracked_baseline"])
++- Mode-neutrality: single _tracked_changed_paths + get_or_set_tracked_baseline definition
++- No stderr leakage on probe failure — both paths
++"""
++
++from __future__ import annotations
++
++import json
++import subprocess
++from pathlib import Path
++from types import SimpleNamespace
++from typing import Any
++
++
++def _base():
++    import _engine
++
++    return _engine.base()
++
++
++def _impl():
++    import _engine
++
++    return _engine.implement()
++
++
++_PROJ = SimpleNamespace(
++    source_dirs=["app/"],
++    test_dir="tests/",
++    context_file="docs/ctx.md",
++    base_branch="main",
++)
++
++
++def _state(**extra: Any) -> dict[str, Any]:
++    s = {"task_id": "task-001", "mode": "agent-pair", "base_branch": "main", "verification": {"commands": []}}
++    s.update(extra)
++    return s
++
++
++def _git(repo: Path, *args: str) -> None:
++    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
++
++
++def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
++    """Return (repo, task_dir) with a clean git repo on a task branch."""
++    repo = tmp_path / "repo"
++    repo.mkdir()
++    _git(repo, "init", "-b", "main")
++    _git(repo, "config", "user.email", "t@e")
++    _git(repo, "config", "user.name", "t")
++    (repo / "app").mkdir()
++    (repo / "tests").mkdir()
++    (repo / "tests" / ".gitkeep").write_text("", encoding="utf-8")
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "init")
++    _git(repo, "checkout", "-b", "redteam/task-001")
++    task_dir = repo / ".redteam" / "batches" / "b" / "tasks" / "task-001"
++    task_dir.mkdir(parents=True)
++    return repo, task_dir
++
++
++def _committed_paths(repo: Path) -> list[str]:
++    result = subprocess.run(
++        ["git", "diff", "--name-only", "main...HEAD"],
++        cwd=repo,
++        capture_output=True,
++        text=True,
++    )
++    return [p for p in result.stdout.split("\n") if p]
++
++
++def _wire_agent_pair(impl, monkeypatch, repo: Path, *, on_invoke=None) -> None:
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++
++    def invoke(**kwargs: Any) -> dict[str, Any]:
++        if on_invoke is not None:
++            on_invoke()
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
++    monkeypatch.setattr(
++        impl,
++        "_run_verification_commands",
++        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
++    )
++
++
++def _wire_tdd(impl, monkeypatch, repo: Path, *, on_invoke=None) -> None:
++    import config as _config
++
++    tdd_proj = SimpleNamespace(
++        source_dirs=["app/"],
++        test_dir="tests/",
++        context_file="c",
++        base_branch="main",
++        verify_command="true",
++        verification_allowlist=("true",),
++    )
++    monkeypatch.setattr(_config, "load_config", lambda *_a, **_k: SimpleNamespace(project=tdd_proj))
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: tdd_proj)
++    monkeypatch.setattr(impl, "_run_verify_sh", lambda cwd, argv: (0, "ok\n"))
++
++    def invoke(**kwargs: Any) -> dict[str, Any]:
++        if on_invoke is not None:
++            on_invoke()
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
++
++
++# =============================================================================
++# Helper unit tests (pure, no real git)
++# =============================================================================
++
++
++def test_get_or_set_tracked_baseline_key_absent(tmp_path):
++    """Key absent → calls probe exactly once, stores sorted list, returns set."""
++    base = _base()
++    calls: list = []
++
++    def fake_tracked(cwd: Path, base_branch: str) -> list[str]:
++        calls.append((cwd, base_branch))
++        return ["app/b.py", "app/a.py"]
++
++    state: dict[str, Any] = {}
++    result = base.get_or_set_tracked_baseline(state, tmp_path, "main", _tracked_fn=fake_tracked)
++
++    assert result == {"app/a.py", "app/b.py"}
++    assert state["implement_tracked_baseline"] == ["app/a.py", "app/b.py"]  # sorted list
++    assert len(calls) == 1
++    assert calls[0][1] == "main"
++
++
++def test_get_or_set_tracked_baseline_key_absent_live_probe(monkeypatch, tmp_path):
++    """Key absent with no _tracked_fn → calls _tracked_changed_paths from base."""
++    base = _base()
++    calls: list = []
++
++    def fake_probe(cwd, base_branch):
++        calls.append(base_branch)
++        return ["app/x.py"]
++
++    monkeypatch.setattr(base, "_tracked_changed_paths", fake_probe)
++    state: dict[str, Any] = {}
++    result = base.get_or_set_tracked_baseline(state, tmp_path, "main")
++
++    assert result == {"app/x.py"}
++    assert len(calls) == 1
++
++
++def test_get_or_set_tracked_baseline_does_not_persist(tmp_path):
++    """Helper does NOT write state.json; caller is responsible for persist_state."""
++    base = _base()
++
++    state: dict[str, Any] = {}
++    base.get_or_set_tracked_baseline(state, tmp_path, "main", _tracked_fn=lambda *_: ["app/x.py"])
++
++    assert not (tmp_path / "state.json").exists()
++
++
++def test_get_or_set_tracked_baseline_key_present_set_once(tmp_path):
++    """Key present → returns stored list as set, does NOT call probe or _tracked_fn."""
++    base = _base()
++    called = {"n": 0}
++
++    def fake_tracked(cwd, base_branch):
++        called["n"] += 1
++        return ["app/live.py"]
++
++    state: dict[str, Any] = {"implement_tracked_baseline": ["app/persisted.py"]}
++    result = base.get_or_set_tracked_baseline(state, tmp_path, "main", _tracked_fn=fake_tracked)
++
++    assert result == {"app/persisted.py"}
++    assert state["implement_tracked_baseline"] == ["app/persisted.py"]  # unchanged
++    assert called["n"] == 0
++
++
++def test_get_or_set_tracked_baseline_idempotent_under_prior_run_signals(tmp_path):
++    """Set-once decision is keyed solely on key presence — no prior-run signals consulted."""
++    base = _base()
++    called = {"n": 0}
++
++    for implement_round_count, phases_completed, last_run_at in [
++        (5, ["plan_outcome", "implement"], "2026-01-01T00:00:00Z"),
++        (0, [], None),
++        (1, ["implement"], "2026-06-27T00:00:00Z"),
++    ]:
++        state: dict[str, Any] = {
++            "implement_tracked_baseline": ["app/fixed.py"],
++            "implement_round_count": implement_round_count,
++            "phases_completed": phases_completed,
++            "verification": {"last_run_at": last_run_at},
++        }
++        result = base.get_or_set_tracked_baseline(
++            state, tmp_path, "main", _tracked_fn=lambda *_: called.__setitem__("n", called["n"] + 1) or ["app/live.py"]
++        )
++        assert result == {"app/fixed.py"}
++
++    assert called["n"] == 0
++
++
++# =============================================================================
++# Out-of-scope floor — fail closed, NO persisted baseline (PR-001 fix)
++# =============================================================================
++
++
++def test_out_of_scope_tracked_fails_closed_no_baseline_agent_pair(monkeypatch, tmp_path):
++    """agent-pair: out-of-scope tracked path → error, baseline absent on disk, worker not called."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    # Tracked file OUTSIDE app/ and tests/
++    outside = repo / "README.md"
++    outside.write_text("changed\n", encoding="utf-8")
++    _git(repo, "add", "README.md")
++
++    invoked = {"yes": False}
++
++    def invoke(**kwargs):
++        invoked["yes"] = True
++        return {"returncode": 0, "stdout": "", "stderr": ""}
++
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl._run_agent_pair(task_dir, st)
++
++    assert result["status"] == "error"
++    assert "README.md" in result["feedback"]
++    assert "commit or stash" in result["feedback"]
++    assert "fatal:" not in result["feedback"]
++    assert invoked["yes"] is False
++
++    # PR-001 fix: baseline must NOT be on disk
++    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "implement_tracked_baseline" not in persisted
++
++
++def test_out_of_scope_tracked_fails_closed_no_baseline_tdd(monkeypatch, tmp_path):
++    """tdd: out-of-scope tracked path → error, baseline absent on disk, worker not called."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    outside = repo / "README.md"
++    outside.write_text("changed\n", encoding="utf-8")
++    _git(repo, "add", "README.md")
++
++    invoked = {"yes": False}
++    _wire_tdd(impl, monkeypatch, repo, on_invoke=lambda: invoked.__setitem__("yes", True))
++
++    st = {"task_id": "task-001", "mode": "tdd", "base_branch": "main", "verification": {"commands": []}}
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl.run(task_dir, st)
++
++    assert result["status"] == "error"
++    assert "README.md" in result["feedback"]
++    assert "commit or stash" in result["feedback"]
++    assert "fatal:" not in result["feedback"]
++    assert invoked["yes"] is False
++
++    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "implement_tracked_baseline" not in persisted
++
++
++def test_pr001_self_lock_clean_rerun_after_stash_agent_pair(monkeypatch, tmp_path):
++    """PR-001 self-lock fix: after stashing out-of-scope WIP, clean re-run succeeds."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    # First: out-of-scope tracked file present
++    outside = repo / "README.md"
++    outside.write_text("changed\n", encoding="utf-8")
++    _git(repo, "add", "README.md")
++
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++    monkeypatch.setattr(
++        impl,
++        "get_worker_adapter",
++        lambda state: SimpleNamespace(invoke=lambda **kw: {"returncode": 0, "stdout": "done", "stderr": ""}),
++    )
++    monkeypatch.setattr(
++        impl,
++        "_run_verification_commands",
++        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
++    )
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result1 = impl._run_agent_pair(task_dir, st)
++    assert result1["status"] == "error"
++
++    # Simulate operator stashing: unstage README.md, then remove the now-untracked
++    # file (it was never committed, so `git checkout` has no blob to restore).
++    _git(repo, "restore", "--staged", "README.md")
++    (repo / "README.md").unlink()
++
++    # Re-run with the same state (implement_tracked_baseline absent — clean re-run)
++    st2 = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "implement_tracked_baseline" not in st2
++
++    result2 = impl._run_agent_pair(task_dir, st2)
++    assert result2["status"] == "approved", result2["feedback"]
++
++
++# =============================================================================
++# Out-of-scope floor uses FRESH probe, not stored baseline
++# =============================================================================
++
++
++def test_out_of_scope_floor_fresh_probe_agent_pair(monkeypatch, tmp_path):
++    """Floor checks CURRENT tree even when baseline is already stored (baseline-independent)."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    # Seed a 'clean' baseline in state (in-scope paths only)
++    st = _state(implement_tracked_baseline=["app/existing.py"])
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    # Now add a freshly-staged out-of-scope change AFTER baseline was set
++    outside = repo / "NOTES.md"
++    outside.write_text("oops\n", encoding="utf-8")
++    _git(repo, "add", "NOTES.md")
++
++    invoked = {"yes": False}
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++    monkeypatch.setattr(
++        impl,
++        "get_worker_adapter",
++        lambda state: SimpleNamespace(
++            invoke=lambda **kw: invoked.__setitem__("yes", True) or {"returncode": 0, "stdout": "", "stderr": ""}
++        ),
++    )
++
++    result = impl._run_agent_pair(task_dir, st)
++
++    assert result["status"] == "error"
++    assert "NOTES.md" in result["feedback"]
++    assert invoked["yes"] is False
++    # Seeded baseline unchanged
++    assert st["implement_tracked_baseline"] == ["app/existing.py"]
++
++
++def test_out_of_scope_floor_fresh_probe_tdd(monkeypatch, tmp_path):
++    """Floor checks CURRENT tree in TDD path too (baseline-independent)."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    # Seed a 'clean' baseline
++    st = {
++        "task_id": "task-001",
++        "mode": "tdd",
++        "base_branch": "main",
++        "verification": {"commands": []},
++        "implement_tracked_baseline": ["app/existing.py"],
++    }
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    # Freshly-staged out-of-scope change
++    outside = repo / "NOTES.md"
++    outside.write_text("oops\n", encoding="utf-8")
++    _git(repo, "add", "NOTES.md")
++
++    _wire_tdd(impl, monkeypatch, repo)
++
++    result = impl.run(task_dir, st)
++
++    assert result["status"] == "error"
++    assert "NOTES.md" in result["feedback"]
++    # Seeded baseline unchanged
++    assert st["implement_tracked_baseline"] == ["app/existing.py"]
++
++
++# =============================================================================
++# In-scope pre-existing tracked mod NOT attributed to worker (real git)
++# =============================================================================
++
++
++def test_in_scope_preexisting_tracked_not_attributed_agent_pair(monkeypatch, tmp_path):
++    """Operator pre-edits a source file; worker is no-op. The pre-edit is NOT swept into
++    the commit (subtracted via the baseline), and because it remains uncommitted in
++    scope the baseline-INDEPENDENT Layer-1 gate defers the round (status=error) — the
++    locked behavior: the operator must commit/stash even in-scope WIP before re-running."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    # Commit an existing source file on main, then check out task branch
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++
++    # Checkout task branch
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    # Operator pre-edits existing.py (tracked, in-scope, staged)
++    (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++
++    _wire_agent_pair(impl, monkeypatch, repo)  # worker no-op
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl._run_agent_pair(task_dir, st)
++
++    # Floor passes (in-scope); pre-edit captured in baseline → no tracked delta → NOT
++    # committed. The leftover in-scope edit then trips Layer 1 (baseline-INDEPENDENT).
++    assert result["status"] == "error", result["feedback"]
++    assert "app/existing.py" in result["feedback"]
++    committed = _committed_paths(repo)
++    assert "app/existing.py" not in committed
++
++    # Edit still in worktree (not committed)
++    content = (repo / "app" / "existing.py").read_text(encoding="utf-8")
++    assert content == "x = 2\n"
++
++
++def test_in_scope_preexisting_tracked_not_attributed_tdd(monkeypatch, tmp_path):
++    """TDD path: operator pre-edits source; worker is no-op. Pre-edit subtracted (not
++    committed); the leftover in-scope edit trips the baseline-INDEPENDENT Layer-1 gate so
++    the round defers (status=error) — the same locked behavior as the agent-pair path."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++
++    _wire_tdd(impl, monkeypatch, repo)
++
++    st = {"task_id": "task-001", "mode": "tdd", "base_branch": "main", "verification": {"commands": []}}
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl.run(task_dir, st)
++
++    assert result["status"] == "error", result["feedback"]
++    assert "app/existing.py" in result["feedback"]
++    committed = _committed_paths(repo)
++    assert "app/existing.py" not in committed
++    assert (repo / "app" / "existing.py").read_text(encoding="utf-8") == "x = 2\n"
++
++
++# =============================================================================
++# Worker's own tracked changes still land (real git)
++# =============================================================================
++
++
++def test_worker_tracked_changes_still_land_agent_pair(monkeypatch, tmp_path):
++    """Clean tree: worker's tracked+new changes land in committed range."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    def invoke(**kwargs):
++        (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
++        (repo / "tests" / "test_new.py").write_text("def test_x(): pass\n", encoding="utf-8")
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
++    monkeypatch.setattr(
++        impl,
++        "_run_verification_commands",
++        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
++    )
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl._run_agent_pair(task_dir, st)
++
++    assert result["status"] == "approved", result["feedback"]
++    committed = _committed_paths(repo)
++    assert "app/existing.py" in committed
++    assert "tests/test_new.py" in committed
++    patch = (task_dir / "impl_diff.patch").read_text(encoding="utf-8")
++    assert "app/existing.py" in patch
++    assert "tests/test_new.py" in patch
++
++
++def test_worker_tracked_changes_still_land_tdd(monkeypatch, tmp_path):
++    """TDD path: worker's tracked+new changes land in committed range."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    def invoke(**kwargs):
++        (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
++        (repo / "tests" / "test_new.py").write_text("def test_x(): pass\n", encoding="utf-8")
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    _wire_tdd(impl, monkeypatch, repo, on_invoke=None)
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
++
++    st = {"task_id": "task-001", "mode": "tdd", "base_branch": "main", "verification": {"commands": []}}
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl.run(task_dir, st)
++
++    assert result["status"] == "approved", result["feedback"]
++    committed = _committed_paths(repo)
++    assert "app/existing.py" in committed
++    assert "tests/test_new.py" in committed
++
++
++# =============================================================================
++# Set-once / resume: tracked baseline survives interrupted round
++# =============================================================================
++
++
++def test_durable_preworker_flush_tracked_agent_pair(monkeypatch, tmp_path):
++    """agent-pair: tracked baseline persisted before worker; survives non-zero exit; reused on R2."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    # Operator pre-edits existing.py (in-scope tracked)
++    (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
++
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++    monkeypatch.setattr(
++        impl,
++        "_run_verification_commands",
++        lambda cwd, cmds, project_verify_command=None, allowlist=None: (0, "ok\n"),
++    )
++
++    # Round 1: worker crashes after persist_state already wrote baseline
++    def invoke_round1(**kwargs):
++        return {"returncode": 1, "stdout": "", "stderr": "crash"}
++
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke_round1))
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result1 = impl._run_agent_pair(task_dir, st)
++    assert result1["status"] == "error"
++    assert "exited non-zero" in result1["feedback"]
++
++    # baseline must be on disk and include the operator pre-edit
++    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "implement_tracked_baseline" in persisted
++    assert isinstance(persisted["implement_tracked_baseline"], list)
++    assert "app/existing.py" in persisted["implement_tracked_baseline"]
++
++    # Round 2: worker makes a NEW tracked change; pre-edit must NOT be committed.
++    # The R1 baseline (with app/existing.py) is REUSED — get_or_set_tracked_baseline
++    # returns the stored value without re-snapshotting — so existing.py is still
++    # subtracted while the worker's new_feature.py lands in the WIP commit. The leftover
++    # in-scope pre-edit then trips the baseline-INDEPENDENT Layer-1 gate (status=error);
++    # the set-once guarantee is in the committed paths, not the final status.
++    def invoke_round2(**kwargs):
++        (repo / "app" / "new_feature.py").write_text("y = 3\n", encoding="utf-8")
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke_round2))
++
++    st2 = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    result2 = impl._run_agent_pair(task_dir, st2)
++    assert result2["status"] == "error", result2["feedback"]
++    assert "app/existing.py" in result2["feedback"]
++
++    committed = _committed_paths(repo)
++    assert "app/new_feature.py" in committed  # worker's R2 change lands in the WIP commit
++    assert "app/existing.py" not in committed  # pre-edit NOT attributed to worker (baseline reused)
++
++
++def test_durable_preworker_flush_tracked_tdd(monkeypatch, tmp_path):
++    """TDD path: tracked baseline persisted before worker; survives crash; reused on R2."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    (repo / "app" / "existing.py").write_text("x = 2\n", encoding="utf-8")
++
++    import config as _config
++
++    tdd_proj = SimpleNamespace(
++        source_dirs=["app/"],
++        test_dir="tests/",
++        context_file="c",
++        base_branch="main",
++        verify_command="true",
++        verification_allowlist=("true",),
++    )
++    monkeypatch.setattr(_config, "load_config", lambda *_a, **_k: SimpleNamespace(project=tdd_proj))
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: tdd_proj)
++    monkeypatch.setattr(impl, "_run_verify_sh", lambda cwd, argv: (0, "ok\n"))
++
++    def invoke_crash(**kwargs):
++        return {"returncode": 1, "stdout": "", "stderr": "crash"}
++
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke_crash))
++
++    st = {"task_id": "task-001", "mode": "tdd", "base_branch": "main", "verification": {"commands": []}}
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result1 = impl.run(task_dir, st)
++    assert result1["status"] == "error"
++
++    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "implement_tracked_baseline" in persisted
++    assert "app/existing.py" in persisted["implement_tracked_baseline"]
++
++    # Round 2 reuses the persisted baseline (no re-snapshot): existing.py is subtracted
++    # while new_feature.py lands in the WIP commit; the leftover in-scope pre-edit then
++    # trips the baseline-INDEPENDENT Layer-1 gate (status=error), the locked behavior.
++    def invoke_r2(**kwargs):
++        (repo / "app" / "new_feature.py").write_text("y = 3\n", encoding="utf-8")
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke_r2))
++
++    st2 = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    result2 = impl.run(task_dir, st2)
++    assert result2["status"] == "error", result2["feedback"]
++    assert "app/existing.py" in result2["feedback"]
++
++    committed = _committed_paths(repo)
++    assert "app/new_feature.py" in committed  # worker's R2 change lands in the WIP commit
++    assert "app/existing.py" not in committed  # baseline reused → pre-edit subtracted
++
++
++# =============================================================================
++# Clean-tree run unchanged (real git)
++# =============================================================================
++
++
++def test_clean_tree_run_unchanged_agent_pair(monkeypatch, tmp_path):
++    """Clean tree: baseline is empty, floor passes, worker's changes land as before fix."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    def invoke(**kwargs):
++        (repo / "app" / "existing.py").write_text("x = 99\n", encoding="utf-8")
++        (repo / "tests" / "test_clean.py").write_text("def test_clean(): pass\n", encoding="utf-8")
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
++    monkeypatch.setattr(
++        impl,
++        "_run_verification_commands",
++        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
++    )
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl._run_agent_pair(task_dir, st)
++    assert result["status"] == "approved", result["feedback"]
++
++    committed = _committed_paths(repo)
++    assert "app/existing.py" in committed
++    assert "tests/test_clean.py" in committed
++
++    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert persisted.get("implement_tracked_baseline") == []  # empty on clean tree
++
++
++def test_clean_tree_run_unchanged_tdd(monkeypatch, tmp_path):
++    """TDD: clean tree, worker's changes land normally."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "existing.py").write_text("x = 1\n", encoding="utf-8")
++    _git(repo, "add", "app/existing.py")
++    _git(repo, "commit", "-m", "add existing")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    def invoke(**kwargs):
++        (repo / "app" / "existing.py").write_text("x = 99\n", encoding="utf-8")
++        return {"returncode": 0, "stdout": "done", "stderr": ""}
++
++    _wire_tdd(impl, monkeypatch, repo)
++    monkeypatch.setattr(impl, "get_worker_adapter", lambda state: SimpleNamespace(invoke=invoke))
++
++    st = {"task_id": "task-001", "mode": "tdd", "base_branch": "main", "verification": {"commands": []}}
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl.run(task_dir, st)
++    assert result["status"] == "approved", result["feedback"]
++    assert "app/existing.py" in _committed_paths(repo)
++
++
++# =============================================================================
++# Pinned base usage — no live config bleed
++# =============================================================================
++
++
++def test_pinned_base_no_live_config_bleed(tmp_path):
++    """Helper uses the caller-supplied base_branch string, not live config."""
++    base = _base()
++
++    calls: list[str] = []
++
++    def fake_probe(cwd, branch: str) -> list[str]:
++        calls.append(branch)
++        return []
++
++    state: dict[str, Any] = {}
++    base.get_or_set_tracked_baseline(state, tmp_path, "v1-stable", _tracked_fn=fake_probe)
++
++    assert calls == ["v1-stable"]
++
++
++# =============================================================================
++# _commit_worker_diff before_tracked passthrough (via state["implement_tracked_baseline"])
++# =============================================================================
++
++
++def test_commit_worker_diff_before_tracked_excludes_preexisting(monkeypatch, tmp_path):
++    """_commit_worker_diff takes before_tracked as an EXPLICIT argument (outcome.md:
++    arg passthrough): a path in the passed set is excluded from the commit even when it
++    currently shows in _tracked_changed_paths, while a path NOT in the set still lands."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _git(repo, "checkout", "main")
++    (repo / "app" / "pre.py").write_text("x = 1\n", encoding="utf-8")
++    (repo / "app" / "worker.py").write_text("w = 0\n", encoding="utf-8")
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "seed")
++    _git(repo, "checkout", "-b", "redteam/task-001b")
++
++    # Operator staged a tracked change to pre.py before worker
++    (repo / "app" / "pre.py").write_text("x = 2\n", encoding="utf-8")
++
++    st = _state()
++
++    # Worker now also modifies worker.py (different file)
++    (repo / "app" / "worker.py").write_text("w = 99\n", encoding="utf-8")
++
++    # Call _commit_worker_diff directly with an EXPLICIT before_tracked set — NOT read
++    # from state (the runner passes the same in-memory set get_or_set_tracked_baseline
++    # returned). app/pre.py is in the set; app/worker.py is not.
++    before_untracked: set[str] = set()
++    impl._commit_worker_diff(task_dir, st, repo, before_untracked, {"app/pre.py"})
++
++    committed = _committed_paths(repo)
++    assert "app/worker.py" in committed  # worker's own change lands (NOT in before_tracked)
++    assert "app/pre.py" not in committed  # operator pre-edit excluded (in before_tracked)
++
++
++# =============================================================================
++# Mode-neutrality: single definition for _tracked_changed_paths and helper
++# =============================================================================
++
++
++def test_mode_neutrality_single_definition():
++    """implement.py imports _tracked_changed_paths and get_or_set_tracked_baseline from _base."""
++    import phase_runners._base as _pbase
++
++    impl = _impl()
++    assert impl._tracked_changed_paths is _pbase._tracked_changed_paths
++    assert impl.get_or_set_tracked_baseline is _pbase.get_or_set_tracked_baseline
++
++
++# =============================================================================
++# No stderr leakage / fail-closed on probe failure — both paths
++# =============================================================================
++
++
++def test_fail_closed_probe_failure_no_stderr_leakage_agent_pair(monkeypatch, tmp_path):
++    """agent-pair: probe RuntimeError → status=error, no fatal:, baseline absent."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    monkeypatch.setattr(impl, "repo_root", lambda: repo)
++    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
++    invoked = {"yes": False}
++    monkeypatch.setattr(
++        impl,
++        "get_worker_adapter",
++        lambda state: SimpleNamespace(
++            invoke=lambda **kw: invoked.__setitem__("yes", True) or {"returncode": 0, "stdout": "", "stderr": ""}
++        ),
++    )
++
++    # Make _tracked_changed_paths raise RuntimeError (simulate git failure)
++    def bad_tracked(cwd, base_branch):
++        raise RuntimeError("git invocation failed (exit 128)")
++
++    monkeypatch.setattr(impl, "_tracked_changed_paths", bad_tracked)
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl._run_agent_pair(task_dir, st)
++
++    assert result["status"] == "error"
++    assert "fatal:" not in result["feedback"]
++    assert invoked["yes"] is False
++
++    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "implement_tracked_baseline" not in persisted
++
++
++def test_fail_closed_probe_failure_no_stderr_leakage_tdd(monkeypatch, tmp_path):
++    """tdd: probe RuntimeError → status=error, no fatal:, baseline absent."""
++    impl = _impl()
++    repo, task_dir = _make_repo(tmp_path)
++
++    _wire_tdd(impl, monkeypatch, repo)
++
++    def bad_tracked(cwd, base_branch):
++        raise RuntimeError("git invocation failed (exit 128)")
++
++    monkeypatch.setattr(impl, "_tracked_changed_paths", bad_tracked)
++
++    st = {"task_id": "task-001", "mode": "tdd", "base_branch": "main", "verification": {"commands": []}}
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl.run(task_dir, st)
++
++    assert result["status"] == "error"
++    assert "fatal:" not in result["feedback"]
++
++    persisted = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    assert "implement_tracked_baseline" not in persisted
+diff --git a/.redteam/tests/test_verify_command_config.py b/.redteam/tests/test_verify_command_config.py
+index cfe26a9..759da9a 100644
+--- a/.redteam/tests/test_verify_command_config.py
++++ b/.redteam/tests/test_verify_command_config.py
+@@ -168,14 +168,18 @@ def test_legacy_run_snapshots_verify_before_implementer() -> None:
+ 
+     def _fake_run(argv, **kwargs):
+         # Capture the VERIFY invocation only — the harness now also runs `git` calls
+-        # (building the tdd review patch, #82) after verify, which would otherwise
+-        # overwrite the captured argv.
+-        if argv and argv[0] != "git":
++        # (building the tdd review patch, #82; the pre-worker tracked/untracked
++        # baseline probes, #91 Part A) which would otherwise overwrite the captured
++        # argv. The git probes must report a CLEAN tree (empty stdout) so the
++        # baseline snapshot succeeds — a non-empty stdout would be parsed as a
++        # changed path and trip the out-of-scope floor.
++        is_git = bool(argv) and argv[0] == "git"
++        if not is_git:
+             captured["argv"] = argv
+ 
+         class _P:
+             returncode = 0
+-            stdout = "ok"
++            stdout = "" if is_git else "ok"
+             stderr = ""
+ 
+         return _P()
+diff --git a/.redteam/workflows/phase_runners/_base.py b/.redteam/workflows/phase_runners/_base.py
+index 61f8f96..050e41b 100644
+--- a/.redteam/workflows/phase_runners/_base.py
++++ b/.redteam/workflows/phase_runners/_base.py
+@@ -702,6 +702,27 @@ def untracked_files(cwd: Path) -> set[str]:
+     return {p for p in out.split("\0") if p}
+ 
+ 
++def _tracked_changed_paths(cwd: Path, base_branch: str) -> list[str]:
++    """Tracked paths changed on the branch (committed + unstaged + staged), NUL-safe
++    and FAIL-CLOSED — raises on a git error instead of reading partial stdout, so the
++    staging set can't silently miss a file. `base_branch` is the per-task PINNED base
++    (#91), not live config. Single definition shared by ``implement.py`` (staging +
++    pre-worker floor) and ``get_or_set_tracked_baseline`` (#91 Part A)."""
++    seen: set[str] = set()
++    paths: list[str] = []
++    for args in (
++        ["diff", "-z", "--name-only", f"{base_branch}...HEAD"],
++        ["diff", "-z", "--name-only"],
++        ["diff", "-z", "--name-only", "--cached"],
++    ):
++        out = run_git_checked(["-c", "core.quotepath=false", *args], cwd).stdout
++        for p in out.split("\0"):
++            if p and p not in seen:
++                seen.add(p)
++                paths.append(p)
++    return paths
++
++
+ def commit_paths(cwd: Path, paths: list[str], message: str) -> bool:
+     """Stage and commit EXACTLY `paths` and nothing else. Returns whether a commit was
+     made. Fail-closed: any git error raises. A `path` that no longer exists stages as a
+@@ -872,3 +893,40 @@ def get_or_set_untracked_baseline(state: dict[str, Any], cwd: Path, *, _untracke
+     files = _fn(cwd)
+     state["implement_untracked_baseline"] = sorted(files)
+     return files
++
++
++def get_or_set_tracked_baseline(
++    state: dict[str, Any], cwd: Path, base_branch: str, *, _tracked_fn: Any = None
++) -> set[str]:
++    """Set-once read-or-snapshot of ``state["implement_tracked_baseline"]``.
++
++    **Key-present (set-once path):** if ``state["implement_tracked_baseline"]``
++    is already a ``list``, returns it as a ``set`` WITHOUT calling
++    ``_tracked_changed_paths`` and WITHOUT mutating the stored value. The sole
++    criterion is key presence as a list; no prior-run signal is consulted.
++
++    **Key-absent (first-entry path):** calls ``_tracked_changed_paths(cwd,
++    base_branch)`` exactly once, stores the sorted ``list[str]`` back into
++    ``state["implement_tracked_baseline"]``, and returns the matching set.
++
++    **Does NOT persist** — the caller is responsible for calling
++    ``persist_state(task_dir, state)`` immediately after, so the baseline
++    survives a crash that kills the worker between file-create and
++    ``_commit_worker_diff`` (IR-006 pre-worker discipline).
++
++    ``_tracked_fn`` is an internal seam: when supplied it is called INSTEAD of
++    the live ``_tracked_changed_paths`` probe on the key-absent path (so the
++    runner can hand in an already-computed fresh probe to avoid a redundant git
++    call, and so a test that patches the caller-module's binding reaches the right
++    function). On the key-present path the helper returns the stored value WITHOUT
++    touching ``_tracked_fn``. Stdlib-only; NUL-safe; ``-c core.quotepath=false``;
++    fail-closed on git error (the underlying ``_tracked_changed_paths`` raises
++    ``RuntimeError``, omits stderr — IR-002).
++    """
++    existing = state.get("implement_tracked_baseline")
++    if isinstance(existing, list):
++        return set(existing)
++    _fn = _tracked_fn if _tracked_fn is not None else _tracked_changed_paths
++    files = _fn(cwd, base_branch)
++    state["implement_tracked_baseline"] = sorted(files)
++    return set(files)
+diff --git a/.redteam/workflows/phase_runners/implement.py b/.redteam/workflows/phase_runners/implement.py
+index 4396081..bee5f9d 100644
+--- a/.redteam/workflows/phase_runners/implement.py
++++ b/.redteam/workflows/phase_runners/implement.py
+@@ -12,9 +12,11 @@ from adapters import get_worker_adapter
+ 
+ from ._base import (
+     PhaseResult,
++    _tracked_changed_paths,
+     build_prompt_with_feedback,
+     commit_paths,
+     compute_repo_diff,
++    get_or_set_tracked_baseline,
+     get_or_set_untracked_baseline,
+     persist_state,
+     pinned_base_branch,
+@@ -110,27 +112,45 @@ def _write_current_diff(task_dir: Path, cwd: Path, base_branch: str, diff: str |
+     return diff, digest
+ 
+ 
+-def _tracked_changed_paths(cwd: Path, base_branch: str) -> list[str]:
+-    """Tracked paths changed on the branch (committed + unstaged + staged), NUL-safe
+-    and FAIL-CLOSED — unlike `compute_branch_changed_paths` this raises on a git error
+-    instead of reading partial stdout, so the staging set can't silently miss a file.
+-    `base_branch` is the per-task PINNED base (#91), not live config."""
+-    seen: set[str] = set()
+-    paths: list[str] = []
+-    for args in (
+-        ["diff", "-z", "--name-only", f"{base_branch}...HEAD"],
+-        ["diff", "-z", "--name-only"],
+-        ["diff", "-z", "--name-only", "--cached"],
+-    ):
+-        out = run_git_checked(["-c", "core.quotepath=false", *args], cwd).stdout
+-        for p in out.split("\0"):
+-            if p and p not in seen:
+-                seen.add(p)
+-                paths.append(p)
+-    return paths
+-
+-
+-def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before_untracked: set[str]) -> None:
++def _scope_root(r: str) -> str:
++    """Normalize a source/test dir root to a trailing-slash POSIX prefix.
++    Used by the pre-worker out-of-scope tracked floor (#91 Part A)."""
++    r = r.replace("\\", "/")
++    return r if r.endswith("/") else r + "/"
++
++
++def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, cwd: Path) -> set[str]:
++    """Pre-worker out-of-scope tracked floor (#91 Part A): the operator's tracked paths
++    changed vs the pinned base that lie OUTSIDE source_dirs/test_dir. The task dir is
++    EXEMPT — its files (outcome.md, state.json, the *_review.md trail) are the harness's
++    own decision trail, excluded here for the same reason `_commit_worker_diff` and the
++    Layer-2 untracked gate (`_uncommitted_outside_scope_files`) exclude them: a consumer
++    who commits their batch dir onto the task branch must not be falsely refused over the
++    harness's own artifacts. Genuine operator tracked WIP outside scope still trips the
++    floor. Mirrors the `_in_task_dir` POSIX-prefix logic used by those two functions."""
++    try:
++        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
++    except ValueError:
++        task_rel = None
++
++    def _in_task_dir(p: str) -> bool:
++        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
++
++    scope_roots = [_scope_root(r) for r in (*proj.source_dirs, proj.test_dir)]
++    return {
++        p
++        for p in current_tracked
++        if not _in_task_dir(p) and not any(p.replace("\\", "/").startswith(root) for root in scope_roots)
++    }
++
++
++def _commit_worker_diff(
++    task_dir: Path,
++    state: dict[str, Any],
++    cwd: Path,
++    before_untracked: set[str],
++    before_tracked: set[str],
++) -> None:
+     """Commit the implementer's work — tracked changes PLUS files it newly created —
+     then refresh impl_diff.patch from the committed range. Mode-generic (used by BOTH
+     the agent-pair and tdd implement paths, #82).
+@@ -148,13 +168,32 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
+     unintended files. Fail-closed: any git failure raises (the caller turns it into a
+     phase error) rather than proceeding to review on a stale/incomplete range.
+ 
+-    Known limitation: a snapshot diffs by NAME, so a file that was ALREADY untracked
+-    before the worker ran and is then *modified* in place (not created) is not
+-    detected — it stays in `before`, so `current - before` excludes it. This is a
+-    pathological case (the implementer is scoped to outcome.md's Affected files; a
+-    pre-existing untracked file is the user's own scratch, not task scope) and such a
+-    change would not be in the PR anyway; closing it would require content-hashing the
+-    whole untracked set, which is disproportionate here.
++    `before_tracked` (#91 Part A) is the pre-worker tracked baseline, passed in BY THE
++    CALLER as the SAME in-memory `set` it got from ``get_or_set_tracked_baseline``
++    (NOT re-read from disk here, so the same-round TOCTOU safety of IR-006 is preserved;
++    the worker runs as a separate subprocess and cannot modify the caller's in-memory
++    set). ``set(_tracked_changed_paths(now)) - before_tracked`` is exactly the tracked
++    changes the implementer made this round, so the operator's pre-existing tracked
++    modifications are not swept into the task commit.
++
++    Known limitation — untracked side: a snapshot diffs by NAME, so a file that was
++    ALREADY untracked before the worker ran and is then *modified* in place (not
++    created) is not detected — it stays in `before_untracked`, so `current -
++    before_untracked` excludes it. This is a pathological case (the implementer is
++    scoped to outcome.md's Affected files; a pre-existing untracked file is the
++    user's own scratch, not task scope) and such a change would not be in the PR
++    anyway; closing it would require content-hashing the whole untracked set, which
++    is disproportionate here.
++
++    Known limitation — tracked side: the tracked baseline is also a snapshot by NAME.
++    If the operator modified a tracked file in place BEFORE the worker AND the worker
++    then *also* modifies that same file, the path is in ``before_tracked``, so
++    ``now − before_tracked`` excludes the worker's change to it. The out-of-scope floor
++    (run pre-worker) already removes the most damaging case (an operator pre-edit
++    outside source/test scope); the residual is an in-scope tracked file the operator
++    pre-edited — itself anomalous since the worker is scoped to outcome.md's Affected
++    files. Closing it would require content-hashing the whole tracked set, which is
++    judged disproportionate here.
+     """
+     state["implement_round_count"] = int(state.get("implement_round_count") or 0) + 1
+     round_n = int(state["implement_round_count"])
+@@ -173,9 +212,10 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
+ 
+     base_branch = pinned_base_branch(state, cwd)
+     new_untracked = untracked_files(cwd) - before_untracked
++    tracked_delta = set(_tracked_changed_paths(cwd, base_branch)) - before_tracked
+     seen: set[str] = set()
+     to_stage: list[str] = []
+-    for path in _tracked_changed_paths(cwd, base_branch) + sorted(new_untracked):
++    for path in sorted(tracked_delta) + sorted(new_untracked):
+         if path not in seen and not _in_task_dir(path):  # filter BOTH tracked + new untracked
+             seen.add(path)
+             to_stage.append(path)
+@@ -193,9 +233,18 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
+     This is defense-in-depth: if anything source/test still shows uncommitted (a
+     failed commit, a file changed after the snapshot), the committed range
+     `git diff <base>...HEAD` the reviewer inspects would be STALE relative to the tree
+-    verification just passed on (verify ran on the dirty worktree). Returns
+-    the uncommitted *source/test* files across all three states that would diverge
+-    the committed range from the worktree verification ran on:
++    verification just passed on (verify ran on the dirty worktree).
++
++    Layer 1 of the post-commit two-layer integrity gate is intentionally
++    baseline-INDEPENDENT (#91 Part A): an operator's pre-existing in-scope tracked
++    edit is subtracted from the task commit by `_commit_worker_diff` and so remains
++    uncommitted in the worktree — this gate still flags it, deferring the round, so a
++    contaminated in-scope tree never produces a stale reviewed range. The operator must
++    commit or stash even in-scope WIP before re-running; the out-of-scope floor handles
++    the out-of-scope case earlier (pre-worker). This keeps the #50/#112 gate unchanged.
++
++    Returns the uncommitted *source/test* files across all three states that would
++    diverge the committed range from the worktree verification ran on:
+       - staged-but-uncommitted (`git diff --cached`): defense-in-depth — the commit
+         is fail-closed now, but a hook or partial commit could still leave staged
+         changes out of HEAD, so this stays caught here;
+@@ -307,12 +356,26 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+ 
+     rr = repo_root()
+     base_branch = pinned_base_branch(state, rr)  # #91: pinned pre-worker, not live config
+-    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
+-    # the persisted value is re-used across restarts so a file created in a prior
+-    # interrupted round is correctly re-attributed). Persist the baseline to
+-    # state.json BEFORE invoking the worker so it survives a crash between
+-    # file-create and _commit_worker_diff (IR-006 pre-worker discipline, #112).
++    # Pre-worker baseline snapshot (#91 Part A + #112):
++    #   1. Fresh tracked probe for the out-of-scope floor (fail-closed on git error).
++    #   2. Out-of-scope floor: if any tracked path lies outside source_dirs/test_dir,
++    #      refuse and tell the operator to stash/commit — WITHOUT persisting a baseline
++    #      so a clean re-run is never self-locked (PR-001 fix).
++    #   3. Set-once tracked baseline (key-absent → store; key-present → reuse stored).
++    #   4. Set-once untracked baseline.
++    #   5. Single persist covering BOTH baselines.
+     try:
++        current_tracked = _tracked_changed_paths(rr, base_branch)
++        current_tracked_set = set(current_tracked)
++        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr)
++        if outside_scope:
++            fb = (
++                "refusing to sweep operator tracked WIP into the task commit; "
++                "commit or stash your unrelated tracked WIP before re-running. "
++                f"Out-of-scope tracked paths: {', '.join(sorted(outside_scope))}"
++            )
++            return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        before_tracked = get_or_set_tracked_baseline(state, rr, base_branch, _tracked_fn=lambda *_: current_tracked_set)
+         before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
+         persist_state(task_dir, state)
+     except (RuntimeError, OSError) as exc:
+@@ -360,7 +423,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     verification["last_run_at"] = datetime.now(timezone.utc).isoformat()
+     (task_dir / "verification.log").write_text(verify_output, encoding="utf-8")
+     try:
+-        _commit_worker_diff(task_dir, state, rr, before_untracked)
++        _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
+         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+@@ -451,12 +514,25 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         msg = f"invalid project.verify_command in config: {exc}"
+         return PhaseResult(status="error", feedback=msg, log=msg, diff="")
+ 
+-    # Obtain the per-task untracked baseline ONCE (set-once: if already in state,
+-    # the persisted value is re-used across restarts). Persist BEFORE invoking the
+-    # worker so the baseline survives a crash between file-create and
+-    # _commit_worker_diff (#112 / IR-006). The test was already committed by
+-    # write_test, so it is not in `before` and is not re-handled here (#82).
++    # Pre-worker baseline snapshot (#91 Part A + #112), same as agent-pair path:
++    #   1. Fresh tracked probe for the out-of-scope floor (fail-closed on git error).
++    #   2. Out-of-scope floor: if any tracked path lies outside source_dirs/test_dir,
++    #      refuse — WITHOUT persisting a baseline so a clean re-run is never self-locked.
++    #   3. Set-once tracked baseline. 4. Set-once untracked baseline. 5. Single persist.
++    # The test was already committed by write_test (#82); it is therefore in the tracked
++    # baseline (not new_untracked) and flows through the normal tracked-delta path.
+     try:
++        current_tracked = _tracked_changed_paths(rr, base_branch)
++        current_tracked_set = set(current_tracked)
++        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr)
++        if outside_scope:
++            fb = (
++                "refusing to sweep operator tracked WIP into the task commit; "
++                "commit or stash your unrelated tracked WIP before re-running. "
++                f"Out-of-scope tracked paths: {', '.join(sorted(outside_scope))}"
++            )
++            return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        before_tracked = get_or_set_tracked_baseline(state, rr, base_branch, _tracked_fn=lambda *_: current_tracked_set)
+         before_untracked = get_or_set_untracked_baseline(state, rr, _untracked_fn=untracked_files)
+         persist_state(task_dir, state)
+     except (RuntimeError, OSError) as exc:
+@@ -482,7 +558,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     # reviewer reads equals EXACTLY what the PR will contain. The verify ran on the
+     # worktree; commit/regen happen AFTER it so the patch matches the tree that passed.
+     try:
+-        _commit_worker_diff(task_dir, state, rr, before_untracked)
++        _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
+         return PhaseResult(status="error", feedback=fb, log=fb, diff="")

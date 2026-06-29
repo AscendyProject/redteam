@@ -154,6 +154,7 @@ def test_implement_agent_pair_prompt_injects_foreign_config(tmp_path) -> None:
         patch("phase_runners.implement.repo_root", return_value=tmp_path),
         patch("phase_runners.implement.compute_repo_diff", return_value=""),
         patch("phase_runners.implement.untracked_files", return_value=set()),
+        patch("phase_runners.implement._tracked_changed_paths", return_value=[]),
         patch("phase_runners.implement._commit_worker_diff", lambda *a, **k: None),
         patch("phase_runners.implement._uncommitted_scope_files", return_value=[]),
         patch("phase_runners.implement._write_current_diff", return_value=("", "sha")),
