@@ -1,0 +1,95 @@
+# Operator steering for the #117 re-plan
+
+plan_review was right on all four items — re-plan accordingly. The converged
+framing is correct and must stay: **same-user, stdlib-only, worker-needs-Bash =
+tamper PREVENTION is impossible; the target is fail-closed DETECTION.** Keep that
+verbatim in the decision record. Now address each finding.
+
+## PR-001 (blocker) — posture decision: close the cross-run residual by failing closed, do NOT rely on a structural "is it currently untracked" probe
+
+The structural probe cannot work: a worker-poisoned file that is still currently
+untracked is indistinguishable from a legitimately pre-existing untracked file.
+So stop trying to tell them apart. Operator decision:
+
+**On a cross-run load, do NOT trust the stored outside-scope baseline at all —
+re-derive safety from the live worktree by demanding a clean outside-scope
+untracked surface, exactly like the #91/#112 "locked behavior".**
+
+Key simplification to pursue (verify it against the code, then design it):
+
+- The poisoned baseline is only ever *consumed* at one point: a cross-run
+  `load_state` (a NEW process reading state.json from disk). Within a single
+  orchestrator process, `process_task` loads state once and reuses the in-memory
+  dict across rounds; `_commit_worker_diff` / Layer-2 receive the baseline as an
+  in-memory argument, not a fresh disk re-read. **VERIFY there is no in-process
+  re-read of state.json between baseline-set and baseline-consume.** If that holds,
+  the in-process vector is already closed and the ONLY exposure is cross-run.
+- Therefore: trust a key-present baseline ONLY when THIS process set it
+  (first-entry this run). When the baseline is key-present but was loaded from disk
+  by this process (cross-run resume), re-apply the existing outside-scope untracked
+  floor (the `_floor_outside_scope` shape already used at first-entry, `task_dir`
+  exempt, `source_dirs`/`test_dir` scope). If any outside-scope untracked file is
+  present → `status="error"` ("baseline cannot be trusted across a restart; commit
+  or stash outside-scope untracked files and re-run", naming the paths). This
+  collapses "poison vs. legit" into "clean the tree" and fully closes the smuggle:
+  the worker-created outside-scope file is either committed/reviewed or trips a
+  visible dead-end — never silently dropped.
+- A process-local in-memory marker (e.g. the set of baseline keys this process
+  stamped) is a clean way to distinguish "set this process" from "loaded from
+  disk". Keep it in memory only.
+- **The in-process HMAC and the load_state structural probe become OPTIONAL.**
+  Prefer DROPPING them (simplicity-first) if the floor + process-local trust fully
+  closes PR-001 — fewer moving parts, no key-lifecycle surface. Only keep the
+  in-process HMAC if your code-verification finds a real in-process disk re-read
+  that reopens the in-process vector; if so, scope it to exactly that and justify
+  it. Let plan_review judge whether the floor alone is sufficient.
+
+## PR-002 (blocker) — wrong hook location
+
+Do NOT run any trust/git probe inside `load_state` — it executes before
+`repo_root()` / config load / `_ensure_task_branch`, i.e. against whatever
+checkout happens to be present. Put the cross-run check in the **implement runner**
+at baseline consumption, AFTER the task branch is ensured and with the pinned base
+available (both the agent-pair and the TDD paths). With the PR-001 approach above
+(re-apply the floor at consume time), this falls out naturally — no `load_state`
+git probe at all.
+
+## PR-003 (major) — non-existent API path
+
+If you keep the worker-side tool-deny / env-scrub, it is **defense-in-depth only,
+bypassable via Bash — not a trust root**, and it must go where the worker argv and
+`subprocess.Popen` actually live: `run_claude` in
+`.redteam/workflows/phase_runners/_base.py`, mirroring how the reviewer flags are
+passed. `ClaudeWorkerAdapter.invoke` only delegates to `run_claude`, so flags/env
+added there are dead. Given PR-001 no longer depends on env-scrubbing a secret
+(no persistent secret), keep this minimal or drop it; if kept, comment that it is
+defense-in-depth and document the Bash bypass.
+
+## PR-004 (major) — HMAC key lifecycle
+
+If you drop the HMAC per PR-001, this dissolves — state that explicitly. If you
+keep an in-process HMAC for a verified in-process re-read, define "key unset"
+behavior for direct `process_task`/`persist_state` callers and tests explicitly
+(fail closed, or skip-stamp-and-skip-verify symmetrically — never verify against
+an absent key as if valid), and add the one-line test helper that mirrors the
+stamping so fixtures stay simple.
+
+## Hard constraints (unchanged — re-confirm in outcome.md)
+- stdlib-only, zero runtime deps; engine project-agnostic — NO OS sandbox, no
+  `sys.platform` branch, no seccomp/container/Linux-only path.
+- #112 two-layer gate preserved EXACTLY: Layer-1 `_uncommitted_scope_files`
+  stays baseline-INDEPENDENT `(cwd, proj)`; Layer-2 stays baseline-relative +
+  `task_dir`-exempt.
+- #91 contracts preserved: `_commit_worker_diff` keeps explicit
+  `before_untracked` / `before_tracked` args (no in-function state re-read);
+  pinned base end-to-end.
+- No new false positives: a healthy in-process multi-round flow, a healthy
+  cross-run resume with a CLEAN outside-scope tree, a fresh TDD task (`write_test`
+  commits the test inside `test_dir` first), and an operator's `task_dir` scratch
+  must NOT be flagged.
+- Fail closed, never silently mask: any trust-boundary ambiguity →
+  `status="error"` naming the offending file(s).
+- Keep the change surgical — reuse the existing floor shape; do not redesign the
+  worker adapter or the baseline helpers beyond what this closure needs.
+
+USER_DECISION: REVISE_PLAN
