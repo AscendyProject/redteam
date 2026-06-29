@@ -469,7 +469,7 @@ def test_layer2_outside_scope_uncommitted_flagged(monkeypatch, tmp_path):
     # — here we test Layer 2's detection capability)
     real_commit = impl._commit_worker_diff
 
-    def commit_no_migration(td, state, cwd, before):
+    def commit_no_migration(td, state, cwd, before, before_tracked):
         # Run real commit but the migration was untracked so it would be picked up
         # normally. To test Layer 2 detection, we want it to remain untracked.
         # We achieve this by: letting _commit_worker_diff run normally (it commits
@@ -477,7 +477,7 @@ def test_layer2_outside_scope_uncommitted_flagged(monkeypatch, tmp_path):
         # WILL commit it. So for this test to isolate Layer 2, we need the migration
         # to NOT be committed.
         # Instead: let real commit run but afterward unstage the migration.
-        real_commit(td, state, cwd, before)
+        real_commit(td, state, cwd, before, before_tracked)
         # Now reset the migration commit so it's untracked again (simulating missed commit)
         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
 
@@ -594,8 +594,8 @@ def test_feedback_wording_layer2_only_no_source_test_claim(monkeypatch, tmp_path
 
     real_commit = impl._commit_worker_diff
 
-    def commit_skip_migration(td, state, cwd, before):
-        real_commit(td, state, cwd, before)
+    def commit_skip_migration(td, state, cwd, before, before_tracked):
+        real_commit(td, state, cwd, before, before_tracked)
         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
 
     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_migration)
@@ -640,8 +640,8 @@ def test_feedback_wording_layer1_only_agent_pair(monkeypatch, tmp_path):
 
     real_commit = impl._commit_worker_diff
 
-    def commit_skip_source(td, state, cwd, before):
-        real_commit(td, state, cwd, before)
+    def commit_skip_source(td, state, cwd, before, before_tracked):
+        real_commit(td, state, cwd, before, before_tracked)
         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
 
     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_source)
@@ -684,8 +684,8 @@ def test_feedback_wording_both_layers_names_all_files(monkeypatch, tmp_path):
 
     real_commit = impl._commit_worker_diff
 
-    def commit_skip_all(td, state, cwd, before):
-        real_commit(td, state, cwd, before)
+    def commit_skip_all(td, state, cwd, before, before_tracked):
+        real_commit(td, state, cwd, before, before_tracked)
         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
 
     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_all)
@@ -739,8 +739,8 @@ def test_feedback_wording_tdd_path(monkeypatch, tmp_path):
 
     real_commit = impl._commit_worker_diff
 
-    def commit_skip_migration(td, state, cwd, before):
-        real_commit(td, state, cwd, before)
+    def commit_skip_migration(td, state, cwd, before, before_tracked):
+        real_commit(td, state, cwd, before, before_tracked)
         subprocess.run(["git", "reset", "HEAD~1"], cwd=cwd, check=False, capture_output=True)
 
     monkeypatch.setattr(impl, "_commit_worker_diff", commit_skip_migration)

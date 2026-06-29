@@ -144,7 +144,13 @@ def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, c
     }
 
 
-def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before_untracked: set[str]) -> None:
+def _commit_worker_diff(
+    task_dir: Path,
+    state: dict[str, Any],
+    cwd: Path,
+    before_untracked: set[str],
+    before_tracked: set[str],
+) -> None:
     """Commit the implementer's work — tracked changes PLUS files it newly created —
     then refresh impl_diff.patch from the committed range. Mode-generic (used by BOTH
     the agent-pair and tdd implement paths, #82).
@@ -162,12 +168,13 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
     unintended files. Fail-closed: any git failure raises (the caller turns it into a
     phase error) rather than proceeding to review on a stale/incomplete range.
 
-    `before_tracked` (#91 Part A) is read from ``state["implement_tracked_baseline"]``
-    (the in-memory dict — NOT re-read from disk, so the same-round TOCTOU safety of
-    IR-006 is preserved; the worker runs as a separate subprocess and cannot modify the
-    in-memory Python dict). ``set(_tracked_changed_paths(now)) - before_tracked`` is
-    exactly the tracked changes the implementer made this round, so the operator's
-    pre-existing tracked modifications are not swept into the task commit.
+    `before_tracked` (#91 Part A) is the pre-worker tracked baseline, passed in BY THE
+    CALLER as the SAME in-memory `set` it got from ``get_or_set_tracked_baseline``
+    (NOT re-read from disk here, so the same-round TOCTOU safety of IR-006 is preserved;
+    the worker runs as a separate subprocess and cannot modify the caller's in-memory
+    set). ``set(_tracked_changed_paths(now)) - before_tracked`` is exactly the tracked
+    changes the implementer made this round, so the operator's pre-existing tracked
+    modifications are not swept into the task commit.
 
     Known limitation — untracked side: a snapshot diffs by NAME, so a file that was
     ALREADY untracked before the worker ran and is then *modified* in place (not
@@ -204,10 +211,6 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
 
     base_branch = pinned_base_branch(state, cwd)
-    # Read the tracked baseline from the in-memory state dict (set before the worker
-    # ran; the worker is a separate subprocess and cannot modify this Python dict, so
-    # this is same-round TOCTOU-safe per IR-006 — no disk re-read).
-    before_tracked: set[str] = set(state.get("implement_tracked_baseline") or [])
     new_untracked = untracked_files(cwd) - before_untracked
     tracked_delta = set(_tracked_changed_paths(cwd, base_branch)) - before_tracked
     seen: set[str] = set()
@@ -222,9 +225,7 @@ def _commit_worker_diff(task_dir: Path, state: dict[str, Any], cwd: Path, before
         _write_current_diff(task_dir, cwd, base_branch)
 
 
-def _uncommitted_scope_files(
-    cwd: Path, proj: Any, before_tracked: frozenset[str] | set[str] = frozenset()
-) -> list[str]:
+def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     """Source/test files still uncommitted AFTER the WIP commit (#50).
 
     `_commit_worker_diff` stages the implementer's tracked changes PLUS the files
@@ -234,18 +235,13 @@ def _uncommitted_scope_files(
     `git diff <base>...HEAD` the reviewer inspects would be STALE relative to the tree
     verification just passed on (verify ran on the dirty worktree).
 
-    `before_tracked` (#91 Part A) is the pre-worker tracked baseline — the operator's
-    OWN pre-existing tracked modifications, captured before the worker ran. Those paths
-    are DELIBERATELY left uncommitted (subtracted in `_commit_worker_diff` so the
-    operator's WIP is never swept into the task commit), so they must NOT be read as
-    "implement left changes uncommitted": excluding them here is the tracked-side
-    corollary of the #112 untracked baseline (Layer 2 already excludes the untracked
-    baseline). The reviewed range is stale relative to verify's worktree by exactly the
-    operator's own WIP — which is intentionally out of the task PR, not the worker's
-    output. This is additive: a tracked file the WORKER changed is NOT in
-    `before_tracked` (the baseline is set-once pre-worker), so a real worker-left-it
-    -uncommitted bug is still caught. Default `frozenset()` keeps legacy 2-arg callers
-    (baseline-independent) behaving exactly as before.
+    Layer 1 of the post-commit two-layer integrity gate is intentionally
+    baseline-INDEPENDENT (#91 Part A): an operator's pre-existing in-scope tracked
+    edit is subtracted from the task commit by `_commit_worker_diff` and so remains
+    uncommitted in the worktree — this gate still flags it, deferring the round, so a
+    contaminated in-scope tree never produces a stale reviewed range. The operator must
+    commit or stash even in-scope WIP before re-running; the out-of-scope floor handles
+    the out-of-scope case earlier (pre-worker). This keeps the #50/#112 gate unchanged.
 
     Returns the uncommitted *source/test* files across all three states that would
     diverge the committed range from the worktree verification ran on:
@@ -292,11 +288,7 @@ def _uncommitted_scope_files(
         return r if r.endswith("/") else r + "/"
 
     roots = [_root(r) for r in (*proj.source_dirs, proj.test_dir)]
-    stray = {
-        path
-        for path in candidates
-        if path not in before_tracked and any(path.replace("\\", "/").startswith(root) for root in roots)
-    }
+    stray = {path for path in candidates if any(path.replace("\\", "/").startswith(root) for root in roots)}
     return sorted(stray)
 
 
@@ -431,7 +423,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     verification["last_run_at"] = datetime.now(timezone.utc).isoformat()
     (task_dir / "verification.log").write_text(verify_output, encoding="utf-8")
     try:
-        _commit_worker_diff(task_dir, state, rr, before_untracked)
+        _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
     except (RuntimeError, OSError) as exc:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -451,7 +443,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         # worker created them but left them uncommitted). status="error" routes through
         # the generic retry; a repeat defers/escalates normally (#50 review PR-001).
         try:
-            layer1 = _uncommitted_scope_files(rr, proj, before_tracked)
+            layer1 = _uncommitted_scope_files(rr, proj)
             layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
         except (OSError, RuntimeError) as exc:
             # A git probe failed → can't confirm the committed range is fresh. Fail
@@ -566,7 +558,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     # reviewer reads equals EXACTLY what the PR will contain. The verify ran on the
     # worktree; commit/regen happen AFTER it so the patch matches the tree that passed.
     try:
-        _commit_worker_diff(task_dir, state, rr, before_untracked)
+        _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
     except (RuntimeError, OSError) as exc:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
@@ -583,7 +575,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         # outside source/test not in the persisted baseline. Also the safety net for a
         # legacy in-flight tdd task whose test was never committed (trips Layer 1).
         try:
-            layer1 = _uncommitted_scope_files(rr, proj, before_tracked)
+            layer1 = _uncommitted_scope_files(rr, proj)
             layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
         except (OSError, RuntimeError) as exc:
             fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."

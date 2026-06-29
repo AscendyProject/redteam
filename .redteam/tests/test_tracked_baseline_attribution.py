@@ -398,7 +398,10 @@ def test_out_of_scope_floor_fresh_probe_tdd(monkeypatch, tmp_path):
 
 
 def test_in_scope_preexisting_tracked_not_attributed_agent_pair(monkeypatch, tmp_path):
-    """Operator pre-edits a source file; worker is no-op: pre-edit stays uncommitted."""
+    """Operator pre-edits a source file; worker is no-op. The pre-edit is NOT swept into
+    the commit (subtracted via the baseline), and because it remains uncommitted in
+    scope the baseline-INDEPENDENT Layer-1 gate defers the round (status=error) — the
+    locked behavior: the operator must commit/stash even in-scope WIP before re-running."""
     impl = _impl()
     repo, task_dir = _make_repo(tmp_path)
 
@@ -422,9 +425,10 @@ def test_in_scope_preexisting_tracked_not_attributed_agent_pair(monkeypatch, tmp
 
     result = impl._run_agent_pair(task_dir, st)
 
-    # Floor passes (in-scope); pre-edit is captured in baseline
-    # Worker is no-op → no tracked delta beyond baseline → pre-edit NOT committed
-    assert result["status"] == "approved", result["feedback"]
+    # Floor passes (in-scope); pre-edit captured in baseline → no tracked delta → NOT
+    # committed. The leftover in-scope edit then trips Layer 1 (baseline-INDEPENDENT).
+    assert result["status"] == "error", result["feedback"]
+    assert "app/existing.py" in result["feedback"]
     committed = _committed_paths(repo)
     assert "app/existing.py" not in committed
 
@@ -434,7 +438,9 @@ def test_in_scope_preexisting_tracked_not_attributed_agent_pair(monkeypatch, tmp
 
 
 def test_in_scope_preexisting_tracked_not_attributed_tdd(monkeypatch, tmp_path):
-    """TDD path: operator pre-edits source; worker is no-op: pre-edit stays uncommitted."""
+    """TDD path: operator pre-edits source; worker is no-op. Pre-edit subtracted (not
+    committed); the leftover in-scope edit trips the baseline-INDEPENDENT Layer-1 gate so
+    the round defers (status=error) — the same locked behavior as the agent-pair path."""
     impl = _impl()
     repo, task_dir = _make_repo(tmp_path)
 
@@ -454,7 +460,8 @@ def test_in_scope_preexisting_tracked_not_attributed_tdd(monkeypatch, tmp_path):
 
     result = impl.run(task_dir, st)
 
-    assert result["status"] == "approved", result["feedback"]
+    assert result["status"] == "error", result["feedback"]
+    assert "app/existing.py" in result["feedback"]
     committed = _committed_paths(repo)
     assert "app/existing.py" not in committed
     assert (repo / "app" / "existing.py").read_text(encoding="utf-8") == "x = 2\n"
@@ -580,7 +587,12 @@ def test_durable_preworker_flush_tracked_agent_pair(monkeypatch, tmp_path):
     assert isinstance(persisted["implement_tracked_baseline"], list)
     assert "app/existing.py" in persisted["implement_tracked_baseline"]
 
-    # Round 2: worker makes a NEW tracked change; pre-edit must NOT be committed
+    # Round 2: worker makes a NEW tracked change; pre-edit must NOT be committed.
+    # The R1 baseline (with app/existing.py) is REUSED — get_or_set_tracked_baseline
+    # returns the stored value without re-snapshotting — so existing.py is still
+    # subtracted while the worker's new_feature.py lands in the WIP commit. The leftover
+    # in-scope pre-edit then trips the baseline-INDEPENDENT Layer-1 gate (status=error);
+    # the set-once guarantee is in the committed paths, not the final status.
     def invoke_round2(**kwargs):
         (repo / "app" / "new_feature.py").write_text("y = 3\n", encoding="utf-8")
         return {"returncode": 0, "stdout": "done", "stderr": ""}
@@ -589,11 +601,12 @@ def test_durable_preworker_flush_tracked_agent_pair(monkeypatch, tmp_path):
 
     st2 = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     result2 = impl._run_agent_pair(task_dir, st2)
-    assert result2["status"] == "approved", result2["feedback"]
+    assert result2["status"] == "error", result2["feedback"]
+    assert "app/existing.py" in result2["feedback"]
 
     committed = _committed_paths(repo)
-    assert "app/new_feature.py" in committed
-    assert "app/existing.py" not in committed  # pre-edit NOT attributed to worker
+    assert "app/new_feature.py" in committed  # worker's R2 change lands in the WIP commit
+    assert "app/existing.py" not in committed  # pre-edit NOT attributed to worker (baseline reused)
 
 
 def test_durable_preworker_flush_tracked_tdd(monkeypatch, tmp_path):
@@ -639,6 +652,9 @@ def test_durable_preworker_flush_tracked_tdd(monkeypatch, tmp_path):
     assert "implement_tracked_baseline" in persisted
     assert "app/existing.py" in persisted["implement_tracked_baseline"]
 
+    # Round 2 reuses the persisted baseline (no re-snapshot): existing.py is subtracted
+    # while new_feature.py lands in the WIP commit; the leftover in-scope pre-edit then
+    # trips the baseline-INDEPENDENT Layer-1 gate (status=error), the locked behavior.
     def invoke_r2(**kwargs):
         (repo / "app" / "new_feature.py").write_text("y = 3\n", encoding="utf-8")
         return {"returncode": 0, "stdout": "done", "stderr": ""}
@@ -647,11 +663,12 @@ def test_durable_preworker_flush_tracked_tdd(monkeypatch, tmp_path):
 
     st2 = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     result2 = impl.run(task_dir, st2)
-    assert result2["status"] == "approved", result2["feedback"]
+    assert result2["status"] == "error", result2["feedback"]
+    assert "app/existing.py" in result2["feedback"]
 
     committed = _committed_paths(repo)
-    assert "app/new_feature.py" in committed
-    assert "app/existing.py" not in committed
+    assert "app/new_feature.py" in committed  # worker's R2 change lands in the WIP commit
+    assert "app/existing.py" not in committed  # baseline reused → pre-edit subtracted
 
 
 # =============================================================================
@@ -751,7 +768,9 @@ def test_pinned_base_no_live_config_bleed(tmp_path):
 
 
 def test_commit_worker_diff_before_tracked_excludes_preexisting(monkeypatch, tmp_path):
-    """_commit_worker_diff reads before_tracked from state and excludes pre-existing tracked paths."""
+    """_commit_worker_diff takes before_tracked as an EXPLICIT argument (outcome.md:
+    arg passthrough): a path in the passed set is excluded from the commit even when it
+    currently shows in _tracked_changed_paths, while a path NOT in the set still lands."""
     impl = _impl()
     repo, task_dir = _make_repo(tmp_path)
 
@@ -765,19 +784,20 @@ def test_commit_worker_diff_before_tracked_excludes_preexisting(monkeypatch, tmp
     # Operator staged a tracked change to pre.py before worker
     (repo / "app" / "pre.py").write_text("x = 2\n", encoding="utf-8")
 
-    # State has the pre-worker baseline (contains app/pre.py)
-    st = _state(implement_tracked_baseline=["app/pre.py"])
+    st = _state()
 
     # Worker now also modifies worker.py (different file)
     (repo / "app" / "worker.py").write_text("w = 99\n", encoding="utf-8")
 
-    # Call _commit_worker_diff directly (before_tracked read from state)
+    # Call _commit_worker_diff directly with an EXPLICIT before_tracked set — NOT read
+    # from state (the runner passes the same in-memory set get_or_set_tracked_baseline
+    # returned). app/pre.py is in the set; app/worker.py is not.
     before_untracked: set[str] = set()
-    impl._commit_worker_diff(task_dir, st, repo, before_untracked)
+    impl._commit_worker_diff(task_dir, st, repo, before_untracked, {"app/pre.py"})
 
     committed = _committed_paths(repo)
-    assert "app/worker.py" in committed  # worker's own change lands
-    assert "app/pre.py" not in committed  # operator pre-edit excluded
+    assert "app/worker.py" in committed  # worker's own change lands (NOT in before_tracked)
+    assert "app/pre.py" not in committed  # operator pre-edit excluded (in before_tracked)
 
 
 # =============================================================================
