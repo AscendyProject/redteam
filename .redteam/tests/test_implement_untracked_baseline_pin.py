@@ -529,6 +529,7 @@ def test_layer2_user_scratch_in_baseline_not_flagged(monkeypatch, tmp_path):
     (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
 
     _wire_agent_pair(impl, monkeypatch, repo)  # worker no-op
+    impl._trusted_task_dirs.add(task_dir)  # bypass cross-run floor: test covers Layer-2 only
 
     result = impl._run_agent_pair(task_dir, st)
 
@@ -793,6 +794,7 @@ def test_user_scratch_excluded_across_multiple_rounds(monkeypatch, tmp_path):
     # Round 1: baseline is taken (scratch.md goes in); round1.py is committed
     st = _state()
     (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
+    impl._trusted_task_dirs.add(task_dir)  # bypass cross-run floor: test covers Layer-2 only
     r1 = impl._run_agent_pair(task_dir, st)
     assert r1["status"] == "approved", r1["feedback"]
     assert "app/round1.py" in _committed_paths(repo)
