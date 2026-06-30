@@ -44,6 +44,14 @@ jobs:
         run: |
           version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "([^"]+)"/\1/')
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # The plugin manifest carries its own version; it must track pyproject
+          # or the Claude Code marketplace ships a mislabeled plugin (the real
+          # v0.6.0 miss). Fail the release loudly if they ever diverge.
+          plugin_version=$(grep -m1 '"version"' .claude-plugin/plugin.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+          if [ "$version" != "$plugin_version" ]; then
+            echo "::error::Version mismatch: pyproject=$version but .claude-plugin/plugin.json=$plugin_version — bump both."
+            exit 1
+          fi
           # Idempotent: if v$version is already released, do nothing (a later
           # non-version edit to pyproject.toml shouldn't re-cut the release).
           if gh release view "v$version" >/dev/null 2>&1; then
