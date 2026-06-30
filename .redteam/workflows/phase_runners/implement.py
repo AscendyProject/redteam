@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import subprocess
 from datetime import datetime, timezone
@@ -135,7 +136,14 @@ def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, c
     Layer-2 untracked gate (`_uncommitted_outside_scope_files`) exclude them: a consumer
     who commits their batch dir onto the task branch must not be falsely refused over the
     harness's own artifacts. Genuine operator tracked WIP outside scope still trips the
-    floor. Mirrors the `_in_task_dir` POSIX-prefix logic used by those two functions."""
+    floor. Mirrors the `_in_task_dir` POSIX-prefix logic used by those two functions.
+
+    Sibling-task artifact exemption (#124): in a stacked goal-mode run, sibling task dirs
+    under the SAME batch's tasks root (i.e. task_dir.parent, POSIX-prefix) also expose
+    harness decision-trail artifacts (state.json, outcome.md, pr.md, *_review.md). Only
+    TOP-LEVEL paths directly under a sibling task dir (the relative-to-sibling path must
+    contain no '/') are exempt; a path in a sibling subdirectory, a non-allowlisted
+    sibling basename, or a path under a DIFFERENT batch's tasks dir still trips the floor."""
     try:
         task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
     except ValueError:
@@ -144,11 +152,42 @@ def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, c
     def _in_task_dir(p: str) -> bool:
         return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
 
+    # Sibling-task artifact exemption (#124): same-batch tasks/ root prefix.
+    try:
+        tasks_rel = task_dir.parent.resolve().relative_to(cwd.resolve()).as_posix()
+    except ValueError:
+        tasks_rel = None
+
+    _SIBLING_BASENAME_ALLOWLIST = frozenset({"state.json", "outcome.md", "pr.md"})
+
+    def _is_sibling_artifact(p: str) -> bool:
+        """True iff p is a harness decision-trail artifact at the TOP LEVEL of a sibling
+        task dir under the SAME batch (task_dir.parent). Paths in sibling subdirectories,
+        non-allowlisted basenames, and cross-batch paths return False."""
+        if tasks_rel is None:
+            return False
+        tasks_prefix = tasks_rel + "/"
+        if not p.startswith(tasks_prefix):
+            return False
+        remainder = p[len(tasks_prefix) :]  # "<sibling-id>/<artifact>" or deeper
+        slash_idx = remainder.find("/")
+        if slash_idx < 0:
+            return False  # directly under tasks/ root — no task-id segment
+        sibling_id = remainder[:slash_idx]
+        if sibling_id == task_dir.name:
+            return False  # same task, not a sibling
+        artifact_name = remainder[slash_idx + 1 :]
+        if "/" in artifact_name:
+            return False  # buried in a sibling subdirectory — NOT exempt
+        return artifact_name in _SIBLING_BASENAME_ALLOWLIST or fnmatch.fnmatchcase(artifact_name, "*_review.md")
+
     scope_roots = [_scope_root(r) for r in (*proj.source_dirs, proj.test_dir)]
     return {
         p
         for p in current_tracked
-        if not _in_task_dir(p) and not any(p.replace("\\", "/").startswith(root) for root in scope_roots)
+        if not _in_task_dir(p)
+        and not _is_sibling_artifact(p)
+        and not any(p.replace("\\", "/").startswith(root) for root in scope_roots)
     }
 
 
