@@ -1,0 +1,96 @@
+{
+  "task_id": "task-001-stacked-floor-exemption",
+  "mode": "agent-pair",
+  "phase": "create_pr",
+  "phases_completed": [
+    "plan_outcome",
+    "plan_review",
+    "implement",
+    "review_code"
+  ],
+  "next_phase": "create_pr",
+  "decision": "pending",
+  "owner": "claude",
+  "reviewer": "codex",
+  "next_action": null,
+  "review_items": [
+    {
+      "id": "PR-001",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-001 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-002",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-002 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "IR-001",
+      "phase": "review_code",
+      "severity": "major",
+      "status": "resolved",
+      "summary": "IR-001 severity:major status:resolved",
+      "carry_over_count": 0
+    }
+  ],
+  "verification": {
+    "commands": [
+      "bash .redteam/scripts/verify.sh"
+    ],
+    "last_exit_code": 0,
+    "last_output_path": "verification.log",
+    "last_run_at": "2026-06-30T02:40:44.712342+00:00",
+    "last_diff_sha256": "de43adb9fa9b44ee659671bc33e63114db02d5b99ee1e89541874d7c3615a841",
+    "verify_command": "bash .redteam/scripts/verify.sh",
+    "verify_allowlist": [
+      "pytest",
+      "ruff",
+      "mypy"
+    ]
+  },
+  "models": {
+    "planner": "claude-opus-4-7",
+    "implementer": "claude-sonnet-4-6",
+    "reviewer": "codex",
+    "rescue": "codex"
+  },
+  "escape": {
+    "ask_user": false,
+    "reason": null,
+    "return_phase": null
+  },
+  "implement_round_count": 2,
+  "tdd_test_files": [],
+  "retries": {
+    "plan_outcome": 1,
+    "implement": 1
+  },
+  "max_retries_per_phase": 2,
+  "last_failure_reason": null,
+  "last_failure_log": null,
+  "last_failure_diff": null,
+  "deferred_requirements": [],
+  "branch": "redteam/task-001-stacked-floor-exemption",
+  "pr_url": null,
+  "created_at": "2026-06-30T01:18:05.353717+00:00",
+  "updated_at": "2026-06-30T02:41:47.167990+00:00",
+  "base_branch": "main",
+  "phase_started_at": "2026-06-30T02:41:47.167519+00:00",
+  "last_user_response": null,
+  "implement_tracked_baseline": [],
+  "implement_untracked_baseline": [
+    ".redteam/batches/fix-124-stacked-floor/tasks/task-001-stacked-floor-exemption/input.md",
+    ".redteam/batches/fix-124-stacked-floor/tasks/task-001-stacked-floor-exemption/outcome.md",
+    ".redteam/batches/fix-124-stacked-floor/tasks/task-001-stacked-floor-exemption/plan_review.md",
+    ".redteam/batches/fix-124-stacked-floor/tasks/task-001-stacked-floor-exemption/plan_review.round1.md",
+    ".redteam/batches/fix-124-stacked-floor/tasks/task-001-stacked-floor-exemption/state.json"
+  ],
+  "last_reviewed_rev": "41f49ba2a4913afb087d32cb82bc03ef52ebc647",
+  "rescue_entry_count": 0
+}
