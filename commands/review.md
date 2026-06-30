@@ -12,7 +12,7 @@ require a task/batch and does NOT write code.
 Steps:
 
 1. Confirm the harness is vendored — `.redteam/workflows/orchestrator.py` must
-   exist. If not, tell the user to run `/redteam:redteam-install` first.
+   exist. If not, tell the user to run `/redteam:install` first.
 2. Run the reviewer:
 
    ```bash

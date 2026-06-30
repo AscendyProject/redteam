@@ -89,7 +89,7 @@ the reviewer fallback ladder (#37 step 4), install version-stamp + `--check`
 (#34), the dispatch-time pre-implement snapshot invariant (#39), the operator
 `progress.md` surface (#49), and a batch of fail-closed hardening (#40/#50/#51)
 + test-isolation fix (#54). v0.4.0 added the task-scaffolding command (#55,
-`orchestrator new` + `/redteam:redteam-new-task`), seeded a consumer's `verify.sh`
+`orchestrator new` + `/redteam:new-task`), seeded a consumer's `verify.sh`
 from a generic fail-closed template (#43), greened the cp949/Windows test suite
 (#48), and recorded the #37/#67 reviewer-transport decisions — **both** step 6
 (multiplexer transport) and step 5 (sub-agent reviewer adapter) rejected; see

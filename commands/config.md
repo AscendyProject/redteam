@@ -18,7 +18,7 @@ The four roles (config keys):
 Steps:
 
 1. Confirm `.redteam/config.toml` exists (harness vendored). If not, tell the
-   user to run `/redteam:redteam-install` first. Read and show the current
+   user to run `/redteam:install` first. Read and show the current
    `[models]` values.
 2. Ask the user what they want for each of the four roles (offer the current
    value as the default; offer the recommended defaults above). Use a clear

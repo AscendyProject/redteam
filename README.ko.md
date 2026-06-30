@@ -228,16 +228,20 @@ default = 2                     # 미분류 → 안전한 기본값
 > HTTPS URL은 SSH(포트 22)를 막는 방화벽 뒤를 포함해 어디서나 동작한다.
 > GitHub SSH 키가 설정돼 있으면 `AscendyProject/redteam` 단축형도 동작한다.
 
-이로써 여섯 개 서브 에이전트와 `/redteam:*` 명령이 등록된다. 프로젝트 루트에서
+이로써 일곱 개 서브 에이전트와 `/redteam:*` 명령이 등록된다. `/redteam`만 치면
+피커가 아래 여덟 서브커맨드로 좁혀진다. 프로젝트 루트에서
 `redteam-install`(PATH의 `redteam-install` 도구로도 노출)을 돌려 하네스를 vendoring한
 뒤, 나머지를 필요에 따라 쓴다:
 
 ```text
-/redteam:redteam-install        # .redteam/를 현재 repo에 vendoring
-/redteam:redteam-new-task       # 템플릿에서 다음 task-NNN 디렉터리 + input.md 스캐폴드
-/redteam:redteam-review         # 현재 브랜치 diff에 대한 일회성 cross-model 리뷰
-/redteam:redteam-config         # 역할별 모델 선택 (writer / reviewer / rescue)
-/redteam:redteam-status         # 배치의 파이프라인 상태 표시
+/redteam:install         # .redteam/를 현재 repo에 vendoring
+/redteam:new-task        # 템플릿에서 다음 task-NNN 디렉터리 + input.md 스캐폴드
+/redteam:goal            # goal 모드: goal.md를 스택형 태스크 DAG로 분해 후 실행
+/redteam:start           # 배치의 태스크를 파이프라인에 태워 실행 (첫 실행)
+/redteam:resume          # 게이트/실패/보류 이후 진행 중인 배치 이어가기
+/redteam:status          # 배치의 파이프라인 상태 표시
+/redteam:review          # 현재 브랜치 diff에 대한 일회성 cross-model 리뷰
+/redteam:config          # 역할별 모델 선택 (writer / reviewer / rescue)
 ```
 
 ### 또는 직접 vendoring (어떤 스택이든, Claude Code 불필요)
@@ -278,7 +282,7 @@ vendoring된다(`--overwrite`로 갱신); 프로젝트 소유 파일(`config.tom
 
 vendoring된 설치는 당신 repo 안의 엔진 *복사본*이므로 스스로 업데이트하지 않는다 — 새
 버전이 나오면 다시 vendoring한다. `--overwrite`는 하네스 소유 트리(`workflows/`,
-`prompts/`, `templates/`, `scripts/install.py`, 여섯 에이전트 스켈레톤,
+`prompts/`, `templates/`, `scripts/install.py`, 일곱 에이전트 스켈레톤,
 `.redteam/.redteam-version` 스탬프)만 갱신한다; 기존 프로젝트 소유 파일(`config.toml`,
 `docs/*`, `verify.sh`)과 `batches/` 아래 태스크 내용은 절대 덮어쓰지 않는다(설치
 스크립트는 거기 add-only `batches/.gitignore` 규칙만 보장하고 당신 파일은 그대로 둔다).
@@ -349,7 +353,7 @@ python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
 ```
 
 배치는 `tasks/<task-id>/input.md` 브리프들의 디렉터리다. `new`는 템플릿 `input.md`와
-함께 다음 `task-NNN` 디렉터리를 스캐폴드한다(또는 `/redteam:redteam-new-task` 사용);
+함께 다음 `task-NNN` 디렉터리를 스캐폴드한다(또는 `/redteam:new-task` 사용);
 브리프를 채운 뒤 `start`. 오케스트레이터는 태스크별 브랜치
 (`<branch_prefix>/<task-id>`)를 만들고 파이프라인을 돌리며, 각 사람 게이트에서 그것이
 지정하는 sentinel 파일을 당신이 건드릴 때까지 멈춘다.
@@ -362,9 +366,48 @@ python3 .redteam/workflows/orchestrator.py review
 ```
 
 `git diff <base>...HEAD`를 리뷰하고 `0` / `1` / `2`(승인 / 변경 요청 / reviewer 실패)로
-종료하므로 CI를 게이트할 수 있다. Claude Code에서는 `/redteam:redteam-review`로 노출.
+종료하므로 CI를 게이트할 수 있다. Claude Code에서는 `/redteam:review`로 노출.
 Fail-closed: 설정된 reviewer가 worker 자신의 프로바이더로 붕괴(self-review)하면
 거부한다.
+
+## Goal 모드
+
+위의 배치는 손으로 쓴 것이다 — 각 `tasks/<id>/input.md`를 직접 작성한다. **Goal
+모드**는 한 단계 위에서 시작하게 해준다: 사람이 쓴 `goal.md` 하나만 두면, 하네스가
+그것을 의존 순서가 잡힌 태스크 묶음으로 분해해 하나의 합성 파이프라인으로 돌린다.
+
+```bash
+# 1. 목표를 쓴다 (원하는 것을 끝에서 끝까지)
+#    .redteam/batches/<batch>/goal.md
+
+# 2. 태스크 DAG로 분해 — goal.json + 태스크별 tasks/<id>/input.md 생성
+python3 .redteam/workflows/orchestrator.py decompose .redteam/batches/<batch>
+
+# 3. 합성된 배치를 부모-우선으로 실행 (start/resume/status는 일반 배치와 동일)
+python3 .redteam/workflows/orchestrator.py start  .redteam/batches/<batch>
+python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
+```
+
+`decompose`는 `goal-decomposer` 서브 에이전트를 돌려 `goal.md`를 **단일 부모 DAG
+매니페스트**(`goal.json`)와 태스크별 브리프로 바꾸며, 그 분해 자체가 어떤 태스크도
+시드되기 전에 **cross-provider 리뷰**로 검증된다. 그다음 스케줄러는 태스크를
+**부모-우선**으로 돌리고, 각 의존 태스크는 **부모 브랜치 위에 스택**된다 — 리뷰 범위, PR
+베이스, 변경 경로가 모두 `parent-branch...HEAD`로 핀되므로, 각 드래프트 PR은 딱 그
+태스크의 delta만 보여주고 스택은 부모-우선으로 머지된다.
+
+가드 레일은 전 구간 fail-closed다:
+
+- **다중 부모 태스크**(≥2개에 의존)는 v1에서 **거부**된다 — goal 모드는 단일 부모
+  *포레스트*이고, 다중 부모는 향후 작업이다.
+- `ceilings.max_tasks`는 매니페스트와 일치해야 하며, 아니면 **어떤 시드도 하기 전에 배치
+  전체가 중단**된다.
+- **이동한 부모 tip / 잘못 재사용된 베이스는 fail-closed**다(부모 tip은 핀 시점에
+  동결됨) — 잘못 스택된 의존 태스크를 조용히 만들지 않는다.
+- **deferred/실패한 부모**는 자손을 `blocked_on_dependency`로 둔다(스킵-후-계속; v1에
+  자동 재계획 없음).
+
+드래프트 PR 스택은 여전히 사람 체크포인트다 — goal 모드는 태스크를 합성할 뿐, 대신
+머지해 주지는 않는다.
 
 ## 이 프로젝트가 나온 배경
 

@@ -2,7 +2,7 @@
 
 This repo doubles as a single-plugin marketplace: `.claude-plugin/{plugin.json,
 marketplace.json}` + `bin/redteam-install` (a PATH wrapper around the bundled
-installer) + `commands/redteam-install.md`. The vendored-copy model is unchanged
+installer) + `commands/install.md`. The vendored-copy model is unchanged
 — the plugin only delivers + installs the harness; the engine still resolves the
 repo root from its own location once vendored.
 
@@ -22,7 +22,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_JSON = _ROOT / ".claude-plugin" / "plugin.json"
 _MARKETPLACE_JSON = _ROOT / ".claude-plugin" / "marketplace.json"
 _BIN = _ROOT / "bin" / "redteam-install"
-_COMMAND = _ROOT / "commands" / "redteam-install.md"
+_COMMAND = _ROOT / "commands" / "install.md"
 
 # The generic sub-agents install.py vendors (kept in sync with
 # install.py HARNESS_AGENTS — drift here is the bug this guards).
@@ -61,7 +61,7 @@ def test_marketplace_lists_this_repo_as_the_plugin():
 def test_marketplace_agents_override_lists_the_vendored_agents():
     """The agents override is a list of individual .md file paths (the marketplace
     schema rejects a bare directory). Each must exist and the set must cover the
-    six skeletons install.py vendors — guards drift between packaging + installer."""
+    seven skeletons install.py vendors — guards drift between packaging + installer."""
     data = json.loads(_MARKETPLACE_JSON.read_text(encoding="utf-8"))
     agents_paths = data["plugins"][0]["agents"]
     assert isinstance(agents_paths, list) and agents_paths
@@ -94,11 +94,14 @@ def test_install_command_has_frontmatter():
 # The slash commands the plugin ships (beyond install). Drift here — a command
 # file added/renamed but not registered, or vice versa — is the bug this guards.
 _EXPECTED_COMMANDS = {
-    "redteam-install",
-    "redteam-review",
-    "redteam-config",
-    "redteam-status",
-    "redteam-new-task",
+    "install",
+    "new-task",
+    "goal",
+    "start",
+    "resume",
+    "status",
+    "review",
+    "config",
 }
 
 
