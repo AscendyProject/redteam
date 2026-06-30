@@ -229,16 +229,19 @@ default = 2                     # 미분류 → 안전한 기본값
 > GitHub SSH 키가 설정돼 있으면 `AscendyProject/redteam` 단축형도 동작한다.
 
 이로써 일곱 개 서브 에이전트와 `/redteam:*` 명령이 등록된다. `/redteam`만 치면
-피커가 아래 다섯 서브커맨드로 좁혀진다. 프로젝트 루트에서
+피커가 아래 여덟 서브커맨드로 좁혀진다. 프로젝트 루트에서
 `redteam-install`(PATH의 `redteam-install` 도구로도 노출)을 돌려 하네스를 vendoring한
 뒤, 나머지를 필요에 따라 쓴다:
 
 ```text
 /redteam:install         # .redteam/를 현재 repo에 vendoring
 /redteam:new-task        # 템플릿에서 다음 task-NNN 디렉터리 + input.md 스캐폴드
+/redteam:goal            # goal 모드: goal.md를 스택형 태스크 DAG로 분해 후 실행
+/redteam:start           # 배치의 태스크를 파이프라인에 태워 실행 (첫 실행)
+/redteam:resume          # 게이트/실패/보류 이후 진행 중인 배치 이어가기
+/redteam:status          # 배치의 파이프라인 상태 표시
 /redteam:review          # 현재 브랜치 diff에 대한 일회성 cross-model 리뷰
 /redteam:config          # 역할별 모델 선택 (writer / reviewer / rescue)
-/redteam:status          # 배치의 파이프라인 상태 표시
 ```
 
 ### 또는 직접 vendoring (어떤 스택이든, Claude Code 불필요)

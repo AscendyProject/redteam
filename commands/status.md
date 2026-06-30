@@ -20,9 +20,8 @@ Steps:
 
 4. Summarize for each task: completed phase count, `next` phase, and any
    `[GATE: …]`, `[CODEX: …]`, or `[DEFERRED]` markers. For a task blocked at a
-   human gate, tell the user exactly which sentinel to `touch` and to re-run
-   `/redteam:install`'s orchestrator `resume` (or the resume command)
-   afterward.
+   human gate, tell the user exactly which sentinel to `touch` and to run
+   `/redteam:resume` afterward.
 
 Note: `status` never prints `last_failure_log` (a phase's raw stderr can carry
 credentials) — only the failure *reason*. Point the user at the task's

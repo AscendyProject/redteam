@@ -7,13 +7,23 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+### Added
+- **Three new slash commands surface the rest of the engine: `/redteam:goal`,
+  `/redteam:start`, `/redteam:resume`.** `goal` drives goal mode end-to-end
+  (`decompose` the batch's `goal.md`, then `start` the validated stack); `start`
+  runs a seeded batch through the pipeline for the first time; `resume` continues
+  an in-progress batch after a gate, failure, or deferral. Previously only the
+  engine CLI exposed `start`/`resume`/`decompose` — the plugin had no way to run
+  or continue a batch. The command surface now maps ~1:1 to the orchestrator
+  subcommands (install · new-task · goal · start · resume · status · review · config).
+
 ### Changed
 - **Slash commands dropped the redundant `redteam-` prefix.** Plugin commands are
   already namespaced under the plugin (`/redteam:…`), so the command files were
   renamed `redteam-install.md` → `install.md`, etc. — the invocations are now
   `/redteam:install`, `/redteam:review`, `/redteam:config`, `/redteam:status`,
   `/redteam:new-task` (was `/redteam:redteam-install`, …). Typing `/redteam`
-  filters the picker to the five subcommands. **Breaking** for anyone who scripted
+  filters the picker to the eight subcommands. **Breaking** for anyone who scripted
   the old `/redteam:redteam-*` names. The `redteam-install` PATH executable
   (`bin/redteam-install`) is unchanged. (After updating the plugin, run
   `/reload-plugins` or restart to pick up the new names.)

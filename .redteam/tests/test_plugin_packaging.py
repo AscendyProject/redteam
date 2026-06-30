@@ -95,10 +95,13 @@ def test_install_command_has_frontmatter():
 # file added/renamed but not registered, or vice versa — is the bug this guards.
 _EXPECTED_COMMANDS = {
     "install",
+    "new-task",
+    "goal",
+    "start",
+    "resume",
+    "status",
     "review",
     "config",
-    "status",
-    "new-task",
 }
 
 

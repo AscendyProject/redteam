@@ -11,10 +11,13 @@
       "description": "Adversarial agent-pair harness: one model writes code (plan → implement), a second reviews it adversarially; the draft PR is the human checkpoint (a single-model test-first TDD mode is also available).",
       "commands": [
         "./commands/install.md",
-        "./commands/review.md",
-        "./commands/config.md",
+        "./commands/new-task.md",
+        "./commands/goal.md",
+        "./commands/start.md",
+        "./commands/resume.md",
         "./commands/status.md",
-        "./commands/new-task.md"
+        "./commands/review.md",
+        "./commands/config.md"
       ],
       "agents": [
         "./.claude/agents/code-security-reviewer.md",

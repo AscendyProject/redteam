@@ -249,16 +249,19 @@ This repo doubles as a single-plugin marketplace, so two commands install it:
 > GitHub SSH keys configured.
 
 That registers the seven sub-agents and the `/redteam:*` commands. Type
-`/redteam` and the picker filters to the five subcommands below. Run
+`/redteam` and the picker filters to the eight subcommands below. Run
 `redteam-install` (also exposed as a `redteam-install` tool on PATH) from your
 project root to vendor the harness in, then use the others as needed:
 
 ```text
 /redteam:install         # vendor .redteam/ into the current repo
 /redteam:new-task        # scaffold the next task-NNN dir + input.md from the template
+/redteam:goal            # goal mode: decompose a goal.md into a stacked task DAG, then run it
+/redteam:start           # run a batch's tasks through the pipeline (first run)
+/redteam:resume          # continue an in-progress batch after a gate/failure/deferral
+/redteam:status          # show the pipeline status for a batch
 /redteam:review          # one-shot cross-model review of the current branch diff
 /redteam:config          # choose the per-role models (writer / reviewer / rescue)
-/redteam:status          # show the pipeline status for a batch
 ```
 
 ### Or vendor directly (any stack, no Claude Code needed)
