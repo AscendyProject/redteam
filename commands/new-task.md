@@ -9,7 +9,7 @@ reads), so the input contract can't be subtly malformed.
 Steps:
 
 1. Confirm the harness is vendored — `.redteam/workflows/orchestrator.py` must
-   exist. If not, tell the user to run `/redteam:redteam-install` first.
+   exist. If not, tell the user to run `/redteam:install` first.
 2. Determine the batch directory:
    - If the user passed one in `$ARGUMENTS`, use it.
    - Otherwise list the directories under `.redteam/batches/`. If there's exactly

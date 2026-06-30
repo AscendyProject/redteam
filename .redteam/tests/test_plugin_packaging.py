@@ -2,7 +2,7 @@
 
 This repo doubles as a single-plugin marketplace: `.claude-plugin/{plugin.json,
 marketplace.json}` + `bin/redteam-install` (a PATH wrapper around the bundled
-installer) + `commands/redteam-install.md`. The vendored-copy model is unchanged
+installer) + `commands/install.md`. The vendored-copy model is unchanged
 — the plugin only delivers + installs the harness; the engine still resolves the
 repo root from its own location once vendored.
 
@@ -22,7 +22,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_JSON = _ROOT / ".claude-plugin" / "plugin.json"
 _MARKETPLACE_JSON = _ROOT / ".claude-plugin" / "marketplace.json"
 _BIN = _ROOT / "bin" / "redteam-install"
-_COMMAND = _ROOT / "commands" / "redteam-install.md"
+_COMMAND = _ROOT / "commands" / "install.md"
 
 # The generic sub-agents install.py vendors (kept in sync with
 # install.py HARNESS_AGENTS — drift here is the bug this guards).
@@ -94,11 +94,11 @@ def test_install_command_has_frontmatter():
 # The slash commands the plugin ships (beyond install). Drift here — a command
 # file added/renamed but not registered, or vice versa — is the bug this guards.
 _EXPECTED_COMMANDS = {
-    "redteam-install",
-    "redteam-review",
-    "redteam-config",
-    "redteam-status",
-    "redteam-new-task",
+    "install",
+    "review",
+    "config",
+    "status",
+    "new-task",
 }
 
 

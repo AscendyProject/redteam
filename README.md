@@ -248,16 +248,17 @@ This repo doubles as a single-plugin marketplace, so two commands install it:
 > (port 22). The `AscendyProject/redteam` shorthand also works if you have
 > GitHub SSH keys configured.
 
-That registers the six sub-agents and the `/redteam:*` commands. Run
+That registers the seven sub-agents and the `/redteam:*` commands. Type
+`/redteam` and the picker filters to the five subcommands below. Run
 `redteam-install` (also exposed as a `redteam-install` tool on PATH) from your
 project root to vendor the harness in, then use the others as needed:
 
 ```text
-/redteam:redteam-install        # vendor .redteam/ into the current repo
-/redteam:redteam-new-task       # scaffold the next task-NNN dir + input.md from the template
-/redteam:redteam-review         # one-shot cross-model review of the current branch diff
-/redteam:redteam-config         # choose the per-role models (writer / reviewer / rescue)
-/redteam:redteam-status         # show the pipeline status for a batch
+/redteam:install         # vendor .redteam/ into the current repo
+/redteam:new-task        # scaffold the next task-NNN dir + input.md from the template
+/redteam:review          # one-shot cross-model review of the current branch diff
+/redteam:config          # choose the per-role models (writer / reviewer / rescue)
+/redteam:status          # show the pipeline status for a batch
 ```
 
 ### Or vendor directly (any stack, no Claude Code needed)
@@ -301,7 +302,7 @@ engine's. The vendored `.redteam/` engine follows the harness's own style, so
 A vendored install is a *copy* of the engine in your repo, so it doesn't update
 itself — you re-vendor when a new version ships. `--overwrite` refreshes only
 harness-owned trees (`workflows/`, `prompts/`, `templates/`, `scripts/install.py`,
-the six agent skeletons, and the `.redteam/.redteam-version` stamp); your existing
+the seven agent skeletons, and the `.redteam/.redteam-version` stamp); your existing
 project-owned files (`config.toml`, `docs/*`, `verify.sh`) and your task content
 under `batches/` are never overwritten (the installer only ensures an add-only
 `batches/.gitignore` rule there, leaving your files intact).
@@ -377,7 +378,7 @@ python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
 
 A batch is a directory of `tasks/<task-id>/input.md` briefs. `new` scaffolds the
 next `task-NNN` directory with a template `input.md` (or use
-`/redteam:redteam-new-task`); fill in the brief, then `start`. The orchestrator
+`/redteam:new-task`); fill in the brief, then `start`. The orchestrator
 creates a per-task branch (`<branch_prefix>/<task-id>`), runs the pipeline, and
 stops at each human gate until you touch the sentinel file it names.
 
@@ -391,8 +392,49 @@ python3 .redteam/workflows/orchestrator.py review
 
 It reviews `git diff <base>...HEAD` and exits `0` / `1` / `2` (approved /
 changes requested / reviewer failed), so it can gate CI. Exposed as
-`/redteam:redteam-review` in Claude Code. Fail-closed: it refuses if the
+`/redteam:review` in Claude Code. Fail-closed: it refuses if the
 configured reviewer would collapse to the worker's own provider (self-review).
+
+## Goal mode
+
+Batches above are hand-authored — you write each `tasks/<id>/input.md` yourself.
+**Goal mode** lets you start one level up: write a single human `goal.md` and let
+the harness decompose it into a dependency-ordered set of tasks, then run them as
+one composed pipeline.
+
+```bash
+# 1. write the goal (what you want, end-to-end)
+#    .redteam/batches/<batch>/goal.md
+
+# 2. decompose it into a task DAG — writes goal.json + one tasks/<id>/input.md each
+python3 .redteam/workflows/orchestrator.py decompose .redteam/batches/<batch>
+
+# 3. run the composed batch parent-first (same start/resume/status as any batch)
+python3 .redteam/workflows/orchestrator.py start  .redteam/batches/<batch>
+python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
+```
+
+`decompose` runs a `goal-decomposer` sub-agent to turn `goal.md` into a
+**single-parent DAG manifest** (`goal.json`) plus a brief per task, and that
+decomposition is itself checked by a **cross-provider review** before any task is
+seeded. The scheduler then runs tasks **parent-first**, and each dependent task
+**stacks on its parent's branch** — its reviewed range, PR base, and changed-paths
+are all pinned to `parent-branch...HEAD`, so every draft PR shows exactly that
+task's delta and the stack merges parent-first.
+
+Guard rails are fail-closed throughout:
+
+- A **multi-parent task** (one depending on ≥2 others) is **rejected** in v1 —
+  goal mode is a single-parent *forest*; multi-parent is future work.
+- `ceilings.max_tasks` must match the manifest, or the **whole batch aborts before
+  any seeding**.
+- A **moved parent-tip / wrong reused base fails closed** (the parent's tip is
+  frozen at pin time) rather than silently producing a mis-stacked dependent.
+- A **deferred or failed parent** leaves its descendants `blocked_on_dependency`
+  (skip-and-continue; no auto re-plan in v1).
+
+The draft PR stack is still the human checkpoint — goal mode composes the tasks,
+it doesn't merge them for you.
 
 ## Origin
 
