@@ -61,7 +61,7 @@ def test_marketplace_lists_this_repo_as_the_plugin():
 def test_marketplace_agents_override_lists_the_vendored_agents():
     """The agents override is a list of individual .md file paths (the marketplace
     schema rejects a bare directory). Each must exist and the set must cover the
-    six skeletons install.py vendors — guards drift between packaging + installer."""
+    seven skeletons install.py vendors — guards drift between packaging + installer."""
     data = json.loads(_MARKETPLACE_JSON.read_text(encoding="utf-8"))
     agents_paths = data["plugins"][0]["agents"]
     assert isinstance(agents_paths, list) and agents_paths
