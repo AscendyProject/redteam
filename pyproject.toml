@@ -1,6 +1,6 @@
 [project]
 name = "redteam-harness"
-version = "0.6.0"
+version = "0.7.0"
 description = "Adversarial agent-pair harness: one model writes code (plan → implement), a second model reviews it adversarially; the draft PR is the human checkpoint before merge (a single-model test-first TDD mode is also available)."
 readme = "README.md"
 requires-python = ">=3.11"
