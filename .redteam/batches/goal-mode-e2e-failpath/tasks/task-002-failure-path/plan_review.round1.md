@@ -1,0 +1,17 @@
+Disagree
+
+PR-001 severity:blocker status:open
+`outcome.md` does not include the required parseable `## Verification` fenced `yaml` block with at least one command. The review rubric explicitly blocks on that format in [.redteam/prompts/codex/plan_review.md](/Users/kh/Documents/redteam/.redteam/prompts/codex/plan_review.md:36). The plan has `## Verification hooks` with bullet commands instead ([outcome.md](/Users/kh/Documents/redteam/.redteam/batches/goal-mode-e2e-failpath/tasks/task-002-failure-path/outcome.md:76)), so the implementer would not have the harness-parseable verification contract required before approval.
+
+PR-002 severity:blocker status:open
+The wrong-base / moved-parent-tip scenario is allowed to degrade into a stub-only result, which does not satisfy the task’s requested failure-path composition. The task asks to reproduce the stacking-pin invariant in the composed pipeline when the reused dependent branch points at the wrong base. In the current code, that invariant is enforced inside `process_task` via existing dependent state checks and ancestry checks ([orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1065), [orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1092)). But the plan explicitly permits “simulated via the stub” ([outcome.md](/Users/kh/Documents/redteam/.redteam/batches/goal-mode-e2e-failpath/tasks/task-002-failure-path/outcome.md:101)) and calls that option acceptable in risks ([outcome.md](/Users/kh/Documents/redteam/.redteam/batches/goal-mode-e2e-failpath/tasks/task-002-failure-path/outcome.md:117)). A stub returning `"deferred"` / `"error"` would only prove `_run_batch` computes an incomplete `GoalStatus` after any non-done result ([orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1688), [orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1694)); it would not prove the wrong-base or ancestry fail-closed path is composed through the scheduler. Tighten the plan so scenario 3 must invoke the real `process_task` path for the dependent, with only git/subprocess boundaries mocked as needed.
+
+Uncertain
+
+No additional blocker. The plan correctly notes that `_run_batch`, not `process_batch`, is needed to assert `GoalStatus` ([outcome.md](/Users/kh/Documents/redteam/.redteam/batches/goal-mode-e2e-failpath/tasks/task-002-failure-path/outcome.md:131)), matching the implementation ([orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1641), [orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1704)).
+
+Agree
+
+The affected-file scope is narrow and matches the task: `.redteam/tests/test_goal_mode_e2e.py` only ([outcome.md](/Users/kh/Documents/redteam/.redteam/batches/goal-mode-e2e-failpath/tasks/task-002-failure-path/outcome.md:69)). The named helpers exist at module scope and are the right reuse point ([test_goal_mode_e2e.py](/Users/kh/Documents/redteam/.redteam/tests/test_goal_mode_e2e.py:37), [test_goal_mode_e2e.py](/Users/kh/Documents/redteam/.redteam/tests/test_goal_mode_e2e.py:46), [test_goal_mode_e2e.py](/Users/kh/Documents/redteam/.redteam/tests/test_goal_mode_e2e.py:67)). The parent-blocks-descendant and max-tasks abort assertions are concrete and line up with the current scheduler behavior ([orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1674), [orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:1657)).
+
+REVIEW_DECISION: CHANGES_REQUESTED
