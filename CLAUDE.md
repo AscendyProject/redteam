@@ -81,7 +81,7 @@ all security boundaries — never loosen them inline; plan_review first.
 
 ## Project status
 
-`v0.5.1` is released and the repo is public. Extraction, cross-stack validation,
+`v0.6.0` is released and the repo is public. Extraction, cross-stack validation,
 Claude Code plugin packaging, and tier-aware routing (#13) are done. v0.2.0 added
 the self-review guard (#28), `/redteam` commands + `review` subcommand (#29),
 opt-in `--protect-config` (#30), and pipeline-mode validation (#36). v0.3.0 added
@@ -98,15 +98,31 @@ removes `human_gate_outcome` from the static orders, opt-in per tier; the draft 
 is the human checkpoint) and realigns the agent-pair/TDD docs so the default flow
 is no longer mislabeled "test-first" (#72/#77). v0.5.1 fixes the subagent tool
 restriction (#76 — the skeletons used the ignored `allowed-tools:` key instead of
-`tools:`, so per-agent tool limits were silently dropped). See `CHANGELOG.md`.
+`tools:`, so per-agent tool limits were silently dropped). v0.6.0 lands **goal
+mode** (#94) — `orchestrator decompose` turns a human `goal.md` into a
+single-parent DAG manifest (`goal.json`) via a decomposer sub-agent + cross-provider
+decomposition review, then runs the tasks parent-first with each dependent **stacked
+on its parent's branch** (reviewed range / PR base / changed-paths pinned to
+`parent-branch...HEAD`), fail-closed throughout (multi-parent rejected in v1,
+`ceilings.max_tasks` mismatch aborts the batch, moved-parent-tip freeze guard,
+descendants of a non-done parent are `blocked_on_dependency`); design in
+`docs/decisions/2026-06-27-goal-mode-design.md` (#110), engine in #111/#115,
+e2e composition tests in #123/#126. v0.6.0 also closes the implement
+commit-boundary integrity family (#91 base-branch pin A+B, #112 set-once untracked
+baseline, #117 cross-run trust-root floor, #124 sibling-task floor exemption, #82
+commit discipline), adds a deterministic per-role model picker + `config` subcommand
+(#95) and an anti-degeneracy review check (#97), plus worker/review robustness
+(#109/#87/#99/#103/#119/#86). See `CHANGELOG.md`.
 
-**Roadmap:** no open issues. The reviewer-transport work (#37, umbrella) is fully
-resolved — step 4 (fallback ladder) shipped in 0.3.0; steps 5 and 6 were rejected
-as documented in `docs/decisions/2026-06-17-reviewer-transport-and-subagent.md`
-(#67 closed). If a sub-agent reviewer is ever revived it restarts from a fresh
-cross-provider `plan_review` and must clear the family-vs-key normalization
-prerequisite first. Security-boundary changes go through `plan_review` when picked
-up.
+**Roadmap:** goal mode v1 engine + e2e are shipped; remaining open work is the
+operator-facing goal-mode docs (under #94), reviewer-token-cost gating (#92 P3/P5)
+and its native-diff coupling follow-up (#120). Goal mode v1 is a **single-parent
+forest** — multi-parent (a task depending on ≥2 others) fails closed and is future
+work; if revived it restarts from a fresh `plan_review`. The reviewer-transport work
+(#37, umbrella) is fully resolved — step 4 (fallback ladder) shipped in 0.3.0; steps
+5 and 6 were rejected as documented in
+`docs/decisions/2026-06-17-reviewer-transport-and-subagent.md` (#67 closed).
+Security-boundary changes go through `plan_review` when picked up.
 
 Coordination with downstream adopters of the harness is tracked **privately**,
 outside this public repo. For project work here, use GitHub issues / PRs /

@@ -7,6 +7,107 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-30
+
+**Goal mode** lands: the harness can now take a single human-authored `goal.md`,
+decompose it into a dependency-ordered set of tasks, and drive them through the
+agent-pair pipeline as one composed run — each dependent task stacked on its
+parent's branch, with fail-closed guards at every seam. Alongside it, a family of
+integrity-hardening fixes closes the implement commit boundary (the worker's
+tracked/untracked baselines and the out-of-scope floors), config gets a
+deterministic per-role model picker, and the worker/review surfaces get a batch of
+robustness and quality fixes. As always, every change landed through the harness's
+own cross-provider adversarial review (Claude implementer ↔ Codex reviewer), and
+goal mode itself was validated end-to-end by dogfooding the harness on the very
+task of testing goal mode.
+
+### Added
+- **Goal mode — multi-task composition from a single goal** (#94). A new
+  `orchestrator decompose <batch>` turns a human `goal.md` into a **single-parent
+  DAG manifest** (`goal.json`) plus one `input.md` per task, via a `goal-decomposer`
+  sub-agent whose output is checked by a **cross-provider decomposition review**
+  before any task is seeded. The scheduler then runs tasks **parent-first**, and a
+  dependent task **stacks on its parent**: its reviewed range, PR base, and
+  changed-paths are pinned to the parent's branch (`parent-branch...HEAD`), so each
+  PR shows exactly that task's delta and the stack merges parent-first. Guard rails
+  are fail-closed throughout — a **≥2-dependency (multi-parent) manifest is rejected**
+  in v1; `ceilings.max_tasks` must match the manifest or the **whole batch aborts
+  before any seeding**; a **moved parent-tip / wrong reused base fails closed** via a
+  centralized freeze guard (`base_branch_sha` recorded at pin time); a deferred or
+  failed parent leaves its descendants `blocked_on_dependency` (skip-and-continue,
+  no auto re-plan in v1). Design recorded after a 3-round `plan_review`
+  (`docs/decisions/2026-06-27-goal-mode-design.md`, #110); engine in #111 (Slice A:
+  manifest + task-on-task branching) and #115 (Slice C: ceilings + done-criterion,
+  Slice B: decomposer); end-to-end composition tests in #123 (happy-path + shared
+  scaffolding) and #126 (failure-path).
+- **Deterministic per-role model picker + `config` subcommand** (#95). The model
+  for each role (planner / implementer / reviewer / rescue) is resolved
+  deterministically from the active tier profile, and `orchestrator config` surfaces
+  the resolved wiring so an operator can see exactly which model each role will use
+  before a run (#105, #106).
+- **Output-validity / anti-degeneracy check in the review mandate** (#97). The
+  reviewer is now required to reject degenerate or empty-shell output (e.g. a "pass"
+  that deletes the assertions, or a stub that satisfies the letter of the
+  done-criteria without the behavior), closing a gap where a vacuous diff could be
+  rubber-stamped (#107).
+
+### Changed
+- **Round-over-round reviewer context is narrowed for carried-over findings**
+  (#119). On a re-review the reviewer is shown the prior round's still-open findings
+  scoped to what carried over, rather than the full prior transcript — less noise,
+  tighter convergence on the unresolved items.
+
+### Fixed
+- **Implement commit-boundary integrity — the tracked/untracked baseline family.**
+  A connected set of fail-closed fixes so the implementer's commit can never sweep
+  in (or be tricked into hiding) files outside the task's scope:
+  - **Reviewed-range `base_branch` is pinned end-to-end** (#91) — Part B pins it
+    across the whole pipeline (#108) and Part A attributes tracked changes to the
+    worker against that pinned base (#121), so the review range can't drift with
+    live config.
+  - **Untracked baseline is snapshotted once per task** (#112) — the pre-worker
+    untracked surface is set-once, closing an in-flight migration/TOCTOU window
+    (#116).
+  - **Cross-run trust-root floor** (#117) — on a cross-run resume, both the live
+    outside-scope untracked surface AND the stored baseline contents must be clean
+    before the worker is invoked; either probe failing fails closed, catching both
+    the "leave-on-disk" and "future-create" variants of a tampered baseline (#122).
+  - **Sibling-task artifacts are exempt from the out-of-scope tracked floor** (#124)
+    — a stacked dependent no longer defers over a sibling task's harness-owned
+    decision-trail files (`state.json` / `outcome.md` / `pr.md` / `*_review.md`),
+    while arbitrary sibling paths, sibling subdirectories, and cross-batch paths
+    still trip the floor (#125).
+  - **TDD/agent-pair commit discipline** (#82) — agent-pair `implement` commits
+    newly-created untracked files (#83); the TDD reviewer sees the work via an
+    untracked-inclusive review patch (#89); per-phase commit + manifest discipline
+    across phases (#93).
+- **Hard wall-clock deadline in the Claude worker** (#109) — a worker phase that
+  hangs is bounded by an enforced deadline instead of running unbounded (#118).
+- **Bounded rescue-entry route** (#87) — the rescue path defers to a human after a
+  bounded number of attempts instead of looping indefinitely (#88).
+- **Mode-aware skeletons + `create_pr` prompt** (#73) — no TDD assumptions leak
+  into the agent-pair flow; the sub-agent skeletons and the PR prompt adapt to the
+  active mode (#84).
+- **Worker permission mode + allowed tools are configurable** (#99) — the engine no
+  longer hard-codes the worker's permission mode / tool allowlist (#100).
+- **Standalone `review` suspends the pipeline-only verification gate** (#103) — the
+  one-shot `review` subcommand no longer trips a gate meant only for the full
+  pipeline (#104).
+- **Each review round's full text is preserved, round-numbered** (#86) — earlier
+  rounds are no longer overwritten, so the decision trail keeps every round (#90).
+
+### Docs
+- **README: Korean translation + bidirectional language links** (#96).
+- **README: Origin + "Why cross-review" sections** (model-independent framing)
+  (#102).
+- **"Codex main, Claude sub" configuration example** added to the Model-freedom
+  docs (#81).
+
+### Internal
+- **Bump `actions/checkout` 6 → 7** in the actions group (#98).
+- **Pin Codex-main wiring in tests** (codex worker / claude reviewer resolution)
+  (#85).
+
 ## [0.5.1] - 2026-06-19
 
 ### Fixed
