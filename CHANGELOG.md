@@ -7,6 +7,17 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-30
+
+The Claude Code plugin's command surface is reworked to match the engine. Slash
+commands lose the redundant `redteam-` prefix (`/redteam:install`, not
+`/redteam:redteam-install`), and three commands that were only reachable from the
+engine CLI — running, resuming, and goal-decomposing a batch — are now exposed,
+so the plugin can drive a batch end-to-end, not just scaffold one. The picker now
+maps ~1:1 to the orchestrator subcommands. The prefix drop is **breaking** for
+anyone who scripted the old names; after updating the plugin, run `/reload-plugins`
+or restart.
+
 ### Added
 - **Three new slash commands surface the rest of the engine: `/redteam:goal`,
   `/redteam:start`, `/redteam:resume`.** `goal` drives goal mode end-to-end

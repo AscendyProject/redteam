@@ -114,9 +114,19 @@ commit discipline), adds a deterministic per-role model picker + `config` subcom
 (#95) and an anti-degeneracy review check (#97), plus worker/review robustness
 (#109/#87/#99/#103/#119/#86). See `CHANGELOG.md`.
 
-**Roadmap:** goal mode v1 engine + e2e are shipped; remaining open work is the
-operator-facing goal-mode docs (under #94), reviewer-token-cost gating (#92 P3/P5)
-and its native-diff coupling follow-up (#120). Goal mode v1 is a **single-parent
+`v0.7.0` reworks the Claude Code plugin command surface to match the engine
+(#130): the slash commands drop the redundant `redteam-` prefix
+(`/redteam:install`, not `/redteam:redteam-install` — **breaking**), and three
+commands that were CLI-only are now exposed (`/redteam:goal`, `/redteam:start`,
+`/redteam:resume`) so the plugin can run/resume/goal-decompose a batch, not just
+scaffold one; the picker now maps ~1:1 to the orchestrator subcommands. v0.7.0 is
+the first release cut by the raidostar-gated release automation (#128). It also
+adds the goal-mode operator docs to the README (EN+KO), closing the doc gap
+under #94.
+
+**Roadmap:** goal mode v1 engine + e2e + operator docs are shipped; remaining
+open work is reviewer-token-cost gating (#92 P3/P5) and its native-diff coupling
+follow-up (#120). Goal mode v1 is a **single-parent
 forest** — multi-parent (a task depending on ≥2 others) fails closed and is future
 work; if revived it restarts from a fresh `plan_review`. The reviewer-transport work
 (#37, umbrella) is fully resolved — step 4 (fallback ladder) shipped in 0.3.0; steps
