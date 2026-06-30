@@ -1,0 +1,89 @@
+name: Release
+
+# When a release commit lands on main (pyproject `version` bumped via a merged
+# "release: X.Y.Z" PR), cut the matching git tag + GitHub release, using that
+# version's CHANGELOG section as the notes.
+#
+# "Only raidostar can release" is enforced two ways:
+#   1. The `detect` job is gated on `github.actor == 'raidostar'` — any other
+#      actor's push to main is skipped outright.
+#   2. The `release` job targets the `release` environment, whose required
+#      reviewer is raidostar. Merging the release PR only *triggers* the run;
+#      nothing is tagged or published until that one approval click in the
+#      Actions UI. This is the outward-facing publish checkpoint.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+
+# contents: write is needed for `gh release create` to create the tag + release.
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    # Belt-and-suspenders: only raidostar's push can ever start a release.
+    if: github.actor == 'raidostar'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read version + decide whether to release
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "([^"]+)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Idempotent: if v$version is already released, do nothing (a later
+          # non-version edit to pyproject.toml shouldn't re-cut the release).
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version already released — nothing to do."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version not yet released — will request approval."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    # Hard human gate: the `release` environment requires raidostar's approval
+    # before this job runs.
+    environment: release
+    env:
+      VERSION: ${{ needs.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Extract CHANGELOG section for this version
+        run: |
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" {f=1; next}
+            f && /^## \[/ {exit}
+            f {print}
+          ' CHANGELOG.md > /tmp/relnotes.md
+          if [ ! -s /tmp/relnotes.md ]; then
+            echo "::error::No CHANGELOG section found for [$VERSION]"
+            exit 1
+          fi
+
+      - name: Create tag + GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file /tmp/relnotes.md \
+            --latest
