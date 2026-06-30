@@ -1,7 +1,7 @@
 {
   "name": "redteam",
   "description": "Adversarial agent-pair harness: one model writes code (plan → implement), a second model reviews it adversarially; the draft PR is the human checkpoint before merge (a single-model test-first TDD mode is also available).",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "author": { "name": "AscendyProject" },
   "homepage": "https://github.com/AscendyProject/redteam",
   "repository": "https://github.com/AscendyProject/redteam",
@@ -15,6 +15,7 @@
   ],
   "agents": [
     "./.claude/agents/code-security-reviewer.md",
+    "./.claude/agents/goal-decomposer.md",
     "./.claude/agents/implementer.md",
     "./.claude/agents/outcome-planner.md",
     "./.claude/agents/pr-author.md",
