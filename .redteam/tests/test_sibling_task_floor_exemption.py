@@ -43,7 +43,7 @@ def _state(**extra: Any) -> dict[str, Any]:
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True, encoding="utf-8")
 
 
 def _make_stacked_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
