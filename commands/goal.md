@@ -57,8 +57,13 @@ criterion; each task reports `next_phase`, `deferred` entries, and
   - *Transient infra* — expired `codex login`, `gh`/network hiccup: fix it (or
     ask the user to re-login), then resume.
   - *Stale same-named task branch* from an earlier run tripping the branch
-    guards: delete the stale local `<branch_prefix>/<task-id>` branch, then
-    resume.
+    guards: never delete it outright — it may hold unmerged work (the engine
+    itself defers rather than deletes for exactly this reason). If its tip is
+    already contained in the base branch (`git merge-base --is-ancestor
+    <branch> <base>` exits 0), deleting is safe; otherwise **rename it aside**
+    (`git branch -m <branch_prefix>/<task-id> <branch_prefix>/<task-id>-stale-1`)
+    so the run can recreate the name, list the preserved branch in the final
+    report, and resume.
   - *Sticky deferral* — `next_phase: "deferred"` never re-runs on its own. Once
     you've addressed the cause the deferral entry describes, set `next_phase`
     back to the entry's `backtrack_to` (or its `phase`) in `state.json`, leave
