@@ -376,7 +376,7 @@ Vue + Vitest).
 python3 .redteam/workflows/orchestrator.py new    .redteam/batches/<batch> <slug> [--title "..."]
 python3 .redteam/workflows/orchestrator.py start  .redteam/batches/<batch>
 python3 .redteam/workflows/orchestrator.py resume .redteam/batches/<batch>
-python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
+python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch> [--json]
 ```
 
 A batch is a directory of `tasks/<task-id>/input.md` briefs. `new` scaffolds the
@@ -384,6 +384,10 @@ next `task-NNN` directory with a template `input.md` (or use
 `/redteam:new-task`); fill in the brief, then `start`. The orchestrator
 creates a per-task branch (`<branch_prefix>/<task-id>`), runs the pipeline, and
 stops at each human gate until you touch the sentinel file it names.
+`status --json` emits the same report machine-readable (per-task phase,
+deferrals — never the raw failure log — plus goal progress); for tasks blocked
+at a PR gate, `wait-and-resume` polls GitHub via `gh pr view` and advances
+automatically once the PR is merged or closed.
 
 **One-shot review (no batch).** To run just the adversarial reviewer over your
 current branch diff — a *different* provider than whoever wrote the code,
@@ -438,6 +442,15 @@ Guard rails are fail-closed throughout:
 
 The draft PR stack is still the human checkpoint — goal mode composes the tasks,
 it doesn't merge them for you.
+
+In Claude Code, `/redteam:goal` drives all of this **autonomously**: it
+decomposes, starts the stack, then keeps operating — reading `status --json`,
+diagnosing deferred or failed tasks, remediating what an agent may fix
+(transient infra, a stale task branch, a sticky deferral whose cause it has
+addressed, a defective decomposer-written brief — within `goal.md`'s intent),
+and resuming — until every task's draft PR is open or a genuinely-human
+decision is needed (fail-closed: a rejected decomposition, a repeated deferral,
+or anything touching a security boundary stops the loop). It never merges.
 
 ## Origin
 

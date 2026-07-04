@@ -10,7 +10,7 @@ The four roles (config keys):
 
 | Role | Key | What it does | Guidance |
 |------|-----|--------------|----------|
-| Plan | `planner` | Designs the outcome/plan | Top model — planning is high-stakes reasoning. Default/recommended: a top Opus (e.g. `claude-opus-4-8`). |
+| Plan | `planner` | Designs the outcome/plan | Top model — planning is high-stakes reasoning. Default/recommended: a top Opus (shipped default: `claude-opus-4-7`). |
 | Execute | `implementer` | Writes the code | Cheaper model is fine — implementation is token-heavy and routine (e.g. `claude-sonnet-4-6`). Selecting the worker *provider*: a value of `"codex"` runs the worker on Codex (role reversal); a `claude-*` model runs it on Claude. |
 | Review | `reviewer` | Independent adversarial review | A **provider identifier**, not a model name: `"codex"`, `"claude"`, or `"human"` (manual). |
 | Rescue | `rescue` | Escalation when review keeps failing | Same provider identifiers as `reviewer`. |

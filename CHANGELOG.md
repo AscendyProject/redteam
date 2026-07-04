@@ -7,6 +7,37 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+### Added
+- **`orchestrator status <batch> --json` — machine-readable, goal-aware status.**
+  Emits per-task `next_phase` / completed phases / gate sentinels / deferral
+  records (safe fields only — never `last_failure_log` or a deferral's
+  `feedback`, both of which can carry secrets quoted from raw stderr or a diff)
+  plus, when the batch has a `goal.json`, goal progress (`total`/`done`/
+  `complete`/`incomplete_ids`/`deps`). On an invalid manifest, status *reports*
+  the validation error instead of raising — it is a read-only surface, unlike
+  `start`/`resume`, which keep failing the batch closed. The human-readable
+  `status` also gains a goal summary line.
+
+### Changed
+- **`/redteam:goal` is now an autonomous run-to-completion driver.** Instead of
+  stopping after one `start`, the command keeps operating: it reads
+  `status --json`, diagnoses deferred/failed tasks, applies the remediations an
+  operator agent may make (transient infra fixes, deleting a stale same-named
+  task branch, resetting a sticky `next_phase: "deferred"` after addressing the
+  recorded cause, amending a defective decomposer-written brief within
+  `goal.md`'s intent), and resumes — until every task's draft PR is open or a
+  genuinely-human decision is needed. Hard stops are fail-closed: a rejected
+  decomposition, the same task deferring twice for the same reason, anything
+  touching a security boundary, or ~10 passes without completion. It never
+  merges — the draft-PR stack remains the human checkpoint.
+
+### Docs
+- Sync drift found in a repo sweep: `commands/install.md` now says seven agent
+  skeletons (was "six"; names `goal-decomposer`), `commands/config.md` cites the
+  shipped planner default (`claude-opus-4-7`), the orchestrator module
+  docstring's usage block lists all eight subcommands, and the READMEs (EN+KO)
+  document `status --json` and `wait-and-resume`.
+
 ## [0.7.0] - 2026-06-30
 
 The Claude Code plugin's command surface is reworked to match the engine. Slash

@@ -14,8 +14,8 @@ redteam-install .
 
 - Add `--dry-run` to preview what would change without writing.
 - Add `--overwrite` to refresh harness-owned files (`.redteam/workflows`,
-  `prompts`, `templates`, `scripts/install.py`, and the six `.claude/agents/*`
-  skeletons). Project-owned files — `.redteam/config.toml`, `.redteam/docs/*`,
+  `prompts`, `templates`, `scripts/install.py`, and the seven `.claude/agents/*`
+  skeletons, including `goal-decomposer`). Project-owned files — `.redteam/config.toml`, `.redteam/docs/*`,
   `.redteam/scripts/verify.sh`, and `.redteam/batches/` — are seeded once and
   never overwritten, so a re-run never clobbers the user's edits or task state.
 
