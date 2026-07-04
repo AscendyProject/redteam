@@ -1,0 +1,29 @@
+# Operator decision on the escalated plan_review blockers
+
+Decision on the scope question (PR-004): **v1 review staging is GLOBAL-ONLY.**
+
+- Staging is configured at the global `[models]` / dedicated global section
+  level only. **Tier-level (`[tiers.N].models`) staging is a NON-GOAL for v1**
+  — do not touch the `TierProfile.models` type contract (`dict[str, str]`) or
+  the tier parser. State this exclusion explicitly in outcome.md's
+  Out-of-scope section. (Human decision: global-only was chosen over changing
+  the tier parser contract.)
+
+Directives for the other open blockers:
+
+- **PR-005 (dispatch contract):** specify ONE unambiguous dispatch contract
+  covering all three reviewer cases — unstaged (today's path, byte-identical
+  behavior), staged frontier, and manual/human (`reviewer_provider(state)` is
+  `None` → staging must be bypassed entirely, manual flow unchanged). Name the
+  exact function boundary each case goes through.
+
+- **PR-007 (verification block):** outcome.md MUST contain a `## Verification`
+  section with a fenced ```yaml block listing at least one runnable command
+  (e.g. `bash .redteam/scripts/verify.sh`). This is a machine-parsed contract —
+  a done-when bullet does not satisfy it.
+
+Also address the Uncertain item: the `_archive_review_round` mapping change for
+`code_review.first_pass.md` must be stated as an explicit second archive call
+for `review_code`, not implied.
+
+USER_DECISION: REVISE_PLAN

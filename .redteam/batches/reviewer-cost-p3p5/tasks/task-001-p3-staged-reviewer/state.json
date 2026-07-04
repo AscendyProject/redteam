@@ -1,0 +1,132 @@
+{
+  "task_id": "task-001-p3-staged-reviewer",
+  "mode": "agent-pair",
+  "phase": "implement",
+  "phases_completed": [
+    "plan_outcome",
+    "ask_user",
+    "plan_review"
+  ],
+  "next_phase": "deferred",
+  "decision": "pending",
+  "owner": "claude",
+  "reviewer": "codex",
+  "next_action": null,
+  "review_items": [
+    {
+      "id": "PR-001",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-001 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-002",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-002 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-003",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-003 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-004",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-004 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-005",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-005 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-006",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-006 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "PR-007",
+      "phase": "plan_review",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "PR-007 severity:blocker status:resolved",
+      "carry_over_count": 0
+    }
+  ],
+  "verification": {
+    "commands": [
+      "bash .redteam/scripts/verify.sh"
+    ],
+    "last_exit_code": null,
+    "last_output_path": "verification.log",
+    "last_run_at": null,
+    "last_diff_sha256": null,
+    "verify_command": "bash .redteam/scripts/verify.sh",
+    "verify_allowlist": [
+      "pytest",
+      "ruff",
+      "mypy"
+    ]
+  },
+  "models": {
+    "planner": "claude-opus-4-7",
+    "implementer": "claude-sonnet-4-6",
+    "reviewer": "codex",
+    "rescue": "codex"
+  },
+  "escape": {
+    "ask_user": false,
+    "reason": "plan review blocker carried over twice",
+    "return_phase": "plan_review"
+  },
+  "implement_round_count": 0,
+  "tdd_test_files": [],
+  "retries": {
+    "plan_outcome": 2,
+    "implement": 2
+  },
+  "max_retries_per_phase": 2,
+  "last_failure_reason": "error",
+  "last_failure_log": "refusing to sweep operator tracked WIP into the task commit; commit or stash your unrelated tracked WIP before re-running. Out-of-scope tracked paths: .redteam/batches/reviewer-cost-p3p5/decompose_review.md, .redteam/batches/reviewer-cost-p3p5/goal.json, .redteam/batches/reviewer-cost-p3p5/goal.md, .redteam/batches/reviewer-cost-p3p5/tasks/task-002-p5-hard-ceilings/input.md",
+  "last_failure_diff": "",
+  "deferred_requirements": [
+    {
+      "phase": "implement",
+      "backtrack_to": null,
+      "reason": "stalled",
+      "attempts": 2,
+      "feedback": "cross-run trust-root floor: outside-scope paths detected before worker invocation; commit or stash these files and re-run. Offending paths: .redteam/batches/reviewer-cost-p3p5/decompose_review.md, .redteam/batches/reviewer-cost-p3p5/goal.json, .redteam/batches/reviewer-cost-p3p5/goal.md, .redteam/batches/reviewer-cost-p3p5/tasks/task-002-p5-hard-ceilings/input.md, .redteam/last_review.md"
+    },
+    {
+      "phase": "implement",
+      "backtrack_to": null,
+      "reason": "stalled",
+      "attempts": 2,
+      "feedback": "refusing to sweep operator tracked WIP into the task commit; commit or stash your unrelated tracked WIP before re-running. Out-of-scope tracked paths: .redteam/batches/reviewer-cost-p3p5/decompose_review.md, .redteam/batches/reviewer-cost-p3p5/goal.json, .redteam/batches/reviewer-cost-p3p5/goal.md, .redteam/batches/reviewer-cost-p3p5/tasks/task-002-p5-hard-ceilings/input.md"
+    }
+  ],
+  "branch": "redteam/task-001-p3-staged-reviewer",
+  "pr_url": null,
+  "created_at": "2026-07-04T15:08:24.071812+00:00",
+  "updated_at": "2026-07-04T15:56:26.491396+00:00",
+  "base_branch": "main",
+  "phase_started_at": "2026-07-04T15:56:26.395271+00:00",
+  "last_user_response": null
+}
