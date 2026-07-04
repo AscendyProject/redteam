@@ -134,29 +134,35 @@ def _manual_required(audit: str) -> ReviewResult:
     return {"decision": "MISSING", "raw": audit, "parse_status": MANUAL_REQUIRED}
 
 
-def review_with_fallback(
-    state: dict[str, Any], *, role: str, prompt: str, cwd: Path, target: ReviewTarget
+def _review_with_fallback_impl(
+    state: dict[str, Any],
+    *,
+    role: str,
+    prompt: str,
+    cwd: Path,
+    target: ReviewTarget,
+    primary: ReviewerAdapter | None,
+    primary_name: str | None,
 ) -> ReviewResult:
-    """Run the configured reviewer; on an INFRA failure (not a valid decision),
-    apply the reviewer_fallback ladder — fail-closed (#37 step 4):
+    """Shared implementation of the reviewer fallback ladder.
 
-    - A valid parsed decision (incl. CHANGES_REQUESTED / RESCUE_REQUIRED /
-      ASK_USER) is returned as-is; it is NEVER a fallback trigger.
-    - fallback "manual"/"human" → a `manual_required` result (the engine blocks
-      for a pasted review; never an automatic approval).
-    - fallback = a provider → its APPROVED is trusted ONLY if it is cross-provider
-      (≠ the worker provider, else self-review #28), read_only_enforced, and its
-      own parse is a valid decision; otherwise → `manual_required`.
-    - The returned `raw` records the audit (primary failure + fallback outcome).
+    Both `review_with_fallback` (state-default primary) and
+    `review_with_fallback_for_provider` (explicit primary provider) delegate here
+    so the two callers cannot drift.  The ladder is UNCHANGED from the original
+    review_with_fallback — only `primary` / `primary_name` are injected by the
+    caller instead of being derived from state.
+
+    - A valid parsed decision is returned as-is (never a fallback trigger).
+    - fallback "manual"/"human" → manual_required result.
+    - fallback = a provider → trusted ONLY if cross-provider, read_only_enforced,
+      and valid decision; otherwise → manual_required.
     """
-    primary = get_reviewer_adapter(state)
     if primary is None:  # defensive: callers handle the manual flow before here
         return _manual_required("no headless reviewer adapter configured — manual review required")
     result = primary.review(role=role, prompt=prompt, cwd=cwd, target=target)
     if _is_valid_result(result):
         return result
 
-    primary_name = reviewer_provider(state) or primary.name
     audit = f"primary reviewer '{primary_name}' failed (parse_status={result['parse_status']}, decision={result['decision']})."
     fb = _resolved_reviewer_fallback(state)
 
@@ -191,6 +197,81 @@ def review_with_fallback(
     )
 
 
+def review_with_fallback(
+    state: dict[str, Any], *, role: str, prompt: str, cwd: Path, target: ReviewTarget
+) -> ReviewResult:
+    """Run the configured reviewer; on an INFRA failure (not a valid decision),
+    apply the reviewer_fallback ladder — fail-closed (#37 step 4):
+
+    - A valid parsed decision (incl. CHANGES_REQUESTED / RESCUE_REQUIRED /
+      ASK_USER) is returned as-is; it is NEVER a fallback trigger.
+    - fallback "manual"/"human" → a `manual_required` result (the engine blocks
+      for a pasted review; never an automatic approval).
+    - fallback = a provider → its APPROVED is trusted ONLY if it is cross-provider
+      (≠ the worker provider, else self-review #28), read_only_enforced, and its
+      own parse is a valid decision; otherwise → `manual_required`.
+    - The returned `raw` records the audit (primary failure + fallback outcome).
+
+    Delegates to `_review_with_fallback_impl` so this function and
+    `review_with_fallback_for_provider` share one implementation and cannot drift.
+    """
+    primary = get_reviewer_adapter(state)
+    primary_name = reviewer_provider(state) or (primary.name if primary is not None else None)
+    return _review_with_fallback_impl(
+        state, role=role, prompt=prompt, cwd=cwd, target=target, primary=primary, primary_name=primary_name
+    )
+
+
+def get_reviewer_adapter_by_provider(name: str) -> ReviewerAdapter | None:
+    """Return a reviewer adapter for the given provider key, or None if not registered.
+
+    Reuses `_REVIEWER_ADAPTERS`; is the SOLE path to instantiate a stage's
+    adapter for `review_with_fallback_for_provider`.
+    """
+    factory = _REVIEWER_ADAPTERS.get(name)
+    return factory() if factory is not None else None
+
+
+def review_with_fallback_for_provider(
+    state: dict[str, Any],
+    *,
+    role: str,
+    prompt: str,
+    cwd: Path,
+    target: ReviewTarget,
+    primary_provider: str,
+) -> ReviewResult:
+    """Like `review_with_fallback` but runs the fallback ladder against an
+    EXPLICITLY-CHOSEN primary provider instead of the state-default one.
+
+    Used by `review_code.run` for Case D (first-pass staged reviewer round) so
+    the runner can dispatch to the cheap first-pass provider without changing the
+    state models dict.  The fallback selection, the `fb == worker_provider(state)`
+    self-review check, `read_only_enforced`, `MANUAL_REQUIRED` behavior, and the
+    `fallback_audit` field are BIT-FOR-BIT identical to `review_with_fallback`
+    (both delegate to `_review_with_fallback_impl`).
+
+    If `get_reviewer_adapter_by_provider(primary_provider)` returns None (the
+    configured provider is unknown at dispatch time), returns a MANUAL_REQUIRED
+    result naming the mismatch — mirrors the "no headless reviewer adapter
+    configured" branch in `_review_with_fallback_impl`.
+    """
+    primary = get_reviewer_adapter_by_provider(primary_provider)
+    if primary is None:
+        return _manual_required(
+            f"first-pass reviewer '{primary_provider}' is not a registered reviewer adapter — manual review required"
+        )
+    return _review_with_fallback_impl(
+        state,
+        role=role,
+        prompt=prompt,
+        cwd=cwd,
+        target=target,
+        primary=primary,
+        primary_name=primary_provider,
+    )
+
+
 __all__ = [
     "FALLBACK_AUDIT_MARKER",
     "MANUAL_REQUIRED",
@@ -198,8 +279,10 @@ __all__ = [
     "ReviewResult",
     "WorkerAdapter",
     "get_reviewer_adapter",
+    "get_reviewer_adapter_by_provider",
     "get_worker_adapter",
     "review_with_fallback",
+    "review_with_fallback_for_provider",
     "reviewer_provider",
     "worker_provider",
 ]

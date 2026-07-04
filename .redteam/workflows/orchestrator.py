@@ -314,20 +314,33 @@ def _adversarial_pairing_error(state: dict[str, Any]) -> str | None:
     runs_headless_review = "plan_review" in order or ("review_code" in order and _mode(state) == "agent-pair")
     if not runs_headless_review:
         return None
-    rp = reviewer_provider(state)  # None → manual/human reviewer, a distinct adversary
-    if rp is None:
-        return None
     wp = worker_provider(state)
-    if rp != wp:
-        return None
-    return (
-        f"adversarial pairing collapsed: the reviewer and the worker both resolve to the "
-        f"'{wp}' provider, so the code would be reviewed by the same model that wrote it "
-        f"(self-review). The redteam harness requires a cross-provider pair. Fix "
-        f".redteam/config.toml [models]: point reviewer at a different provider than the "
-        f'implementer (e.g. implementer=claude-*, reviewer="codex"), or set reviewer="human" '
-        f"for a manual review, or use a review=false tier for an explicit single-agent path."
-    )
+    rp = reviewer_provider(state)  # None → manual/human reviewer, a distinct adversary
+    # Frontier-side collapse check (unchanged from before D8).
+    if rp is not None and rp == wp:
+        return (
+            f"adversarial pairing collapsed: the reviewer and the worker both resolve to the "
+            f"'{wp}' provider, so the code would be reviewed by the same model that wrote it "
+            f"(self-review). The redteam harness requires a cross-provider pair. Fix "
+            f".redteam/config.toml [models]: point reviewer at a different provider than the "
+            f'implementer (e.g. implementer=claude-*, reviewer="codex"), or set reviewer="human" '
+            f"for a manual review, or use a review=false tier for an explicit single-agent path."
+        )
+    # D8: first-pass same-provider collapse (additive check — only fires when staging
+    # IS configured AND review_code is in the agent-pair resolved order).
+    if "review_code" in order and _mode(state) == "agent-pair":
+        review_stages = load_config(repo_root()).models.review_stages
+        if review_stages is not None:
+            fp = review_stages.first_pass_reviewer
+            if fp == wp:
+                return (
+                    f"adversarial pairing collapsed on first-pass reviewer: the configured "
+                    f"models.review_stages.first_pass_reviewer ('{fp}') and the worker both "
+                    f"resolve to the '{wp}' provider (self-review on the first-pass side). "
+                    f"Fix .redteam/config.toml [models.review_stages]: point first_pass_reviewer "
+                    f"at a different provider than the implementer."
+                )
+    return None
 
 
 def _parse_input_frontmatter(task_dir: Path) -> tuple[int | None, list[str] | None, str | None]:
@@ -514,11 +527,16 @@ def _archive_review_round(task_dir: Path, filename: str) -> None:
     path = task_dir / filename
     if not path.exists():
         return
-    stem, _, suffix = filename.partition(".")
+    # Use Path.stem / Path.suffix so multi-extension names like
+    # "code_review.first_pass.md" split on the LAST dot and produce
+    # "code_review.first_pass.round1.md" (not "code_review.round1.first_pass.md").
+    p = Path(filename)
+    stem = p.stem
+    suffix = p.suffix  # includes the leading dot, e.g. ".md"
     n = 1
-    while (task_dir / f"{stem}.round{n}.{suffix}").exists():
+    while (task_dir / f"{stem}.round{n}{suffix}").exists():
         n += 1
-    path.replace(task_dir / f"{stem}.round{n}.{suffix}")
+    path.replace(task_dir / f"{stem}.round{n}{suffix}")
 
 
 def _clear_manual_phase_artifacts(task_dir: Path, phase: str) -> None:
@@ -531,6 +549,11 @@ def _clear_manual_phase_artifacts(task_dir: Path, phase: str) -> None:
     filename = review_files.get(phase)
     if filename:
         _archive_review_round(task_dir, filename)
+    # D7: rotate the first-pass reviewer artifact alongside code_review.md so
+    # promoted-round audit trails are preserved across rounds.  _archive_review_round
+    # is a no-op when the file is absent (non-promoted rounds pay nothing).
+    if phase == "review_code":
+        _archive_review_round(task_dir, "code_review.first_pass.md")
 
 
 def _clear_ask_user_sentinel(task_dir: Path) -> None:
@@ -1448,6 +1471,12 @@ def process_task(
         fallback_audit = result.get("fallback_audit")
         if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"} and fallback_audit:
             state.setdefault("review_audit", []).append({"phase": phase, "reason": fallback_audit})
+        # Staging provenance: records when a cheap first-pass approved and was promoted
+        # to the frontier reviewer.  Trusted only when set by the runner (structured
+        # field), never from in-band reviewer text — mirrors the fallback_audit wiring.
+        staging_audit = result.get("staging_audit")
+        if result["status"] in {"approved", "changes_requested", "rescue_required", "ask_user"} and staging_audit:
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": staging_audit})
 
         # Only a result carrying a VALID parsed review decision may seed
         # review_items — never a failed/manual body (which can contain PR-/IR-

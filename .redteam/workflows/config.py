@@ -26,6 +26,19 @@ _KNOWN_SECTIONS = ("models", "project", "tiers", "tier_triggers")
 
 
 @dataclass(frozen=True)
+class ReviewStagesConfig:
+    """Round-staged reviewer config: first N rounds use the cheap first-pass
+    reviewer; round N+1 and onward escalate to the configured frontier reviewer.
+
+    Only valid as a global subtable (`[models.review_stages]`); tier-level
+    staging is explicitly out of scope for v1.
+    """
+
+    first_pass_reviewer: str  # a key of adapters._REVIEWER_ADAPTERS
+    escalate_after: int  # rounds 1..escalate_after use first-pass; >=1, not bool
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     """Where the target project's code, tests, context and verify command live."""
 
@@ -62,6 +75,11 @@ class ModelsConfig:
     # trusted) or "manual"/"human" to block for a pasted review. Default "manual"
     # = fail-closed (an infra failure never becomes an automatic approval).
     reviewer_fallback: str = "manual"
+    # Optional round-staged reviewer: cheap first-pass for early rounds, frontier
+    # escalation on later rounds. Absent (None) = default behavior unchanged.
+    # Parsed from the `[models.review_stages]` TOML subtable; validated by
+    # _parse_review_stages before _build receives it.
+    review_stages: ReviewStagesConfig | None = None
 
 
 GATE_NAMES = ("outcome", "pr", "rescue")  # the human gates a tier may opt into
@@ -158,7 +176,10 @@ def _validate(cfg: RedteamConfig) -> None:
     _validate_reviewer_fallback("models.reviewer_fallback", m.reviewer_fallback)
 
 
-_KNOWN_ROLES = frozenset(f.name for f in dataclasses.fields(ModelsConfig))
+# review_stages is a nested subtable config, not a tier-level per-role override;
+# exclude it from _KNOWN_ROLES so a [tiers.N].models.review_stages key continues
+# to be rejected by the "unknown role(s)" fail-loud path in _parse_tiers (D1).
+_KNOWN_ROLES = frozenset(f.name for f in dataclasses.fields(ModelsConfig)) - {"review_stages"}
 
 # reviewer_fallback is POLICY, not a model name: it must be a known reviewer
 # provider or a manual sentinel. Validated loudly (a typo fails at load) in BOTH
@@ -169,6 +190,59 @@ _ALLOWED_REVIEWER_FALLBACK = ("codex", "claude", "manual", "human")
 def _validate_reviewer_fallback(where: str, value: str) -> None:
     if value not in _ALLOWED_REVIEWER_FALLBACK:
         raise ValueError(f"{where} must be one of {list(_ALLOWED_REVIEWER_FALLBACK)}, got {value!r}.")
+
+
+_MANUAL_SENTINELS = frozenset({"manual", "human"})
+
+
+def _parse_review_stages(raw: object) -> ReviewStagesConfig:
+    """Parse and validate a `[models.review_stages]` TOML subtable.
+
+    Fails loud on: unknown keys, missing required keys, manual/human first-pass
+    reviewer (defeats the cost-cutting purpose), first_pass_reviewer not a
+    registered adapter key, escalate_after that is a bool / non-int / < 1.
+
+    The adapter-key check uses a lazy import of `adapters._REVIEWER_ADAPTERS` to
+    avoid a module-level import cycle (adapters → phase_runners._base → config
+    is already a lazy-load chain; adding config → adapters at module level would
+    introduce a top-level cycle).
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"models.review_stages must be a table, got {raw!r}.")
+    known = {f.name for f in dataclasses.fields(ReviewStagesConfig)}
+    unknown = set(raw) - known
+    if unknown:
+        raise ValueError(f"Unknown models.review_stages config key(s): {sorted(unknown)}. Known keys: {sorted(known)}.")
+    # first_pass_reviewer
+    first_pass = raw.get("first_pass_reviewer")
+    if first_pass is None:
+        raise ValueError("models.review_stages.first_pass_reviewer is required.")
+    if not isinstance(first_pass, str):
+        raise ValueError(f"models.review_stages.first_pass_reviewer must be a string, got {first_pass!r}.")
+    if first_pass in _MANUAL_SENTINELS:
+        raise ValueError(
+            f"models.review_stages.first_pass_reviewer cannot be 'manual' or 'human' "
+            f"(a manual first-pass defeats the cost-cutting purpose); got {first_pass!r}."
+        )
+    # Lazy import to avoid a top-level import cycle (adapters imports phase_runners._base
+    # which lazily imports config; config importing adapters at module level would close
+    # the cycle at load time).
+    from adapters import _REVIEWER_ADAPTERS  # noqa: PLC0415
+
+    if first_pass not in _REVIEWER_ADAPTERS:
+        raise ValueError(
+            f"models.review_stages.first_pass_reviewer must be a registered reviewer adapter key, "
+            f"got {first_pass!r}. Known: {sorted(_REVIEWER_ADAPTERS)}."
+        )
+    # escalate_after
+    escalate = raw.get("escalate_after")
+    if escalate is None:
+        raise ValueError("models.review_stages.escalate_after is required.")
+    if isinstance(escalate, bool) or not isinstance(escalate, int) or escalate < 1:
+        raise ValueError(
+            f"models.review_stages.escalate_after must be an int >= 1 (bool values rejected), got {escalate!r}."
+        )
+    return ReviewStagesConfig(first_pass_reviewer=first_pass, escalate_after=escalate)
 
 
 def _parse_tiers(raw: dict) -> dict[int, TierProfile]:
@@ -338,9 +412,17 @@ def load_config(repo_root: Path) -> RedteamConfig:
             f"Unknown config section(s): {sorted(unknown_sections)}. Known sections: {list(_KNOWN_SECTIONS)}."
         )
     triggers, default_tier = _parse_triggers(data.get("tier_triggers", {}))
+    # Pre-process [models.review_stages] subtable before _build so _build receives
+    # a ReviewStagesConfig instance (or None) rather than a raw dict.  _build's
+    # known-key check allows review_stages on ModelsConfig; _parse_review_stages
+    # validates the nested keys fail-loud before that point.
+    models_raw = dict(data.get("models", {}))
+    review_stages_raw = models_raw.pop("review_stages", None)
+    if review_stages_raw is not None:
+        models_raw["review_stages"] = _parse_review_stages(review_stages_raw)
     cfg = RedteamConfig(
         project=_build(ProjectConfig, data.get("project", {})),
-        models=_build(ModelsConfig, data.get("models", {})),
+        models=_build(ModelsConfig, models_raw),
         tiers=_parse_tiers(data.get("tiers", {})),
         tier_triggers=triggers,
         default_tier=default_tier,
