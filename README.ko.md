@@ -349,14 +349,17 @@ Postgres + 벡터 DB)와 `examples/nuxt-like/`(JS/TS — Nuxt 3 + Vue + Vitest).
 python3 .redteam/workflows/orchestrator.py new    .redteam/batches/<batch> <slug> [--title "..."]
 python3 .redteam/workflows/orchestrator.py start  .redteam/batches/<batch>
 python3 .redteam/workflows/orchestrator.py resume .redteam/batches/<batch>
-python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
+python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch> [--json]
 ```
 
 배치는 `tasks/<task-id>/input.md` 브리프들의 디렉터리다. `new`는 템플릿 `input.md`와
 함께 다음 `task-NNN` 디렉터리를 스캐폴드한다(또는 `/redteam:new-task` 사용);
 브리프를 채운 뒤 `start`. 오케스트레이터는 태스크별 브랜치
 (`<branch_prefix>/<task-id>`)를 만들고 파이프라인을 돌리며, 각 사람 게이트에서 그것이
-지정하는 sentinel 파일을 당신이 건드릴 때까지 멈춘다.
+지정하는 sentinel 파일을 당신이 건드릴 때까지 멈춘다. `status --json`은 같은
+리포트를 기계가 읽을 수 있게 낸다(태스크별 phase, deferral — 원시 실패 로그는 절대
+포함하지 않음 — 그리고 goal 진행률). PR 게이트에 막힌 태스크는 `wait-and-resume`이
+`gh pr view`로 GitHub을 폴링해 PR이 머지/클로즈되면 자동으로 전진시킨다.
 
 **일회성 리뷰 (배치 없이).** 현재 브랜치 diff에 대해 적대적 reviewer만 — 코드를 쓴
 쪽과 *다른* 프로바이더로, 읽기 전용 — 돌리려면:
@@ -408,6 +411,14 @@ python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
 
 드래프트 PR 스택은 여전히 사람 체크포인트다 — goal 모드는 태스크를 합성할 뿐, 대신
 머지해 주지는 않는다.
+
+Claude Code에서는 `/redteam:goal`이 이 전체를 **자율적으로** 끌고 간다: 분해하고,
+스택을 시작하고, 그 뒤로도 계속 운영한다 — `status --json`을 읽고, deferred/실패한
+태스크를 진단하고, 에이전트가 고쳐도 되는 것(일시적 인프라 문제, 스테일 태스크
+브랜치, 원인을 해소한 sticky deferral, 결함 있는 decomposer 작성 브리프 —
+`goal.md`의 의도 안에서)을 조치하고, resume한다 — 모든 태스크의 드래프트 PR이
+열리거나 진짜 사람의 결정이 필요해질 때까지(fail-closed: 분해 거부, 반복되는
+deferral, 보안 경계를 건드리는 것은 루프를 멈춘다). 머지는 절대 하지 않는다.
 
 ## 이 프로젝트가 나온 배경
 

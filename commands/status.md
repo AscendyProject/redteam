@@ -18,6 +18,10 @@ Steps:
    python3 .redteam/workflows/orchestrator.py status .redteam/batches/<batch>
    ```
 
+   Add `--json` for a machine-readable report (per-task phase/deferrals plus
+   goal progress when the batch has a `goal.json`) — useful when you need to
+   act on the status programmatically rather than relay it.
+
 4. Summarize for each task: completed phase count, `next` phase, and any
    `[GATE: …]`, `[CODEX: …]`, or `[DEFERRED]` markers. For a task blocked at a
    human gate, tell the user exactly which sentinel to `touch` and to run

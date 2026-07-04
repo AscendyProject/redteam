@@ -5,7 +5,10 @@ Usage:
     python3 .redteam/workflows/orchestrator.py decompose <batch-dir>
     python3 .redteam/workflows/orchestrator.py start  <batch-dir>
     python3 .redteam/workflows/orchestrator.py resume <batch-dir>
-    python3 .redteam/workflows/orchestrator.py status <batch-dir>
+    python3 .redteam/workflows/orchestrator.py wait-and-resume <batch-dir>
+    python3 .redteam/workflows/orchestrator.py status <batch-dir> [--json]
+    python3 .redteam/workflows/orchestrator.py new <batch-dir> <slug> [--title <text>]
+    python3 .redteam/workflows/orchestrator.py review
     python3 .redteam/workflows/orchestrator.py config
 
 Walks each task in <batch-dir>/tasks/ through the 8-phase pipeline,
@@ -1912,11 +1915,93 @@ def cmd_wait_and_resume(batch_dir: Path) -> int:
 # ---------- status ----------
 
 
-def cmd_status(batch_dir: Path) -> int:
+def _task_status_obj(task_dir: Path) -> dict[str, Any]:
+    """Machine-readable status for one task, for `status --json`.
+
+    NEVER includes `last_failure_log` or a deferred entry's `feedback`: both can
+    carry secrets quoted from raw stderr or a diff (IR-002/IR-004 — same posture
+    as the human-readable status). The full record stays in state.json for
+    manual inspection.
+    """
+    obj: dict[str, Any] = {"id": task_dir.name}
+    state_path = task_dir / "state.json"
+    if not state_path.is_file():
+        obj["state"] = "no_state"
+        return obj
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        obj["state"] = "corrupt_state"
+        obj["error"] = str(e)
+        return obj
+    if not isinstance(state, dict):
+        obj["state"] = "invalid_state"
+        return obj
+    obj["state"] = "ok"
+    next_phase = state.get("next_phase")
+    obj["next_phase"] = next_phase
+    obj["phases_completed"] = state.get("phases_completed", [])
+    obj["last_failure_reason"] = state.get("last_failure_reason")
+    obj["deferred"] = [
+        {k: entry.get(k) for k in ("phase", "backtrack_to", "reason", "attempts") if k in entry}
+        for entry in state.get("deferred_requirements", [])
+        if isinstance(entry, dict)
+    ]
+    if next_phase in GATE_SENTINELS:
+        obj["gate_sentinel"] = GATE_SENTINELS[next_phase]
+    elif next_phase in MANUAL_PHASE_SENTINELS:
+        obj["manual_sentinel"] = MANUAL_PHASE_SENTINELS[next_phase]
+    pr_url = state.get("pr_url")
+    if not pr_url:
+        url_path = task_dir / "pr_url.txt"
+        if url_path.is_file():
+            pr_url = url_path.read_text(encoding="utf-8").strip()
+    if isinstance(pr_url, str) and pr_url:
+        obj["pr_url"] = pr_url
+    return obj
+
+
+def _goal_status_obj(batch_dir: Path, task_objs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Goal-level status derived read-only from goal.json + per-task next_phase.
+
+    Returns None when the batch has no goal.json (flat mode). On an invalid
+    manifest, reports the validation error instead of raising — status is a
+    read-only surface and must not fail the way start/resume (correctly) do.
+    """
+    goal_path = batch_dir / "goal.json"
+    if not goal_path.is_file():
+        return None
+    try:
+        manifest = _load_goal_manifest(batch_dir, goal_path)
+    except ValueError as exc:
+        return {"present": True, "valid": False, "error": str(exc)}
+    deps = manifest["deps"]
+    manifest_ids = [tid for layer in _topo_layers(deps) for tid in layer]
+    done_by_id = {t["id"]: t.get("next_phase") == "done" for t in task_objs}
+    incomplete = [tid for tid in manifest_ids if not done_by_id.get(tid, False)]
+    return {
+        "present": True,
+        "valid": True,
+        "total": len(manifest_ids),
+        "done": len(manifest_ids) - len(incomplete),
+        "complete": not incomplete,
+        "incomplete_ids": incomplete,
+        "deps": deps,
+    }
+
+
+def cmd_status(batch_dir: Path, *, as_json: bool = False) -> int:
     if not batch_dir.is_dir():
         print(f"error: batch directory not found: {batch_dir}", file=sys.stderr)
         return 2
     tasks = list_tasks(batch_dir)
+    task_objs = [_task_status_obj(t) for t in tasks]
+    goal = _goal_status_obj(batch_dir, task_objs)
+
+    if as_json:
+        print(json.dumps({"batch": batch_dir.name, "tasks": task_objs, "goal": goal}, indent=2))
+        return 0
+
     if not tasks:
         print(f"no tasks under {batch_dir}/tasks/")
         return 0
@@ -1944,6 +2029,13 @@ def cmd_status(batch_dir: Path) -> int:
                 '`codex login status` (re-login if expired) or set reviewer="human". '
                 "Full log: state.json.last_failure_log"
             )
+    if goal is not None:
+        if not goal["valid"]:
+            print(f"  goal.json INVALID — {goal['error']}")
+        elif goal["complete"]:
+            print(f"  goal: COMPLETE ({goal['done']}/{goal['total']} done — draft-PR stack ready; not merged)")
+        else:
+            print(f"  goal: {goal['done']}/{goal['total']} done — incomplete: {', '.join(goal['incomplete_ids'])}")
     return 0
 
 
@@ -2364,7 +2456,8 @@ def cmd_config(repo: Path | None = None) -> int:
 
 USAGE = (
     "usage: orchestrator.py decompose <batch-dir>\n"
-    "       orchestrator.py {start|resume|wait-and-resume|status} <batch-dir>\n"
+    "       orchestrator.py {start|resume|wait-and-resume} <batch-dir>\n"
+    "       orchestrator.py status <batch-dir> [--json]\n"
     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
     "       orchestrator.py review\n"
     "       orchestrator.py config\n"
@@ -2376,7 +2469,8 @@ USAGE = (
     "  wait-and-resume  — for tasks blocked at human_gate_pr, poll GitHub via `gh pr view`\n"
     "                     and auto-touch the `pr.reviewed` sentinel once the PR is merged\n"
     "                     or closed; then run resume\n"
-    "  status           — print per-task summary without running anything\n"
+    "  status           — print per-task summary without running anything; --json emits a\n"
+    "                     machine-readable report (per-task phase/deferrals + goal progress)\n"
     "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
     "  review           — one-shot adversarial review of the current branch diff with the\n"
     "                     configured reviewer (a different provider than the worker); no batch\n"
@@ -2413,7 +2507,11 @@ def main(argv: list[str]) -> int:
     if command == "wait-and-resume":
         return cmd_wait_and_resume(batch_dir)
     if command == "status":
-        return cmd_status(batch_dir)
+        extra = argv[3:]
+        if extra and extra != ["--json"]:
+            print(f"error: unknown status argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
+            return 2
+        return cmd_status(batch_dir, as_json=bool(extra))
 
     print(f"error: unknown command: {command!r}\n\n{USAGE}", file=sys.stderr)
     return 2
