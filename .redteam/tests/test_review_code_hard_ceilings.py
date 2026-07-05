@@ -459,6 +459,31 @@ def test_wall_clock_post_dispatch_upgrade_no_approval(tmp_path: Path) -> None:
     assert res["status"] != "approved"
 
 
+def test_wall_clock_post_dispatch_upgrade_manual_required(tmp_path: Path) -> None:
+    """IR-001 (code_review rounds 1–2): a dispatch that exhausts fallback to
+    MANUAL_REQUIRED while accrual crosses max_wall_clock_sec must return
+    ceiling-terminal, NOT route to the manual flow — the ceiling is the
+    outermost exit regardless of the reviewer verdict."""
+    _ceilings_config(tmp_path, max_wall_clock_sec=10)
+    state = _agent_pair_state(review_code_wall_clock_sec=9.0)
+    # monotonic seq: t0=0.0, t1=5.0 → dt=5.0, total=14.0 >= 10
+    res, rwf = _run_review(tmp_path, state, _manual_result(), monotonic_seq=[0.0, 5.0])
+    assert res["status"] == "error"
+    assert res.get("ceiling_hit") == "max_wall_clock_sec"
+    assert res["status"] != "manual_required"
+    rwf.assert_called_once()
+
+
+def test_wall_clock_post_dispatch_manual_required_below_ceiling_unchanged(tmp_path: Path) -> None:
+    """Regression guard for the reorder: MANUAL_REQUIRED below the ceiling still
+    routes to the manual flow exactly as before."""
+    _ceilings_config(tmp_path, max_wall_clock_sec=100)
+    state = _agent_pair_state(review_code_wall_clock_sec=0.0)
+    res, _ = _run_review(tmp_path, state, _manual_result(), monotonic_seq=[0.0, 1.0])
+    assert res["status"] == "manual_required"
+    assert res.get("ceiling_hit") is None
+
+
 # ---------------------------------------------------------------------------
 # Approval-authority invariant (D4, D5)
 # ---------------------------------------------------------------------------

@@ -298,14 +298,17 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                         time.monotonic() - _wc_t0
                     )
 
-            if result["parse_status"] == MANUAL_REQUIRED:
-                return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
             review_text = result["raw"]
-            review_path.write_text(review_text, encoding="utf-8")
-            # Post-dispatch wall-clock ceiling check (D4 step 6): after accrual AND
-            # after persisting the reviewer's raw (audit trail).  If the accrual
-            # pushed the total past the ceiling, return ceiling-terminal regardless
-            # of the reviewer's verdict — no silent approvals under time pressure.
+            if result["parse_status"] != MANUAL_REQUIRED:
+                # Persist the reviewer's raw (audit trail) before any terminal
+                # return below. MANUAL_REQUIRED has no reviewer body to persist.
+                review_path.write_text(review_text, encoding="utf-8")
+            # Post-dispatch wall-clock ceiling check (D4 step 6): after accrual,
+            # a crossed ceiling is terminal regardless of the reviewer's verdict —
+            # INCLUDING MANUAL_REQUIRED (IR-001): a headless dispatch that
+            # exhausts fallback must not bypass the ceiling and route to the
+            # manual flow. No silent approvals — and no unbounded manual
+            # hand-offs — under time pressure.
             if (
                 review_ceilings is not None
                 and review_ceilings.max_wall_clock_sec is not None
@@ -322,6 +325,8 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                     diff=diff,
                     ceiling_hit="max_wall_clock_sec",
                 )
+            if result["parse_status"] == MANUAL_REQUIRED:
+                return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
             # Fail closed on any non-ok parse status; trust the adapter's decision
             # rather than re-parsing the raw body.
             if result["parse_status"] != "ok":
