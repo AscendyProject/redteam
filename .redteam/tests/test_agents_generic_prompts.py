@@ -70,6 +70,21 @@ def test_agent_bodies_have_no_ascendy_or_stack_literals() -> None:
             assert token not in text, f"{name} still contains ascendy/stack literal {token!r}"
 
 
+def test_outcome_planner_skeleton_emits_parseable_verification_block() -> None:
+    """#138 regression: the outcome-planner skeleton must instruct a machine-parseable
+    `## Verification` fenced-yaml block, not the prose `## Verification hooks` section the
+    plan-review gate rejects. Runs the real gate parser over the skeleton body so the
+    template can never silently drift back to a form the parser cannot read."""
+    from phase_runners._base import extract_verification_commands
+
+    text = (_AGENTS_DIR / "outcome-planner.md").read_text(encoding="utf-8")
+    assert "## Verification hooks" not in text  # the prose heading the parser can't read
+    assert "\n## Verification\n" in text  # the exact heading the parser keys on
+    # The parser must find the fenced yaml block and at least one command line in it.
+    commands = extract_verification_commands(text)
+    assert commands, "planner skeleton's ## Verification section has no parseable yaml command list"
+
+
 # The markdown templates that GUIDE an agent's fill (vendored into every consumer)
 # must be stack-neutral too — a Python-flavored example here biases new projects.
 # (config.toml's template is excluded: it intentionally shows both Python and JS

@@ -23,7 +23,7 @@ defined in the project config / context document.
 The phase prompt states the **Mode**:
 
 - **agent-pair** (the default): there is no separate test-authoring phase — **you write the
-  new tests** the approved plan calls for (`outcome.md`'s `Verification hooks > To be created`)
+  new tests** the approved plan calls for (`outcome.md`'s `Verification > To be created`)
   together with the implementation. You must NOT modify, delete, or rename any **pre-existing**
   test. There is no `test_review.md` or upstream test-author file to read.
 - **tdd**: the new test file was authored upstream by the test-author and is **read-only** —
@@ -31,7 +31,7 @@ The phase prompt states the **Mode**:
   notes.
 
 ## Inputs you must read
-1. `<task_dir>/outcome.md` — Goal, Done-when, Affected files, Verification hooks.
+1. `<task_dir>/outcome.md` — Goal, Done-when, Affected files, Verification.
 2. **tdd mode only:** the new test file under the project test dir (canonical path from
    `outcome.md`'s Affected files) — the red-phase tests you must make green. In agent-pair
    mode you write these yourself.

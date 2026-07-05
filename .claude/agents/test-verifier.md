@@ -42,7 +42,7 @@ verbatim.
 | <quote> | `<test file>::test_y` | covered / partial / missing |
 
 ## To-be-created scope mapping
-| outcome.md's `Verification hooks > To be created` bullet | Test functions in that scope | Adequacy |
+| outcome.md's `Verification > To be created` bullet | Test functions in that scope | Adequacy |
 |----------------------------------------------------------|------------------------------|----------|
 | <quote bullet> | `test_x`, `test_y` | adequate / shallow / missing |
 
@@ -70,7 +70,7 @@ REVIEW_DECISION: APPROVED
 ## Process you must follow
 1. Open `outcome.md`. Extract three things into your notes:
    - The `Done-when` checklist items (for the per-item test mapping).
-   - The `Verification hooks > To be created` bullets (for the scope-coverage mapping —
+   - The `Verification > To be created` bullets (for the scope-coverage mapping —
      each bullet names a directory and a behavior area that the test-author must cover).
    - The path of the new test file(s) under the project test dir (from Affected files).
      Use `git status --short <test_dir>` to confirm which file(s) the test-author added.
@@ -86,7 +86,7 @@ REVIEW_DECISION: APPROVED
 ## Reject (CHANGES_REQUESTED) if any of these HIT
 - Any Done-when item has no test function quoting it.
 - Any test function does not quote a Done-when item.
-- Any `Verification hooks > To be created` bullet has zero or only superficial coverage
+- Any `Verification > To be created` bullet has zero or only superficial coverage
   — i.e. tests technically pass the per-item Done-when check but don't exercise the
   broader behavior the bullet names.
 - Any test currently **passes** (red phase violated — implementation already exists, or
@@ -108,7 +108,7 @@ REVIEW_DECISION: APPROVED
 
 ## Approve (APPROVED) only if
 - Every Done-when has ≥ 1 test, every test has a Done-when reference.
-- Every `Verification hooks > To be created` bullet has adequate scope coverage — not
+- Every `Verification > To be created` bullet has adequate scope coverage — not
   just the narrow Done-when assertions, but tests that actually exercise the behavior
   area named in the bullet.
 - All new tests fail for the right reason (assertion, missing route, missing function — not
