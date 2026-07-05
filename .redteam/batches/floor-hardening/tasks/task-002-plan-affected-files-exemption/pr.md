@@ -85,21 +85,40 @@ the exemption to `_cross_run_trust_root_floor`, which stays strict.
       .redteam/tests/test_sibling_task_floor_exemption.py
       .redteam/tests/test_baseline_trust_root_cross_run.py -q` still passes
       byte-identically (this task does NOT modify those files).
+- [ ] **Reviewed-range integrity for exempted paths (IR-001, stack review).**
+      Exempting an outside-scope tracked path at the pre-worker floor must NOT
+      let the worker's change to that path escape the committed reviewed range
+      (`git diff <base>...HEAD`). Today `_commit_worker_diff` stages
+      `_tracked_changed_paths - before_tracked`; a plan-affected file that was
+      already dirty-vs-base before the set-once tracked baseline is in
+      `before_tracked`, so the worker's edits to it are dropped from the commit
+      while `verify.sh` runs against the worktree that has them — a stale
+      review range on the very integrity boundary this family guards. Fix
+      fail-closed: guarantee that any plan-affected path with changes vs base
+      is EITHER committed into the reviewed range OR fails the post-commit
+      integrity gate (no silent omission). Preserve the existing operator-WIP
+      and adversarial-baseline guarantees — the exemption covers ONLY the
+      snapshotted plan-affected set, nothing else.
+- [ ] Regression proving the integrity fix: an outside-scope path listed in the
+      approved `outcome.md` Affected files, dirty vs base BEFORE the first
+      implement round, has the worker's changes to it reflected in the
+      committed `base...HEAD` range (or the integrity gate refuses) — verify
+      is never green against a worktree whose committed range omits the change.
 - [ ] Engine remains stdlib-only (no new imports beyond what `implement.py`
       already uses — `pathlib`, `re` if needed for the heading match are
       stdlib).
 
 ## Verification
-- Tests: test_plan_affected_exemption_on, test_plan_affected_exemption_off_default, test_parser_new_prefix_lowercase_stripped, test_parser_new_prefix_mixed_case_stripped, test_parser_new_suffix_not_stripped, test_parser_new_prefix_inside_backticks, test_parser_absent_outcome_md, test_parser_no_affected_files_heading, test_parser_empty_affected_files_section, test_parser_unreadable_outcome_md, test_parser_absent_outcome_md_floor_unchanged, test_parser_absolute_path_skipped_well_formed_honored, test_parser_dotdot_segment_skipped_well_formed_honored, test_parser_same_level_heading_stops_section, test_parser_higher_level_heading_stops_section, test_parser_subheading_does_not_stop_section, test_parser_trailing_slash_not_directory_prefix, test_set_once_same_process_widened_outcome_ignored, test_set_once_fresh_process_reentry, test_set_once_empty_parse_stored_and_not_reparsed, test_cross_run_floor_not_exempted_by_plan_affected, test_cross_run_floor_check1_not_exempted_by_plan_affected, test_default_in_scope_path_always_exempt, test_default_path_empty_current_tracked
+- Tests: test_plan_affected_exemption_on, test_plan_affected_exemption_off_default, test_parser_new_prefix_lowercase_stripped, test_parser_new_prefix_mixed_case_stripped, test_parser_new_suffix_not_stripped, test_parser_new_prefix_inside_backticks, test_parser_absent_outcome_md, test_parser_no_affected_files_heading, test_parser_empty_affected_files_section, test_parser_unreadable_outcome_md, test_parser_absent_outcome_md_floor_unchanged, test_parser_absolute_path_skipped_well_formed_honored, test_parser_dotdot_segment_skipped_well_formed_honored, test_parser_same_level_heading_stops_section, test_parser_higher_level_heading_stops_section, test_parser_subheading_does_not_stop_section, test_parser_trailing_slash_not_directory_prefix, test_set_once_same_process_widened_outcome_ignored, test_set_once_fresh_process_reentry, test_set_once_empty_parse_stored_and_not_reparsed, test_cross_run_floor_not_exempted_by_plan_affected, test_cross_run_floor_check1_not_exempted_by_plan_affected, test_default_in_scope_path_always_exempt, test_default_path_empty_current_tracked, test_uncommitted_plan_affected_empty_fast_path, test_uncommitted_plan_affected_detects_unstaged_path, test_uncommitted_plan_affected_detects_staged_path, test_uncommitted_plan_affected_clean_path_not_returned, test_uncommitted_plan_affected_other_dirty_path_not_returned, test_ir001_integrity_gate_refuses_uncommitted_plan_affected_path
 - Verify command: `bash .redteam/scripts/verify.sh` ✅
 
 ## Code review summary
 - Diff scope confirmed limited to the two approved files (`implement.py` + the new test file); no drift into adapters, prompts, or docs.
-- Set-once snapshot is correctly wired BEFORE `_floor_outside_scope` in both the agent-pair path (`_run_agent_pair`) and the tdd `run` path, matching the tracked/untracked baseline convention.
-- Security boundary held: `_cross_run_trust_root_floor` continues to consult only `_is_harness_artifact`, never `plan_affected` — a plan cannot weaken the cross-run baseline trust floor.
-- Fail-closed parser confirmed: absent, unreadable, and undecodable `outcome.md` all yield `frozenset()`; malformed per-entry (absolute paths, `..` segments) are skipped without rejecting the whole list.
-- IR-001 (major) resolved round-over-round by adding `UnicodeDecodeError` to the parser's `try/except`, plus IR-002 test coverage for the undecodable case. Final decision: `REVIEW_DECISION: APPROVED`.
-- Stdlib-only preserved (`re` is stdlib); no new runtime dependency.
+- Set-once snapshot is correctly wired BEFORE `_floor_outside_scope` in both the agent-pair path (`_run_agent_pair`) and the tdd `run` path, matching the tracked/untracked baseline convention; `implement_plan_affected_files` persists alongside the tracked/untracked baselines.
+- Security boundary held: `_cross_run_trust_root_floor` continues to consult only `_is_harness_artifact`, never `plan_affected` — a plan cannot weaken the cross-run baseline trust floor (regressions cover both Check-1 and Check-2).
+- IR-001 (blocker) resolved: reviewed-range integrity gate `_uncommitted_plan_affected_paths` inspects both unstaged and staged diffs against base for the snapshotted plan-affected set and is called on the post-commit integrity path in both agent-pair and TDD flows — a plan-affected file dirty vs base whose changes are dropped from the `_commit_worker_diff` sweep now fails the gate instead of silently letting verify run against a stale committed range.
+- IR-002 (major) resolved: the `_plan_affected_files` parser now catches `UnicodeDecodeError` as well as I/O errors, so a non-UTF-8 `outcome.md` yields `frozenset()` (fail-closed default) rather than raising; direct regression added.
+- Final decision: `REVIEW_DECISION: APPROVED`. Stdlib-only preserved (`re` is stdlib); no new runtime dependency; 728 tests pass in the recorded verification run.
 
 ## Generated by
 redteam / batch floor-hardening / task task-002-plan-affected-files-exemption

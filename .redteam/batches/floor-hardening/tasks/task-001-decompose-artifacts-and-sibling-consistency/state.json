@@ -1,14 +1,15 @@
 {
   "task_id": "task-001-decompose-artifacts-and-sibling-consistency",
   "mode": "agent-pair",
-  "phase": "create_pr",
+  "phase": "done",
   "phases_completed": [
     "plan_outcome",
     "plan_review",
     "implement",
-    "review_code"
+    "review_code",
+    "create_pr"
   ],
-  "next_phase": "create_pr",
+  "next_phase": "done",
   "decision": "pending",
   "owner": "claude",
   "reviewer": "codex",
@@ -88,9 +89,9 @@
   "last_failure_diff": null,
   "deferred_requirements": [],
   "branch": "redteam/task-001-decompose-artifacts-and-sibling-consistency",
-  "pr_url": null,
+  "pr_url": "https://github.com/AscendyProject/redteam/pull/141",
   "created_at": "2026-07-05T06:23:09.821442+00:00",
-  "updated_at": "2026-07-05T07:30:12.990223+00:00",
+  "updated_at": "2026-07-05T13:25:29.973046+00:00",
   "base_branch": "main",
   "phase_started_at": "2026-07-05T07:30:12.990210+00:00",
   "last_user_response": null,

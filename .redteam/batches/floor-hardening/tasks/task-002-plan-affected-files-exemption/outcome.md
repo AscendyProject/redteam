@@ -76,6 +76,25 @@ live `outcome.md` after plan approval.
       .redteam/tests/test_sibling_task_floor_exemption.py
       .redteam/tests/test_baseline_trust_root_cross_run.py -q` still passes
       byte-identically (this task does NOT modify those files).
+- [ ] **Reviewed-range integrity for exempted paths (IR-001, stack review).**
+      Exempting an outside-scope tracked path at the pre-worker floor must NOT
+      let the worker's change to that path escape the committed reviewed range
+      (`git diff <base>...HEAD`). Today `_commit_worker_diff` stages
+      `_tracked_changed_paths - before_tracked`; a plan-affected file that was
+      already dirty-vs-base before the set-once tracked baseline is in
+      `before_tracked`, so the worker's edits to it are dropped from the commit
+      while `verify.sh` runs against the worktree that has them — a stale
+      review range on the very integrity boundary this family guards. Fix
+      fail-closed: guarantee that any plan-affected path with changes vs base
+      is EITHER committed into the reviewed range OR fails the post-commit
+      integrity gate (no silent omission). Preserve the existing operator-WIP
+      and adversarial-baseline guarantees — the exemption covers ONLY the
+      snapshotted plan-affected set, nothing else.
+- [ ] Regression proving the integrity fix: an outside-scope path listed in the
+      approved `outcome.md` Affected files, dirty vs base BEFORE the first
+      implement round, has the worker's changes to it reflected in the
+      committed `base...HEAD` range (or the integrity gate refuses) — verify
+      is never green against a worktree whose committed range omits the change.
 - [ ] Engine remains stdlib-only (no new imports beyond what `implement.py`
       already uses — `pathlib`, `re` if needed for the heading match are
       stdlib).
