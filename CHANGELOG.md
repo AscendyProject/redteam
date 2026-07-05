@@ -7,6 +7,29 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+### Fixed
+- **Goal-mode floors are now harness-artifact-aware (#136, #141).** The
+  pre-worker out-of-scope floor (#91) and the cross-run trust-root floor (#117)
+  no longer fail-closed on the harness's own decision trail: same-batch
+  top-level decompose artifacts (`goal.md`, `goal.json`, `decompose_review.md`,
+  `decompose_blocked.md`) and a sibling task's top-level `input.md` are exempt,
+  via a single shared `_is_harness_artifact` predicate so the two floors cannot
+  drift apart (the #117 Check-2 ↔ #124 sibling-allowlist inconsistency that
+  self-locked a stacked run is closed). Genuine operator WIP outside scope is
+  still refused; the adversarial-baseline-rewrite guard is preserved.
+- **Pre-worker floor honors plan-declared Affected files (#137, #142).** Paths
+  explicitly listed in the current task's review-approved `outcome.md` Affected
+  files (tolerating the `(new) ` prefix) are exempt, so a review backtrack no
+  longer self-locks on the worker's own round-1 output. The exemption is
+  snapshotted **set-once** before the first worker run and never re-read from
+  the live file — a failed round cannot widen its own exemption. A post-commit
+  integrity layer (`_uncommitted_plan_affected_paths`) closes the reviewed-range
+  gap a cross-model stack review found: an exempted outside-scope tracked path
+  can no longer escape the committed `base...HEAD` range while verification runs
+  green against the worktree. `_cross_run_trust_root_floor` is deliberately NOT
+  on the exemption path. Both #136 and #137 shipped by the **second autonomous
+  `/redteam:goal` run** (batch `floor-hardening`).
+
 ### Added
 - **#92 P3 — opt-in round-staged reviewer model (#135).** The `review_code`
   round loop can run its first-pass scan on a cheaper reviewer model and

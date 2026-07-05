@@ -1,15 +1,16 @@
 {
   "task_id": "task-002-plan-affected-files-exemption",
   "mode": "agent-pair",
-  "phase": "create_pr",
+  "phase": "done",
   "phases_completed": [
     "plan_outcome",
     "ask_user",
     "plan_review",
     "implement",
-    "review_code"
+    "review_code",
+    "create_pr"
   ],
-  "next_phase": "create_pr",
+  "next_phase": "done",
   "decision": "pending",
   "owner": "claude",
   "reviewer": "codex",
@@ -95,7 +96,7 @@
   ],
   "branch": "redteam/task-002-plan-affected-files-exemption",
   "created_at": "2026-07-05T07:31:59.552877+00:00",
-  "updated_at": "2026-07-05T13:41:49.969134+00:00",
+  "updated_at": "2026-07-05T13:45:06.079390+00:00",
   "base_branch": "redteam/task-001-decompose-artifacts-and-sibling-consistency",
   "base_branch_sha": "63ef13ace1bdf507b3acf5fa53e10f8e0c010b4d",
   "phase_started_at": "2026-07-05T13:41:49.969095+00:00",
@@ -117,5 +118,6 @@
   "implement_plan_affected_files": [
     ".redteam/tests/test_floor_plan_affected_files_exemption.py",
     ".redteam/workflows/phase_runners/implement.py"
-  ]
+  ],
+  "pr_url": "https://github.com/AscendyProject/redteam/pull/142"
 }
