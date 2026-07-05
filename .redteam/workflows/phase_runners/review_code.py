@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -159,6 +160,52 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         diff = compute_repo_diff(cwd=repo_root())
         review_path = task_dir / "code_review.md"
 
+        # D4 master gate: read ceilings from live config (lazy, mirrors the
+        # _resolve_round_stage pattern). When review_ceilings is None the runner
+        # behaves byte-identically to today — no counter increment, no
+        # time.monotonic() reads, no ceiling checks, no state.json growth.
+        from config import load_config as _load_config
+
+        review_ceilings = _load_config(repo_root()).models.review_ceilings
+
+        if review_ceilings is not None:
+            # D2: increment round counter (gated on max_review_rounds).
+            # Done BEFORE any dispatch decision — Case A and headless both count.
+            if review_ceilings.max_review_rounds is not None:
+                state["review_code_round_count"] = int(state.get("review_code_round_count") or 0) + 1
+            # Pre-dispatch round ceiling check (D4 step 2).
+            if (
+                review_ceilings.max_review_rounds is not None
+                and state["review_code_round_count"] > review_ceilings.max_review_rounds
+            ):
+                feedback = (
+                    f"review_code ceiling: max_review_rounds={review_ceilings.max_review_rounds} exceeded "
+                    f"(round count={state['review_code_round_count']})"
+                )
+                return PhaseResult(
+                    status="error",
+                    feedback=feedback,
+                    log=feedback,
+                    diff=compute_repo_diff(cwd=rr),
+                    ceiling_hit="max_review_rounds",
+                )
+            # Pre-dispatch wall-clock ceiling check (D4 step 3).
+            if (
+                review_ceilings.max_wall_clock_sec is not None
+                and float(state.get("review_code_wall_clock_sec") or 0.0) >= review_ceilings.max_wall_clock_sec
+            ):
+                feedback = (
+                    f"review_code ceiling: max_wall_clock_sec={review_ceilings.max_wall_clock_sec}s exceeded "
+                    f"(accrued={float(state.get('review_code_wall_clock_sec') or 0.0):.2f}s)"
+                )
+                return PhaseResult(
+                    status="error",
+                    feedback=feedback,
+                    log=feedback,
+                    diff=compute_repo_diff(cwd=rr),
+                    ceiling_hit="max_wall_clock_sec",
+                )
+
         # D5 dispatch: classify the round into one of four cases.
         stage = _resolve_round_stage(state)
         staging_audit: str | None = None
@@ -186,35 +233,56 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
             review_target: dict = {"kind": "branch_diff", "base": base_branch}
 
-            if stage == "first_pass":
-                # Case D — dispatch to the cheap first-pass reviewer.  If it
-                # returns APPROVED with parse_status=="ok", promote immediately
-                # to the frontier reviewer within the same round (D3); all other
-                # first-pass outcomes are returned as-is.
-                from config import load_config
+            # D3 wall-clock timer (D4 step 5): only when max_wall_clock_sec is configured.
+            # The try/finally ensures accrual even if dispatch raises.
+            _wc_t0: float | None = (
+                time.monotonic()
+                if (review_ceilings is not None and review_ceilings.max_wall_clock_sec is not None)
+                else None
+            )
+            try:
+                if stage == "first_pass":
+                    # Case D — dispatch to the cheap first-pass reviewer.  If it
+                    # returns APPROVED with parse_status=="ok", promote immediately
+                    # to the frontier reviewer within the same round (D3); all other
+                    # first-pass outcomes are returned as-is.
+                    from config import load_config
 
-                review_stages = load_config(repo_root()).models.review_stages
-                fp_result = review_with_fallback_for_provider(
-                    state,
-                    role="review_code",
-                    prompt=prompt,
-                    cwd=repo_root(),
-                    target=review_target,
-                    primary_provider=review_stages.first_pass_reviewer,
-                )
-                if fp_result["parse_status"] == "ok" and fp_result["decision"] == "APPROVED":
-                    # Promotion path (D3): persist first-pass raw BEFORE the frontier
-                    # call so a crash between the two calls doesn't lose the audit trail
-                    # (D7).  Then invoke the frontier reviewer and return ITS result.
-                    # No code path exists by which a first-pass APPROVED reaches
-                    # PhaseResult(status="approved") — only the frontier call can do that.
-                    first_pass_path = task_dir / "code_review.first_pass.md"
-                    first_pass_path.write_text(fp_result["raw"], encoding="utf-8")
-                    round_count = int(state.get("implement_round_count") or 0)
-                    staging_audit = (
-                        f"round {round_count}: first-pass '{review_stages.first_pass_reviewer}' approved; "
-                        f"promoted to frontier"
+                    review_stages = load_config(repo_root()).models.review_stages
+                    fp_result = review_with_fallback_for_provider(
+                        state,
+                        role="review_code",
+                        prompt=prompt,
+                        cwd=repo_root(),
+                        target=review_target,
+                        primary_provider=review_stages.first_pass_reviewer,
                     )
+                    if fp_result["parse_status"] == "ok" and fp_result["decision"] == "APPROVED":
+                        # Promotion path (D3): persist first-pass raw BEFORE the frontier
+                        # call so a crash between the two calls doesn't lose the audit trail
+                        # (D7).  Then invoke the frontier reviewer and return ITS result.
+                        # No code path exists by which a first-pass APPROVED reaches
+                        # PhaseResult(status="approved") — only the frontier call can do that.
+                        first_pass_path = task_dir / "code_review.first_pass.md"
+                        first_pass_path.write_text(fp_result["raw"], encoding="utf-8")
+                        round_count = int(state.get("implement_round_count") or 0)
+                        staging_audit = (
+                            f"round {round_count}: first-pass '{review_stages.first_pass_reviewer}' approved; "
+                            f"promoted to frontier"
+                        )
+                        result = review_with_fallback(
+                            state,
+                            role="review_code",
+                            prompt=prompt,
+                            cwd=repo_root(),
+                            target=review_target,
+                        )
+                    else:
+                        # Non-APPROVED first-pass outcome: return as-is (cost saving).
+                        result = fp_result
+                else:
+                    # Cases B and C — state-default (frontier) reviewer; byte-identical
+                    # to today's behavior (same function, same arguments, same audit trail).
                     result = review_with_fallback(
                         state,
                         role="review_code",
@@ -222,24 +290,43 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                         cwd=repo_root(),
                         target=review_target,
                     )
-                else:
-                    # Non-APPROVED first-pass outcome: return as-is (cost saving).
-                    result = fp_result
-            else:
-                # Cases B and C — state-default (frontier) reviewer; byte-identical
-                # to today's behavior (same function, same arguments, same audit trail).
-                result = review_with_fallback(
-                    state,
-                    role="review_code",
-                    prompt=prompt,
-                    cwd=repo_root(),
-                    target=review_target,
-                )
+            finally:
+                # Accrue wall-clock time immediately after the dispatch returns
+                # (or raises), regardless of the reviewer's verdict (D3).
+                if _wc_t0 is not None:
+                    state["review_code_wall_clock_sec"] = float(state.get("review_code_wall_clock_sec") or 0.0) + (
+                        time.monotonic() - _wc_t0
+                    )
 
+            review_text = result["raw"]
+            if result["parse_status"] != MANUAL_REQUIRED:
+                # Persist the reviewer's raw (audit trail) before any terminal
+                # return below. MANUAL_REQUIRED has no reviewer body to persist.
+                review_path.write_text(review_text, encoding="utf-8")
+            # Post-dispatch wall-clock ceiling check (D4 step 6): after accrual,
+            # a crossed ceiling is terminal regardless of the reviewer's verdict —
+            # INCLUDING MANUAL_REQUIRED (IR-001): a headless dispatch that
+            # exhausts fallback must not bypass the ceiling and route to the
+            # manual flow. No silent approvals — and no unbounded manual
+            # hand-offs — under time pressure.
+            if (
+                review_ceilings is not None
+                and review_ceilings.max_wall_clock_sec is not None
+                and float(state.get("review_code_wall_clock_sec") or 0.0) >= review_ceilings.max_wall_clock_sec
+            ):
+                feedback = (
+                    f"review_code ceiling: max_wall_clock_sec={review_ceilings.max_wall_clock_sec}s exceeded "
+                    f"after dispatch (accrued={float(state.get('review_code_wall_clock_sec') or 0.0):.2f}s)"
+                )
+                return PhaseResult(
+                    status="error",
+                    feedback=feedback,
+                    log=f"{feedback}\n\n{review_text}",
+                    diff=diff,
+                    ceiling_hit="max_wall_clock_sec",
+                )
             if result["parse_status"] == MANUAL_REQUIRED:
                 return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
-            review_text = result["raw"]
-            review_path.write_text(review_text, encoding="utf-8")
             # Fail closed on any non-ok parse status; trust the adapter's decision
             # rather than re-parsing the raw body.
             if result["parse_status"] != "ok":
@@ -262,6 +349,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         else:
             # Case A — manual branch (reviewer=human or prior manual_required flag).
             # Staging is BYPASSED ENTIRELY; no review_with_fallback* call is made.
+            # Wall-clock accrual is also BYPASSED for Case A (D4 step 4).
             review_text = read_text_if_exists(review_path)
             if review_text is None:
                 feedback = f"code_review.md was not produced at {review_path}"
