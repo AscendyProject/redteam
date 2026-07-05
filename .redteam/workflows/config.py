@@ -39,6 +39,21 @@ class ReviewStagesConfig:
 
 
 @dataclass(frozen=True)
+class ReviewCeilingsConfig:
+    """Hard ceilings on the review_code loop: max rounds and/or max cumulative
+    wall-clock seconds spent inside headless reviewer dispatch.
+
+    Both fields default None (absent = no ceiling). Both must be int >= 1 when
+    set (bool values rejected). Presence of the subtable with BOTH absent is a
+    config error. Only valid as a global subtable (`[models.review_ceilings]`);
+    tier-level ceilings are explicitly out of scope for v1.
+    """
+
+    max_review_rounds: int | None = None
+    max_wall_clock_sec: int | None = None
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     """Where the target project's code, tests, context and verify command live."""
 
@@ -80,6 +95,10 @@ class ModelsConfig:
     # Parsed from the `[models.review_stages]` TOML subtable; validated by
     # _parse_review_stages before _build receives it.
     review_stages: ReviewStagesConfig | None = None
+    # Optional hard ceilings on the review_code loop (P5). Absent (None) = no
+    # ceilings, today's behavior byte-for-byte. Parsed from the
+    # `[models.review_ceilings]` TOML subtable; validated by _parse_review_ceilings.
+    review_ceilings: ReviewCeilingsConfig | None = None
 
 
 GATE_NAMES = ("outcome", "pr", "rescue")  # the human gates a tier may opt into
@@ -176,10 +195,44 @@ def _validate(cfg: RedteamConfig) -> None:
     _validate_reviewer_fallback("models.reviewer_fallback", m.reviewer_fallback)
 
 
-# review_stages is a nested subtable config, not a tier-level per-role override;
-# exclude it from _KNOWN_ROLES so a [tiers.N].models.review_stages key continues
-# to be rejected by the "unknown role(s)" fail-loud path in _parse_tiers (D1).
-_KNOWN_ROLES = frozenset(f.name for f in dataclasses.fields(ModelsConfig)) - {"review_stages"}
+def _parse_review_ceilings(raw: object) -> ReviewCeilingsConfig:
+    """Parse and validate a `[models.review_ceilings]` TOML subtable.
+
+    Fails loud on: unknown keys, subtable present but both keys absent (empty
+    subtable), max_review_rounds or max_wall_clock_sec that is a bool / non-int /
+    < 1. No adapter dependency (validates int shapes only, unlike _parse_review_stages).
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"models.review_ceilings must be a table, got {raw!r}.")
+    known = {f.name for f in dataclasses.fields(ReviewCeilingsConfig)}
+    unknown = set(raw) - known
+    if unknown:
+        raise ValueError(
+            f"Unknown models.review_ceilings config key(s): {sorted(unknown)}. Known keys: {sorted(known)}."
+        )
+    max_rounds = raw.get("max_review_rounds")
+    max_wc = raw.get("max_wall_clock_sec")
+    if max_rounds is None and max_wc is None:
+        raise ValueError(
+            "models.review_ceilings subtable is present but both keys are absent; "
+            "set at least one of max_review_rounds or max_wall_clock_sec."
+        )
+    for name, val in (("max_review_rounds", max_rounds), ("max_wall_clock_sec", max_wc)):
+        if val is None:
+            continue
+        if isinstance(val, bool) or not isinstance(val, int) or val < 1:
+            raise ValueError(f"models.review_ceilings.{name} must be an int >= 1 (bool values rejected), got {val!r}.")
+    return ReviewCeilingsConfig(
+        max_review_rounds=max_rounds,
+        max_wall_clock_sec=max_wc,
+    )
+
+
+# review_stages and review_ceilings are nested subtable configs, not tier-level
+# per-role overrides; exclude them from _KNOWN_ROLES so a [tiers.N].models key
+# of either name continues to be rejected by the "unknown role(s)" fail-loud
+# path in _parse_tiers (D1 of P3; D1 of P5).
+_KNOWN_ROLES = frozenset(f.name for f in dataclasses.fields(ModelsConfig)) - {"review_stages", "review_ceilings"}
 
 # reviewer_fallback is POLICY, not a model name: it must be a known reviewer
 # provider or a manual sentinel. Validated loudly (a typo fails at load) in BOTH
@@ -420,6 +473,12 @@ def load_config(repo_root: Path) -> RedteamConfig:
     review_stages_raw = models_raw.pop("review_stages", None)
     if review_stages_raw is not None:
         models_raw["review_stages"] = _parse_review_stages(review_stages_raw)
+    # Pre-process [models.review_ceilings] subtable before _build (same pattern
+    # as review_stages above): _build's known-key check allows review_ceilings on
+    # ModelsConfig; _parse_review_ceilings validates the nested keys fail-loud.
+    review_ceilings_raw = models_raw.pop("review_ceilings", None)
+    if review_ceilings_raw is not None:
+        models_raw["review_ceilings"] = _parse_review_ceilings(review_ceilings_raw)
     cfg = RedteamConfig(
         project=_build(ProjectConfig, data.get("project", {})),
         models=_build(ModelsConfig, models_raw),

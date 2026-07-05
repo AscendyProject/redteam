@@ -1443,6 +1443,27 @@ def process_task(
 
         result = runner(task_dir, state)
 
+        # Ceiling pre-check (D6, P5): runs BEFORE manual_required, BEFORE the
+        # fallback_audit/staging_audit audit sites, and BEFORE retries/rescue
+        # routing — so a ceiling hit can never be misrouted to rescue (which would
+        # blow the budget again) or to a silent approval.
+        ceiling_hit = result.get("ceiling_hit")
+        if ceiling_hit:
+            state.setdefault("review_audit", []).append({"phase": phase, "reason": ceiling_hit})
+            state.setdefault("deferred_requirements", []).append(
+                {
+                    "phase": "review_code",
+                    "reason": f"review_code_{ceiling_hit}_exceeded",
+                    "round_count": int(state.get("review_code_round_count") or 0),
+                    "wall_clock_sec": float(state.get("review_code_wall_clock_sec") or 0.0),
+                    "feedback": result["feedback"][:4000],
+                }
+            )
+            _record_failure(state, result)
+            state["next_phase"] = "deferred"
+            save_state(task_dir, state)
+            return "deferred"
+
         # A reviewer that exhausted its fallback ladder to manual (#37 step 4):
         # record the audit and BLOCK at this same review phase for a pasted review.
         # Handled BEFORE _sync_review_items and before any retry/error/decision

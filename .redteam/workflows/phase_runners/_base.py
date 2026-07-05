@@ -61,6 +61,11 @@ class PhaseResult(TypedDict):
     # Mirrors fallback_audit — structured field set by the engine, never parsed
     # from reviewer text, so a reviewer can't spoof a staging entry.
     staging_audit: NotRequired[str]
+    # Ceiling provenance: set ONLY by review_code.run (agent-pair branch) when a
+    # hard ceiling is crossed. Enumerated values: "max_review_rounds" or
+    # "max_wall_clock_sec". Never parsed from reviewer text — set only by the
+    # engine, so a reviewer can't spoof a ceiling record.
+    ceiling_hit: NotRequired[str]
 
 
 class ClaudeRunResult(TypedDict):
