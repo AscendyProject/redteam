@@ -226,7 +226,7 @@ def test_sibling_subdirectory_allowlisted_still_trips_tdd(monkeypatch, tmp_path,
 # =============================================================================
 
 
-@pytest.mark.parametrize("bad_name", ["scratch.py", "input.md", "verification.log"])
+@pytest.mark.parametrize("bad_name", ["scratch.py", "verification.log"])
 def test_non_allowlisted_sibling_top_level_still_trips_agent_pair(monkeypatch, tmp_path, bad_name):
     """agent-pair: non-allowlisted top-level path under sibling task dir → floor fires."""
     impl = _impl()
@@ -250,7 +250,7 @@ def test_non_allowlisted_sibling_top_level_still_trips_agent_pair(monkeypatch, t
     assert invoked["yes"] is False
 
 
-@pytest.mark.parametrize("bad_name", ["scratch.py", "input.md", "verification.log"])
+@pytest.mark.parametrize("bad_name", ["scratch.py", "verification.log"])
 def test_non_allowlisted_sibling_top_level_still_trips_tdd(monkeypatch, tmp_path, bad_name):
     """tdd: non-allowlisted top-level path under sibling task dir → floor fires."""
     impl = _impl()
