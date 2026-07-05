@@ -214,7 +214,7 @@ def _plan_affected_files(task_dir: Path) -> frozenset[str]:
     """
     try:
         text = (task_dir / "outcome.md").read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
         return frozenset()
 
     heading_re = re.compile(r"^(#{1,6})\s+(.*)")

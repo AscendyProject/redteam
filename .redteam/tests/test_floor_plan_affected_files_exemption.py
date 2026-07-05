@@ -194,6 +194,19 @@ def test_parser_empty_affected_files_section(tmp_path):
     assert result == frozenset()
 
 
+def test_parser_unreadable_outcome_md(tmp_path):
+    """Non-UTF-8 (undecodable) outcome.md → empty frozenset (fail-closed)."""
+    impl = _impl()
+    _, task_dir = _make_task_layout(tmp_path)
+
+    # Write raw bytes that are not valid UTF-8
+    (task_dir / "outcome.md").write_bytes(b"\xff\xfe## Affected files\r\n- \xff\xfe\r\n")
+
+    result = impl._plan_affected_files(task_dir)
+
+    assert result == frozenset(), "undecodable outcome.md must yield empty frozenset (fail-closed)"
+
+
 def test_parser_absent_outcome_md_floor_unchanged(tmp_path):
     """Absent outcome.md → offending set byte-identical to baseline (no plan_affected)."""
     impl = _impl()
