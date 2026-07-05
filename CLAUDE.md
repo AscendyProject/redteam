@@ -124,9 +124,21 @@ the first release cut by the raidostar-gated release automation (#128). It also
 adds the goal-mode operator docs to the README (EN+KO), closing the doc gap
 under #94.
 
-**Roadmap:** goal mode v1 engine + e2e + operator docs are shipped; remaining
-open work is reviewer-token-cost gating (#92 P3/P5) and its native-diff coupling
-follow-up (#120). Goal mode v1 is a **single-parent
+Post-0.7.0 (unreleased): `/redteam:goal` was reworked into an **autonomous
+run-to-completion driver** with a goal-aware machine-readable `status --json`
+(#134), and the **first autonomous goal run** then shipped #92's remaining
+proposals as a stacked pair — P3 round-staged reviewer (#135) and P5 hard
+review-loop ceilings (#140; review trail in #139) — closing #92. That run also
+surfaced three engine gaps, filed as #136 (goal-mode decompose seeds vs the
+#117/#91 floors, incl. a #117↔sweep-baseline catch-22), #137 (pre-worker floor
+ignores plan-declared Affected files → self-lock on review backtrack), and
+#138 (planner keeps emitting a non-parseable `## Verification hooks` section).
+
+**Roadmap:** goal mode v1 engine + e2e + operator docs are shipped and #92 is
+closed; remaining open work is the native-diff coupling follow-up (#120), the
+pure-visual-task fit question (#132), plan-aware review (#133), and the
+autonomous-run hardening trio #136/#137/#138 (floor exemptions are
+security boundaries — plan_review first). Goal mode v1 is a **single-parent
 forest** — multi-parent (a task depending on ≥2 others) fails closed and is future
 work; if revived it restarts from a fresh `plan_review`. The reviewer-transport work
 (#37, umbrella) is fully resolved — step 4 (fallback ladder) shipped in 0.3.0; steps

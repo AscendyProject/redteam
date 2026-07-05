@@ -8,6 +8,24 @@ releases may include behavior changes; breaking changes are called out).
 ## [Unreleased]
 
 ### Added
+- **#92 P3 — opt-in round-staged reviewer model (#135).** The `review_code`
+  round loop can run its first-pass scan on a cheaper reviewer model and
+  promote to the configured frontier reviewer as findings persist across
+  rounds. Approval authority never downgrades: a cheap first-pass may reject
+  early (CHANGES_REQUESTED) but can never APPROVE — `PhaseResult(approved)`
+  only ever comes from the frontier reviewer, and a first-pass APPROVED
+  triggers same-round frontier promotion. Off unless configured; the unstaged
+  path is byte-identical to before. Shipped by the **first autonomous
+  `/redteam:goal` run** (batch `reviewer-cost-p3p5`).
+- **#92 P5 — opt-in hard ceilings on the review loop (#140, review trail in
+  #139).** `[models.review_ceilings]` adds `max_review_rounds` and
+  `max_wall_clock_sec` on top of the retry/rescue ladder; crossings return a
+  structured ceiling-terminal result (`ceiling_hit`) that defers — never
+  approves, never rescues. The wall-clock ceiling is the outermost exit,
+  including on the MANUAL_REQUIRED fallback path (round-4 review fix). With no
+  ceilings configured there are no counters, clock reads, or state growth.
+  Prompt caching was evaluated and documented as a no-op at the current CLI
+  adapter seams (`docs/decisions/2026-07-05-reviewer-prompt-caching.md`).
 - **`orchestrator status <batch> --json` — machine-readable, goal-aware status.**
   Emits per-task `next_phase` / completed phases / gate sentinels / deferral
   records (safe fields only — never `last_failure_log` or a deferral's
