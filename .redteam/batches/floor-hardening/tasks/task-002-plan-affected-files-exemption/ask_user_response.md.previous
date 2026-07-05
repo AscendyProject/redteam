@@ -1,0 +1,28 @@
+# Operator decision on the escalated plan_review (delegation clause)
+
+The reviewer's PR-001 is accepted in full — it is not a scope question but a
+required fail-closed strengthening, exactly aligned with the goal's hard
+constraints (a worker must not be able to widen its own floor exemption).
+
+Directives for the revised plan:
+
+- **Snapshot, don't trust the live file.** Parse the Affected-files set from
+  `outcome.md` ONCE, at the first pre-worker floor evaluation after plan
+  approval, and persist it in `state.json` (set-once, same pattern as
+  `implement_tracked_baseline`). Every later `_floor_outside_scope` call in
+  any round or process consumes ONLY the stored snapshot — never a re-read of
+  the live `outcome.md`.
+- The snapshot is set-once: if the key is already present, it is never
+  recomputed or widened. A missing/empty snapshot means NO plan-based
+  exemption (fail-closed default = today's behavior).
+- Add the reviewer's requested regression: after the snapshot is taken, widen
+  the live `outcome.md` with a new outside-scope path → the floor must still
+  refuse that path on the next round (both same-process and fresh-process
+  re-entry).
+- Keep `_cross_run_trust_root_floor` out of the plan-exemption path, as the
+  current plan already does.
+
+No exemption beyond the goal's enumerated set is introduced; the change makes
+the #137 exemption consumable only in its review-approved form.
+
+USER_DECISION: REVISE_PLAN
