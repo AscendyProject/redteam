@@ -1,0 +1,105 @@
+{
+  "task_id": "task-001-decompose-artifacts-and-sibling-consistency",
+  "mode": "agent-pair",
+  "phase": "create_pr",
+  "phases_completed": [
+    "plan_outcome",
+    "plan_review",
+    "implement",
+    "review_code"
+  ],
+  "next_phase": "create_pr",
+  "decision": "pending",
+  "owner": "claude",
+  "reviewer": "codex",
+  "next_action": {
+    "who": "codex",
+    "what": "Use .redteam/prompts/codex/rescue.md to produce /Users/kh/Documents/redteam/.redteam/batches/floor-hardening/tasks/task-001-decompose-artifacts-and-sibling-consistency/rescue_report.md, then touch /Users/kh/Documents/redteam/.redteam/batches/floor-hardening/tasks/task-001-decompose-artifacts-and-sibling-consistency/rescue.done.",
+    "reads": [
+      "input.md",
+      "outcome.md",
+      "state.json"
+    ],
+    "writes": [
+      "rescue_report.md",
+      "rescue.done"
+    ]
+  },
+  "review_items": [
+    {
+      "id": "IR-001",
+      "phase": "review_code",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "IR-001 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "IR-002",
+      "phase": "review_code",
+      "severity": "blocker",
+      "status": "resolved",
+      "summary": "IR-002 severity:blocker status:resolved",
+      "carry_over_count": 0
+    },
+    {
+      "id": "IR-003",
+      "phase": "review_code",
+      "severity": "major",
+      "status": "resolved",
+      "summary": "IR-003 severity:major status:resolved",
+      "carry_over_count": 0
+    }
+  ],
+  "verification": {
+    "commands": [
+      "bash .redteam/scripts/verify.sh"
+    ],
+    "last_exit_code": 0,
+    "last_output_path": "verification.log",
+    "last_run_at": "2026-07-05T07:28:52.857315+00:00",
+    "last_diff_sha256": "e08aaf825c5e16b04d18ec1cf67433fc6a275a9acbd2b33aef862210c0bd5161",
+    "verify_command": "bash .redteam/scripts/verify.sh",
+    "verify_allowlist": [
+      "pytest",
+      "ruff",
+      "mypy"
+    ]
+  },
+  "models": {
+    "planner": "claude-opus-4-7",
+    "implementer": "claude-sonnet-4-6",
+    "reviewer": "codex",
+    "rescue": "codex"
+  },
+  "escape": {
+    "ask_user": false,
+    "reason": null,
+    "return_phase": null
+  },
+  "implement_round_count": 4,
+  "tdd_test_files": [],
+  "retries": {
+    "implement": 0
+  },
+  "max_retries_per_phase": 2,
+  "last_failure_reason": null,
+  "last_failure_log": null,
+  "last_failure_diff": null,
+  "deferred_requirements": [],
+  "branch": "redteam/task-001-decompose-artifacts-and-sibling-consistency",
+  "pr_url": null,
+  "created_at": "2026-07-05T06:23:09.821442+00:00",
+  "updated_at": "2026-07-05T07:30:12.990223+00:00",
+  "base_branch": "main",
+  "phase_started_at": "2026-07-05T07:30:12.990210+00:00",
+  "last_user_response": null,
+  "implement_tracked_baseline": [],
+  "implement_untracked_baseline": [
+    ".redteam/batches/floor-hardening/tasks/task-001-decompose-artifacts-and-sibling-consistency/outcome.md",
+    ".redteam/batches/floor-hardening/tasks/task-001-decompose-artifacts-and-sibling-consistency/plan_review.md",
+    ".redteam/batches/floor-hardening/tasks/task-001-decompose-artifacts-and-sibling-consistency/state.json"
+  ],
+  "last_reviewed_rev": "b5ff44b68ff891056b9464a38efd79da45993a81",
+  "rescue_entry_count": 0
+}

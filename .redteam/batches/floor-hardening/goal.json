@@ -1,0 +1,14 @@
+{
+  "goal": "Make the pre-worker fail-closed floors goal-mode-aware (#136) and plan-aware (#137) without weakening what they guard, by adding enumerated exemptions for batch-root decompose artifacts, sibling input.md briefs, the #117 Check-2 sibling allowlist inconsistency, and plan-declared Affected files.",
+  "ceilings": {
+    "max_tasks": 2
+  },
+  "tasks": {
+    "task-001-decompose-artifacts-and-sibling-consistency": {
+      "depends_on": []
+    },
+    "task-002-plan-affected-files-exemption": {
+      "depends_on": ["task-001-decompose-artifacts-and-sibling-consistency"]
+    }
+  }
+}

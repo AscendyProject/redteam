@@ -1,0 +1,467 @@
+diff --git a/.redteam/tests/test_floor_decompose_and_sibling_exemptions.py b/.redteam/tests/test_floor_decompose_and_sibling_exemptions.py
+new file mode 100644
+index 0000000..ff90d7b
+--- /dev/null
++++ b/.redteam/tests/test_floor_decompose_and_sibling_exemptions.py
+@@ -0,0 +1,250 @@
++"""Regression tests for #136 — batch-root decompose artifact exemptions and
++#117/#124 consistency via the shared _is_harness_artifact predicate.
++
++Covers _floor_outside_scope (tracked-path floor) and _cross_run_trust_root_floor
++(Check-1 live-surface + Check-2 stored-baseline contents):
++- Batch-root decompose artifact exemption (one per basename)
++- Non-allowlisted batch-root basename still trips
++- Allowlisted basename in batch-root subdirectory still trips
++- Sibling top-level input.md exempt; buried input.md not; cross-batch not
++- Check-1: batch-root + sibling input.md exempt in live untracked surface
++- Check-2: allowlisted stored-baseline contents pass (the #136 catch-22 fix)
++- Adversarial: outside-scope non-allowlisted stored baseline still caught
++- Default-path preservation: non-goal-mode task layout unchanged
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++
++def _impl():
++    import _engine
++
++    return _engine.implement()
++
++
++_PROJ = SimpleNamespace(
++    source_dirs=["app/"],
++    test_dir="tests/",
++    context_file="docs/ctx.md",
++    base_branch="main",
++)
++
++_BATCH_ROOT_BASENAMES = ["goal.md", "goal.json", "decompose_review.md", "decompose_blocked.md"]
++
++
++def _make_task_layout(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
++    """Return (cwd, batch_root, task_dir, sibling_dir).
++
++    Layout:
++      cwd/
++        app/
++        tests/
++        .redteam/batches/b/        <- batch_root
++          tasks/
++            task-001/              <- sibling_dir
++            task-002/              <- task_dir (current task)
++    """
++    cwd = tmp_path / "repo"
++    cwd.mkdir()
++    (cwd / "app").mkdir()
++    (cwd / "tests").mkdir()
++    batch_root = cwd / ".redteam" / "batches" / "b"
++    batch_root.mkdir(parents=True)
++    tasks_dir = batch_root / "tasks"
++    tasks_dir.mkdir()
++    sibling_dir = tasks_dir / "task-001"
++    sibling_dir.mkdir()
++    task_dir = tasks_dir / "task-002"
++    task_dir.mkdir()
++    return cwd, batch_root, task_dir, sibling_dir
++
++
++# =============================================================================
++# 1. _floor_outside_scope: batch-root decompose artifact exempt (one per basename)
++# =============================================================================
++
++
++@pytest.mark.parametrize("basename", _BATCH_ROOT_BASENAMES)
++def test_floor_batch_root_decompose_artifact_exempt(tmp_path, basename):
++    """Tracked batch-root decompose artifact does NOT trip _floor_outside_scope."""
++    impl = _impl()
++    cwd, batch_root, task_dir, _sib = _make_task_layout(tmp_path)
++
++    artifact_posix = (batch_root / basename).relative_to(cwd).as_posix()
++    result = impl._floor_outside_scope({artifact_posix}, _PROJ, task_dir, cwd)
++
++    assert result == set(), f"{basename} at batch root should be exempt, got {result}"
++
++
++# =============================================================================
++# 2. _floor_outside_scope: non-allowlisted batch-root basename still trips
++# =============================================================================
++
++
++@pytest.mark.parametrize("bad_basename", ["notes.md", "secrets.env", "README.md"])
++def test_floor_batch_root_non_allowlisted_still_trips(tmp_path, bad_basename):
++    """Non-allowlisted basename at batch root still trips _floor_outside_scope."""
++    impl = _impl()
++    cwd, batch_root, task_dir, _sib = _make_task_layout(tmp_path)
++
++    artifact_posix = (batch_root / bad_basename).relative_to(cwd).as_posix()
++    result = impl._floor_outside_scope({artifact_posix}, _PROJ, task_dir, cwd)
++
++    assert artifact_posix in result, f"{bad_basename} at batch root should still trip floor"
++
++
++# =============================================================================
++# 3. _floor_outside_scope: allowlisted basename in batch-root subdirectory still trips
++# =============================================================================
++
++
++@pytest.mark.parametrize("basename", _BATCH_ROOT_BASENAMES)
++def test_floor_batch_root_allowlisted_in_subdir_still_trips(tmp_path, basename):
++    """Allowlisted basename buried in a batch-root subdirectory still trips floor."""
++    impl = _impl()
++    cwd, batch_root, task_dir, _sib = _make_task_layout(tmp_path)
++
++    subdir = batch_root / "subdir"
++    subdir.mkdir()
++    artifact_posix = (subdir / basename).relative_to(cwd).as_posix()
++    result = impl._floor_outside_scope({artifact_posix}, _PROJ, task_dir, cwd)
++
++    assert artifact_posix in result, f"{basename} in batch-root subdir should still trip floor"
++
++
++# =============================================================================
++# 4. _floor_outside_scope: sibling top-level input.md exempt; buried / cross-batch not
++# =============================================================================
++
++
++def test_floor_sibling_input_md_exempt(tmp_path):
++    """Sibling task top-level input.md does NOT trip _floor_outside_scope."""
++    impl = _impl()
++    cwd, _br, task_dir, sibling_dir = _make_task_layout(tmp_path)
++
++    artifact_posix = (sibling_dir / "input.md").relative_to(cwd).as_posix()
++    result = impl._floor_outside_scope({artifact_posix}, _PROJ, task_dir, cwd)
++
++    assert result == set(), f"sibling top-level input.md should be exempt, got {result}"
++
++
++def test_floor_sibling_buried_input_md_still_trips(tmp_path):
++    """input.md buried in a sibling subdir still trips _floor_outside_scope."""
++    impl = _impl()
++    cwd, _br, task_dir, sibling_dir = _make_task_layout(tmp_path)
++
++    subdir = sibling_dir / "subdir"
++    subdir.mkdir()
++    artifact_posix = (subdir / "input.md").relative_to(cwd).as_posix()
++    result = impl._floor_outside_scope({artifact_posix}, _PROJ, task_dir, cwd)
++
++    assert artifact_posix in result, "buried sibling input.md should still trip floor"
++
++
++def test_floor_cross_batch_input_md_still_trips(tmp_path):
++    """input.md under a different batch's tasks/ root still trips _floor_outside_scope."""
++    impl = _impl()
++    cwd, _br, task_dir, _sib = _make_task_layout(tmp_path)
++
++    other_task = cwd / ".redteam" / "batches" / "other-batch" / "tasks" / "task-001"
++    other_task.mkdir(parents=True)
++    artifact_posix = (other_task / "input.md").relative_to(cwd).as_posix()
++    result = impl._floor_outside_scope({artifact_posix}, _PROJ, task_dir, cwd)
++
++    assert artifact_posix in result, "cross-batch input.md should still trip floor"
++
++
++# =============================================================================
++# 5. _cross_run_trust_root_floor Check-1: batch-root + sibling input.md exempt
++# =============================================================================
++
++
++def test_cross_run_check1_batch_root_and_sibling_input_md_exempt(tmp_path):
++    """Check-1: current_untracked with only batch-root allowlisted basenames and
++    a sibling top-level input.md returns no offending paths."""
++    impl = _impl()
++    cwd, batch_root, task_dir, sibling_dir = _make_task_layout(tmp_path)
++
++    goal_posix = (batch_root / "goal.md").relative_to(cwd).as_posix()
++    sibling_input_posix = (sibling_dir / "input.md").relative_to(cwd).as_posix()
++
++    state: dict = {}
++    result = impl._cross_run_trust_root_floor(state, task_dir, cwd, _PROJ, {goal_posix, sibling_input_posix})
++
++    assert result == set(), f"batch-root + sibling input.md should be exempt in Check-1, got {result}"
++
++
++# =============================================================================
++# 6. _cross_run_trust_root_floor Check-2: allowlisted stored-baseline contents exempt
++# =============================================================================
++
++
++def test_cross_run_check2_allowlisted_stored_baselines_exempt(tmp_path):
++    """Check-2: stored baselines with only batch-root allowlisted, sibling top-level
++    allowlisted, and in-scope paths → no offending paths (the #136 catch-22 fix)."""
++    impl = _impl()
++    cwd, batch_root, task_dir, sibling_dir = _make_task_layout(tmp_path)
++
++    goal_json_posix = (batch_root / "goal.json").relative_to(cwd).as_posix()
++    decompose_posix = (batch_root / "decompose_review.md").relative_to(cwd).as_posix()
++    sibling_input_posix = (sibling_dir / "input.md").relative_to(cwd).as_posix()
++    sibling_state_posix = (sibling_dir / "state.json").relative_to(cwd).as_posix()
++    in_scope_posix = "app/module.py"
++
++    state = {
++        "implement_untracked_baseline": [goal_json_posix, sibling_input_posix, sibling_state_posix, in_scope_posix],
++        "implement_tracked_baseline": [decompose_posix],
++    }
++    result = impl._cross_run_trust_root_floor(state, task_dir, cwd, _PROJ, set())
++
++    assert result == set(), f"allowlisted stored baseline contents should be exempt, got {result}"
++
++
++# =============================================================================
++# 7. _cross_run_trust_root_floor: adversarial baseline still caught (security boundary)
++# =============================================================================
++
++
++def test_cross_run_adversarial_baseline_still_caught(tmp_path):
++    """Security-boundary regression: outside-scope non-allowlisted path in stored
++    baseline is still caught (adversarial baseline rewrite guard)."""
++    impl = _impl()
++    cwd, _br, task_dir, _sib = _make_task_layout(tmp_path)
++
++    state = {"implement_untracked_baseline": ["scratch/leaked.txt"]}
++    result = impl._cross_run_trust_root_floor(state, task_dir, cwd, _PROJ, set())
++
++    assert "scratch/leaked.txt" in result, "adversarial baseline entry must still be caught"
++
++
++# =============================================================================
++# 8. Default-path preservation: non-goal-mode task (no siblings, no batch-root artifacts)
++# =============================================================================
++
++
++def test_floor_default_path_non_goal_mode_unchanged(tmp_path):
++    """For a task with no sibling task dirs and no batch-root decompose artifacts,
++    both floors behave identically to before — outside-scope paths still trip."""
++    impl = _impl()
++    cwd = tmp_path / "repo"
++    cwd.mkdir()
++    (cwd / "app").mkdir()
++    (cwd / "tests").mkdir()
++    task_dir = cwd / ".redteam" / "batches" / "simple" / "tasks" / "task-001"
++    task_dir.mkdir(parents=True)
++
++    outside_path = "README.md"
++
++    # _floor_outside_scope: outside-scope tracked path still trips.
++    result_floor = impl._floor_outside_scope({outside_path}, _PROJ, task_dir, cwd)
++    assert outside_path in result_floor, "_floor_outside_scope: outside-scope path should still trip"
++
++    # _cross_run_trust_root_floor: outside-scope in live surface + stored baseline still trips.
++    state = {"implement_untracked_baseline": [outside_path]}
++    result_cross = impl._cross_run_trust_root_floor(state, task_dir, cwd, _PROJ, {outside_path})
++    assert outside_path in result_cross, "_cross_run_trust_root_floor: outside-scope path should still trip"
+diff --git a/.redteam/tests/test_sibling_task_floor_exemption.py b/.redteam/tests/test_sibling_task_floor_exemption.py
+index f0db42e..2b7d2f5 100644
+--- a/.redteam/tests/test_sibling_task_floor_exemption.py
++++ b/.redteam/tests/test_sibling_task_floor_exemption.py
+@@ -226,7 +226,7 @@ def test_sibling_subdirectory_allowlisted_still_trips_tdd(monkeypatch, tmp_path,
+ # =============================================================================
+ 
+ 
+-@pytest.mark.parametrize("bad_name", ["scratch.py", "input.md", "verification.log"])
++@pytest.mark.parametrize("bad_name", ["scratch.py", "verification.log"])
+ def test_non_allowlisted_sibling_top_level_still_trips_agent_pair(monkeypatch, tmp_path, bad_name):
+     """agent-pair: non-allowlisted top-level path under sibling task dir → floor fires."""
+     impl = _impl()
+@@ -250,7 +250,7 @@ def test_non_allowlisted_sibling_top_level_still_trips_agent_pair(monkeypatch, t
+     assert invoked["yes"] is False
+ 
+ 
+-@pytest.mark.parametrize("bad_name", ["scratch.py", "input.md", "verification.log"])
++@pytest.mark.parametrize("bad_name", ["scratch.py", "verification.log"])
+ def test_non_allowlisted_sibling_top_level_still_trips_tdd(monkeypatch, tmp_path, bad_name):
+     """tdd: non-allowlisted top-level path under sibling task dir → floor fires."""
+     impl = _impl()
+diff --git a/.redteam/workflows/phase_runners/implement.py b/.redteam/workflows/phase_runners/implement.py
+index ee0f013..1fd5bde 100644
+--- a/.redteam/workflows/phase_runners/implement.py
++++ b/.redteam/workflows/phase_runners/implement.py
+@@ -39,6 +39,79 @@ AGENT_NAME = "implementer"
+ # ---------------------------------------------------------------------------
+ _trusted_task_dirs: set[Path] = set()
+ 
++# ---------------------------------------------------------------------------
++# Shared allowlist predicate for pre-worker floors (#136).
++# ---------------------------------------------------------------------------
++_BATCH_ROOT_ARTIFACT_ALLOWLIST = frozenset({"goal.md", "goal.json", "decompose_review.md", "decompose_blocked.md"})
++_SIBLING_BASENAME_ALLOWLIST = frozenset({"state.json", "outcome.md", "pr.md", "input.md"})
++
++
++def _is_harness_artifact(p: str, task_dir: Path, cwd: Path, scope_roots: list[str]) -> bool:
++    """Shared allowlist predicate used by both pre-worker floors (#136).
++
++    Returns True iff `p` is an exempt harness artifact — one of:
++    1. Under the current task dir (decision-trail files: state.json, outcome.md, etc.).
++    2. Under source_dirs / test_dir (scope roots).
++    3. A file directly at the batch root (task_dir.parent.parent) whose basename is
++       exactly one of the four goal-mode decompose artifacts (goal.md, goal.json,
++       decompose_review.md, decompose_blocked.md). Files in a batch-root subdirectory
++       or with a different basename are NOT exempt.
++    4. A top-level harness decision-trail file (state.json, outcome.md, pr.md, input.md,
++       or *_review.md) directly under a SIBLING task dir in the same batch's tasks/ root
++       (task_dir.parent). Files buried in a sibling subdirectory, non-allowlisted basenames,
++       and paths under a different batch's tasks/ root are NOT exempt.
++
++    Used by `_floor_outside_scope` and `_cross_run_trust_root_floor` so their "allowed"
++    definitions cannot drift apart.
++    """
++    # 1. Task-dir exemption.
++    try:
++        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
++    except ValueError:
++        task_rel = None
++    if task_rel is not None and (p == task_rel or p.startswith(task_rel + "/")):
++        return True
++
++    # 2. Scope roots exemption.
++    if any(p.replace("\\", "/").startswith(root) for root in scope_roots):
++        return True
++
++    # 3. Batch-root decompose artifact exemption (#136).
++    # batch root = task_dir.parent.parent (the batch directory containing goal.md etc.)
++    try:
++        batch_root_rel = task_dir.parent.parent.resolve().relative_to(cwd.resolve()).as_posix()
++    except ValueError:
++        batch_root_rel = None
++    if batch_root_rel is not None:
++        batch_prefix = batch_root_rel + "/"
++        if p.startswith(batch_prefix):
++            remainder = p[len(batch_prefix) :]
++            if "/" not in remainder and remainder in _BATCH_ROOT_ARTIFACT_ALLOWLIST:
++                return True
++
++    # 4. Sibling top-level artifact exemption (#124 extended by #136).
++    # tasks root = task_dir.parent (the tasks/ directory containing sibling task dirs)
++    try:
++        tasks_rel = task_dir.parent.resolve().relative_to(cwd.resolve()).as_posix()
++    except ValueError:
++        tasks_rel = None
++    if tasks_rel is not None:
++        tasks_prefix = tasks_rel + "/"
++        if p.startswith(tasks_prefix):
++            remainder = p[len(tasks_prefix) :]  # "<sibling-id>/<artifact>" or deeper
++            slash_idx = remainder.find("/")
++            if slash_idx >= 0:
++                sibling_id = remainder[:slash_idx]
++                if sibling_id != task_dir.name:  # not the current task's own dir
++                    artifact_name = remainder[slash_idx + 1 :]
++                    if "/" not in artifact_name:  # top-level only, not buried in a subdir
++                        if artifact_name in _SIBLING_BASENAME_ALLOWLIST or fnmatch.fnmatchcase(
++                            artifact_name, "*_review.md"
++                        ):
++                            return True
++
++    return False
++
+ 
+ def _run_verify_sh(cwd: Path, argv: list[str]) -> tuple[int, str]:
+     # `argv` is the pre-validated verify command, snapshotted BEFORE the
+@@ -136,59 +209,24 @@ def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, c
+     Layer-2 untracked gate (`_uncommitted_outside_scope_files`) exclude them: a consumer
+     who commits their batch dir onto the task branch must not be falsely refused over the
+     harness's own artifacts. Genuine operator tracked WIP outside scope still trips the
+-    floor. Mirrors the `_in_task_dir` POSIX-prefix logic used by those two functions.
++    floor. Mirrors the `_is_harness_artifact` POSIX-prefix logic used by those two functions.
+ 
+     Sibling-task artifact exemption (#124): in a stacked goal-mode run, sibling task dirs
+     under the SAME batch's tasks root (i.e. task_dir.parent, POSIX-prefix) also expose
+-    harness decision-trail artifacts (state.json, outcome.md, pr.md, *_review.md). Only
+-    TOP-LEVEL paths directly under a sibling task dir (the relative-to-sibling path must
+-    contain no '/') are exempt; a path in a sibling subdirectory, a non-allowlisted
+-    sibling basename, or a path under a DIFFERENT batch's tasks dir still trips the floor."""
+-    try:
+-        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
+-    except ValueError:
+-        task_rel = None
+-
+-    def _in_task_dir(p: str) -> bool:
+-        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
+-
+-    # Sibling-task artifact exemption (#124): same-batch tasks/ root prefix.
+-    try:
+-        tasks_rel = task_dir.parent.resolve().relative_to(cwd.resolve()).as_posix()
+-    except ValueError:
+-        tasks_rel = None
+-
+-    _SIBLING_BASENAME_ALLOWLIST = frozenset({"state.json", "outcome.md", "pr.md"})
+-
+-    def _is_sibling_artifact(p: str) -> bool:
+-        """True iff p is a harness decision-trail artifact at the TOP LEVEL of a sibling
+-        task dir under the SAME batch (task_dir.parent). Paths in sibling subdirectories,
+-        non-allowlisted basenames, and cross-batch paths return False."""
+-        if tasks_rel is None:
+-            return False
+-        tasks_prefix = tasks_rel + "/"
+-        if not p.startswith(tasks_prefix):
+-            return False
+-        remainder = p[len(tasks_prefix) :]  # "<sibling-id>/<artifact>" or deeper
+-        slash_idx = remainder.find("/")
+-        if slash_idx < 0:
+-            return False  # directly under tasks/ root — no task-id segment
+-        sibling_id = remainder[:slash_idx]
+-        if sibling_id == task_dir.name:
+-            return False  # same task, not a sibling
+-        artifact_name = remainder[slash_idx + 1 :]
+-        if "/" in artifact_name:
+-            return False  # buried in a sibling subdirectory — NOT exempt
+-        return artifact_name in _SIBLING_BASENAME_ALLOWLIST or fnmatch.fnmatchcase(artifact_name, "*_review.md")
+-
++    harness decision-trail artifacts (state.json, outcome.md, pr.md, input.md, *_review.md).
++    Only TOP-LEVEL paths directly under a sibling task dir (the relative-to-sibling path
++    must contain no '/') are exempt; a path in a sibling subdirectory, a non-allowlisted
++    sibling basename, or a path under a DIFFERENT batch's tasks dir still trips the floor.
++
++    Batch-root decompose artifact exemption (#136): goal-mode decompose artifacts
++    (goal.md, goal.json, decompose_review.md, decompose_blocked.md) may be tracked at the
++    batch root (task_dir.parent.parent). These are exempt when placed directly at the batch
++    root; the same basenames in a batch-root subdirectory still trip the floor.
++
++    Uses the shared _is_harness_artifact predicate so this floor and
++    _cross_run_trust_root_floor cannot drift apart in their "allowed" definitions."""
+     scope_roots = [_scope_root(r) for r in (*proj.source_dirs, proj.test_dir)]
+-    return {
+-        p
+-        for p in current_tracked
+-        if not _in_task_dir(p)
+-        and not _is_sibling_artifact(p)
+-        and not any(p.replace("\\", "/").startswith(root) for root in scope_roots)
+-    }
++    return {p for p in current_tracked if not _is_harness_artifact(p, task_dir, cwd, scope_roots)}
+ 
+ 
+ def _cross_run_trust_root_floor(
+@@ -218,22 +256,18 @@ def _cross_run_trust_root_floor(
+        outside-scope surface is clean BEFORE the set-once snapshot is taken), so
+        any outside-scope entry is by construction worker-injected.
+ 
+-    Uses the same `_scope_root` + `_in_task_dir` POSIX-prefix logic as
+-    `_floor_outside_scope`, `_commit_worker_diff`, and
+-    `_uncommitted_outside_scope_files` — one definition, no duplication.
+-    """
+-    try:
+-        task_rel = task_dir.resolve().relative_to(cwd.resolve()).as_posix()
+-    except ValueError:
+-        task_rel = None
+-
+-    def _in_task_dir(p: str) -> bool:
+-        return task_rel is not None and (p == task_rel or p.startswith(task_rel + "/"))
++    Both checks use `_is_harness_artifact` — the shared allowlist predicate — so
++    this floor and `_floor_outside_scope` cannot drift apart in their "allowed"
++    definitions (#136). The predicate covers task-dir, scope roots, batch-root
++    decompose artifacts, and sibling top-level artifacts (incl. input.md).
+ 
++    Uses the same `_scope_root` + `_is_harness_artifact` POSIX-prefix logic as
++    `_floor_outside_scope` — one definition, no duplication.
++    """
+     scope_roots = [_scope_root(r) for r in (*proj.source_dirs, proj.test_dir)]
+ 
+     def _is_allowed(p: str) -> bool:
+-        return _in_task_dir(p) or any(p.replace("\\", "/").startswith(root) for root in scope_roots)
++        return _is_harness_artifact(p, task_dir, cwd, scope_roots)
+ 
+     offending: set[str] = set()
+ 
