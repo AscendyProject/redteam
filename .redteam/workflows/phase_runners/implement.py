@@ -514,6 +514,34 @@ def _uncommitted_scope_files(cwd: Path, proj: Any) -> list[str]:
     return sorted(stray)
 
 
+def _uncommitted_plan_affected_paths(cwd: Path, plan_affected: frozenset[str]) -> set[str]:
+    """Plan-affected paths still dirty (uncommitted) after the WIP commit (IR-001).
+
+    ``_commit_worker_diff`` excludes paths that were in ``before_tracked`` from the
+    staged set.  A plan-affected outside-scope path that was already dirty vs base
+    BEFORE the first implement round is stored in ``before_tracked`` and therefore not
+    committed by the WIP commit.  If it still has uncommitted tracked changes (unstaged
+    or staged-but-uncommitted), the reviewed range ``git diff <base>...HEAD`` omits
+    them — a stale range on the integrity boundary this family guards.
+
+    Returns the subset of ``plan_affected`` that appears in either ``git diff``
+    (unstaged) or ``git diff --cached`` (staged but uncommitted).  An empty
+    ``plan_affected`` fast-paths to an empty set without any git call.
+
+    Fail-closed: raises ``RuntimeError`` via ``run_git_checked`` on git error.
+    """
+    if not plan_affected:
+        return set()
+    uncommitted: set[str] = set()
+    for args in (
+        ["-c", "core.quotepath=false", "diff", "-z", "--name-only"],
+        ["-c", "core.quotepath=false", "diff", "-z", "--name-only", "--cached"],
+    ):
+        out = run_git_checked(args, cwd).stdout
+        uncommitted.update(p for p in out.split("\0") if p and p in plan_affected)
+    return uncommitted
+
+
 def _uncommitted_outside_scope_files(cwd: Path, task_dir: Path, proj: Any, baseline: set[str]) -> list[str]:
     """NEW untracked files OUTSIDE source_dirs/test_dir that are not in the baseline
     and not under the task dir — Layer 2 of the two-layer integrity gate (#112).
@@ -682,23 +710,28 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     verification["last_diff_sha256"] = diff_sha
 
     if rc == 0:
-        # Two-layer integrity gate (#50 + #112): verification passed on the WORKTREE,
-        # but review_code inspects the COMMITTED range. Any uncommitted change makes
-        # that range stale — fail closed. Layer 1 (baseline-INDEPENDENT): source/test
-        # files still uncommitted after the WIP commit. Layer 2 (baseline-RELATIVE):
-        # new files outside source/test that are not in the persisted baseline (the
-        # worker created them but left them uncommitted). status="error" routes through
-        # the generic retry; a repeat defers/escalates normally (#50 review PR-001).
+        # Three-layer integrity gate (#50 + #112 + IR-001): verification passed on
+        # the WORKTREE, but review_code inspects the COMMITTED range. Any uncommitted
+        # change makes that range stale — fail closed.
+        # Layer 1 (baseline-INDEPENDENT): source/test files still uncommitted after
+        # the WIP commit. Layer 2 (baseline-RELATIVE): new files outside source/test
+        # that are not in the persisted baseline (the worker created them but left
+        # them uncommitted). Layer 3 (IR-001): plan-affected outside-scope tracked
+        # paths that were dirty before the worker and excluded from before_tracked →
+        # not committed by _commit_worker_diff → still dirty after the commit.
+        # status="error" routes through the generic retry; a repeat defers/escalates
+        # normally (#50 review PR-001).
         try:
             layer1 = _uncommitted_scope_files(rr, proj)
             layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
+            layer3 = _uncommitted_plan_affected_paths(rr, plan_affected)
         except (OSError, RuntimeError) as exc:
             # A git probe failed → can't confirm the committed range is fresh. Fail
             # closed (don't approve a possibly-stale range); the generic retry path
             # re-runs, a repeat defers (#50 review PR-001).
             feedback = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
             return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
-        stray = sorted(set(layer1) | set(layer2))
+        stray = sorted(set(layer1) | set(layer2) | set(layer3))
         if stray:
             feedback = (
                 "implement left changes uncommitted after the [WIP] commit, so the reviewed range "
@@ -838,18 +871,22 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
 
     if rc == 0:
-        # Two-layer integrity gate (#50 + #112): verify passed on the WORKTREE, but
-        # review_code inspects the COMMITTED range. Layer 1 (baseline-INDEPENDENT):
-        # source/test files still uncommitted. Layer 2 (baseline-RELATIVE): new files
-        # outside source/test not in the persisted baseline. Also the safety net for a
-        # legacy in-flight tdd task whose test was never committed (trips Layer 1).
+        # Three-layer integrity gate (#50 + #112 + IR-001): verify passed on the
+        # WORKTREE, but review_code inspects the COMMITTED range. Layer 1
+        # (baseline-INDEPENDENT): source/test files still uncommitted. Layer 2
+        # (baseline-RELATIVE): new files outside source/test not in the persisted
+        # baseline. Layer 3 (IR-001): plan-affected outside-scope tracked paths dirty
+        # before the worker, excluded from before_tracked, still dirty after commit.
+        # Also the safety net for a legacy in-flight tdd task whose test was never
+        # committed (trips Layer 1).
         try:
             layer1 = _uncommitted_scope_files(rr, proj)
             layer2 = _uncommitted_outside_scope_files(rr, task_dir, proj, before_untracked)
+            layer3 = _uncommitted_plan_affected_paths(rr, plan_affected)
         except (OSError, RuntimeError) as exc:
             fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
             return PhaseResult(status="error", feedback=fb, log=fb, diff=diff)
-        stray = sorted(set(layer1) | set(layer2))
+        stray = sorted(set(layer1) | set(layer2) | set(layer3))
         if stray:
             feedback = (
                 "implement left changes uncommitted after the [WIP] commit, so the reviewed range "

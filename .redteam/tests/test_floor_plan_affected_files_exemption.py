@@ -526,3 +526,179 @@ def test_default_path_empty_current_tracked(tmp_path):
     result = impl._floor_outside_scope(set(), _PROJ, task_dir, cwd, plan_affected=plan_affected)
 
     assert result == set()
+
+
+# =============================================================================
+# 12. _uncommitted_plan_affected_paths — unit tests (IR-001)
+# =============================================================================
+
+
+def test_uncommitted_plan_affected_empty_fast_path(tmp_path):
+    """Empty plan_affected fast-path returns empty set without any git call."""
+    impl = _impl()
+    cwd = tmp_path
+
+    result = impl._uncommitted_plan_affected_paths(cwd, frozenset())
+
+    assert result == set()
+
+
+def test_uncommitted_plan_affected_detects_unstaged_path(monkeypatch, tmp_path):
+    """A plan-affected path that appears in `git diff` (unstaged) is returned."""
+    impl = _impl()
+    cwd = tmp_path
+    doc_path = "docs/reviewer/round-staging.md"
+    plan_affected = frozenset({doc_path})
+
+    def fake_git(args, cwd_arg):
+        # unstaged probe
+        if "--cached" not in args:
+            return SimpleNamespace(returncode=0, stdout=doc_path + "\0", stderr="")
+        # staged probe
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(impl, "run_git_checked", fake_git)
+    result = impl._uncommitted_plan_affected_paths(cwd, plan_affected)
+
+    assert result == {doc_path}
+
+
+def test_uncommitted_plan_affected_detects_staged_path(monkeypatch, tmp_path):
+    """A plan-affected path that appears in `git diff --cached` (staged) is returned."""
+    impl = _impl()
+    cwd = tmp_path
+    doc_path = "docs/reviewer/round-staging.md"
+    plan_affected = frozenset({doc_path})
+
+    def fake_git(args, cwd_arg):
+        # staged probe
+        if "--cached" in args:
+            return SimpleNamespace(returncode=0, stdout=doc_path + "\0", stderr="")
+        # unstaged probe
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(impl, "run_git_checked", fake_git)
+    result = impl._uncommitted_plan_affected_paths(cwd, plan_affected)
+
+    assert result == {doc_path}
+
+
+def test_uncommitted_plan_affected_clean_path_not_returned(monkeypatch, tmp_path):
+    """A plan-affected path NOT in git diff is NOT returned (clean path)."""
+    impl = _impl()
+    cwd = tmp_path
+    doc_path = "docs/reviewer/round-staging.md"
+    plan_affected = frozenset({doc_path})
+
+    def fake_git(args, cwd_arg):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(impl, "run_git_checked", fake_git)
+    result = impl._uncommitted_plan_affected_paths(cwd, plan_affected)
+
+    assert result == set()
+
+
+def test_uncommitted_plan_affected_other_dirty_path_not_returned(monkeypatch, tmp_path):
+    """A dirty path NOT in plan_affected is NOT returned (only plan_affected paths matter)."""
+    impl = _impl()
+    cwd = tmp_path
+    doc_path = "docs/reviewer/round-staging.md"
+    other_path = "docs/some-other.md"
+    plan_affected = frozenset({doc_path})
+
+    def fake_git(args, cwd_arg):
+        # other_path is dirty, doc_path is clean
+        return SimpleNamespace(returncode=0, stdout=other_path + "\0", stderr="")
+
+    monkeypatch.setattr(impl, "run_git_checked", fake_git)
+    result = impl._uncommitted_plan_affected_paths(cwd, plan_affected)
+
+    assert result == set(), "only plan_affected paths should be checked"
+
+
+# =============================================================================
+# 13. IR-001 regression — integrity gate refuses uncommitted plan-affected path
+# =============================================================================
+
+
+def _wire_agent_pair(impl, monkeypatch, cwd):
+    """Minimal stubs for _run_agent_pair: repo_root, project_config, worker adapter,
+    verification commands."""
+    monkeypatch.setattr(impl, "repo_root", lambda: cwd)
+    monkeypatch.setattr(impl, "project_config", lambda: _PROJ)
+    monkeypatch.setattr(
+        impl,
+        "get_worker_adapter",
+        lambda state: SimpleNamespace(invoke=lambda **kw: {"returncode": 0, "stdout": "done", "stderr": ""}),
+    )
+    monkeypatch.setattr(
+        impl,
+        "_run_verification_commands",
+        lambda cwd, commands, project_verify_command=None, allowlist=None: (0, "ok\n"),
+    )
+
+
+def _ok_proc(stdout=""):
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+def test_ir001_integrity_gate_refuses_uncommitted_plan_affected_path(monkeypatch, tmp_path):
+    """IR-001 regression: when a plan-affected outside-scope path was dirty-vs-base
+    BEFORE the first implement round, _commit_worker_diff excludes it (it is in
+    before_tracked), and the integrity gate (layer 3) must refuse — verify must
+    never be green while the committed range omits the worker's change.
+
+    Simulation: doc_path is in plan_affected (floor exempt) AND in before_tracked
+    (dirty before worker). _commit_worker_diff stages tracked_delta - before_tracked
+    = {} → nothing committed → doc_path still shows in git diff → layer 3 fires.
+    """
+    impl = _impl()
+    cwd, task_dir = _make_task_layout(tmp_path)
+    doc_path = "docs/reviewer/round-staging.md"
+
+    (task_dir / "outcome.md").write_text(
+        f"## Affected files\n- {doc_path}\n",
+        encoding="utf-8",
+    )
+
+    _wire_agent_pair(impl, monkeypatch, cwd)
+
+    def fake_run(argv, **kwargs):
+        has_c = "-c" in argv
+
+        # Untracked probe (ls-files --others): always empty
+        if "ls-files" in argv and "--others" in argv:
+            return _ok_proc("")
+
+        # Tracked probe via run_git_checked (-c present): doc_path dirty (before AND after worker)
+        if has_c and "diff" in argv and "-z" in argv and "--name-only" in argv:
+            return _ok_proc(doc_path + "\0")
+
+        # _uncommitted_scope_files probes (no -c): diff --name-only -z
+        # doc_path not under app/ or tests/ → filtered out by _uncommitted_scope_files → safe to return it
+        if not has_c and "diff" in argv and "--name-only" in argv and "-z" in argv:
+            return _ok_proc(doc_path + "\0")
+
+        # Branch diff probes (_branch_diff_checked, no -z, no --name-only, no --quiet)
+        if "diff" in argv and "-z" not in argv and "--name-only" not in argv and "--quiet" not in argv:
+            return _ok_proc("")
+
+        # commit_paths: --literal-pathspecs diff --cached --quiet (but to_stage=[] → never called)
+        # git add / git commit (also not called with empty to_stage)
+        return _ok_proc("")
+
+    monkeypatch.setattr(impl.subprocess, "run", fake_run)
+
+    state = {
+        "task_id": "task-002",
+        "mode": "agent-pair",
+        "base_branch": "main",
+        "verification": {"commands": []},
+    }
+    result = impl._run_agent_pair(task_dir, state)
+
+    assert result["status"] == "error", (
+        f"integrity gate must refuse when a plan-affected path is dirty after commit; got {result['status']!r}"
+    )
+    assert doc_path in result["feedback"], "feedback must name the uncommitted plan-affected path"
