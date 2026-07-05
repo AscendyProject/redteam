@@ -1,0 +1,20 @@
+# Operator resolution of the escalated plan_review
+
+The final review round left exactly ONE open blocker — PR-001: outcome.md
+lacked the machine-parseable `## Verification` fenced yaml block (it had only a
+prose `## Verification hooks` section). The reviewer explicitly confirmed the
+substantive design is correct ("The substantive design now matches the task";
+PR-002 resolved; remaining Uncertain items non-blocking).
+
+This is a mechanical formatting defect, not a design decision, so the operator
+amended outcome.md directly instead of spending another planner round: a
+`## Verification` section with a fenced yaml block containing
+`bash .redteam/scripts/verify.sh` (the project verify_command — always
+trusted; no allowlist change) was inserted above the existing
+`## Verification hooks` prose. That satisfies PR-001 as the reviewer specified
+("Add the required parseable block, e.g. one command for
+`bash .redteam/scripts/verify.sh`").
+
+The plan is approved as amended. Proceed to implement.
+
+USER_DECISION: APPROVE
