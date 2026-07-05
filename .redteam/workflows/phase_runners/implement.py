@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -201,7 +202,82 @@ def _scope_root(r: str) -> str:
     return r if r.endswith("/") else r + "/"
 
 
-def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, cwd: Path) -> set[str]:
+def _plan_affected_files(task_dir: Path) -> frozenset[str]:
+    """Parse the Affected files section of task_dir/outcome.md into a frozenset of
+    repo-relative POSIX paths.  Used by _get_or_set_plan_affected_files_baseline (#137).
+
+    Fail-closed: returns an empty frozenset when outcome.md is absent, unreadable,
+    or contains no Affected files heading (levels #/##/###).  Per-entry malformed
+    paths (absolute, or containing a '..' segment) are skipped without rejecting the
+    whole file.  A '(new) ' prefix (case-insensitive, positional, single occurrence)
+    is stripped from each item before validation.
+    """
+    try:
+        text = (task_dir / "outcome.md").read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return frozenset()
+
+    heading_re = re.compile(r"^(#{1,6})\s+(.*)")
+    bullet_re = re.compile(r"^[*-]\s+(.*)")
+    new_prefix_re = re.compile(r"^\(new\)\s+", re.IGNORECASE)
+
+    heading_level: int | None = None
+    paths: list[str] = []
+
+    for line in text.splitlines():
+        hm = heading_re.match(line)
+        if hm:
+            level = len(hm.group(1))
+            title = hm.group(2).strip()
+            if heading_level is None:
+                # Looking for the Affected files heading (levels 1–3 only).
+                if title.lower() == "affected files" and level <= 3:
+                    heading_level = level
+            else:
+                # Inside the section — stop at same or higher level.
+                if level <= heading_level:
+                    break
+        elif heading_level is not None:
+            bm = bullet_re.match(line)
+            if bm:
+                raw = bm.group(1).strip().strip("`").strip()
+                raw = new_prefix_re.sub("", raw).strip().strip("`").strip()
+                raw = raw.replace("\\", "/")
+                if not raw:
+                    continue
+                if raw.startswith("/"):
+                    continue
+                if ".." in raw.split("/"):
+                    continue
+                paths.append(raw)
+
+    return frozenset(paths)
+
+
+def _get_or_set_plan_affected_files_baseline(state: dict[str, Any], task_dir: Path) -> frozenset[str]:
+    """Set-once getter for the plan-declared Affected files snapshot (#137).
+
+    key-present (stored as list) → return frozenset(list) WITHOUT re-parsing outcome.md.
+    key-absent → parse outcome.md exactly once, store result as sorted list, return frozenset.
+    Does NOT call persist_state — caller persists alongside the tracked/untracked baselines.
+    """
+    key = "implement_plan_affected_files"
+    stored = state.get(key)
+    if isinstance(stored, list):
+        return frozenset(stored)
+    result = _plan_affected_files(task_dir)
+    state[key] = sorted(result)
+    return result
+
+
+def _floor_outside_scope(
+    current_tracked: set[str],
+    proj: Any,
+    task_dir: Path,
+    cwd: Path,
+    *,
+    plan_affected: frozenset[str] = frozenset(),
+) -> set[str]:
     """Pre-worker out-of-scope tracked floor (#91 Part A): the operator's tracked paths
     changed vs the pinned base that lie OUTSIDE source_dirs/test_dir. The task dir is
     EXEMPT — its files (outcome.md, state.json, the *_review.md trail) are the harness's
@@ -226,7 +302,9 @@ def _floor_outside_scope(current_tracked: set[str], proj: Any, task_dir: Path, c
     Uses the shared _is_harness_artifact predicate so this floor and
     _cross_run_trust_root_floor cannot drift apart in their "allowed" definitions."""
     scope_roots = [_scope_root(r) for r in (*proj.source_dirs, proj.test_dir)]
-    return {p for p in current_tracked if not _is_harness_artifact(p, task_dir, cwd, scope_roots)}
+    return {
+        p for p in current_tracked if not _is_harness_artifact(p, task_dir, cwd, scope_roots) and p not in plan_affected
+    }
 
 
 def _cross_run_trust_root_floor(
@@ -511,7 +589,8 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     try:
         current_tracked = _tracked_changed_paths(rr, base_branch)
         current_tracked_set = set(current_tracked)
-        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr)
+        plan_affected = _get_or_set_plan_affected_files_baseline(state, task_dir)
+        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr, plan_affected=plan_affected)
         if outside_scope:
             fb = (
                 "refusing to sweep operator tracked WIP into the task commit; "
@@ -692,7 +771,8 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     try:
         current_tracked = _tracked_changed_paths(rr, base_branch)
         current_tracked_set = set(current_tracked)
-        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr)
+        plan_affected = _get_or_set_plan_affected_files_baseline(state, task_dir)
+        outside_scope = _floor_outside_scope(current_tracked_set, proj, task_dir, rr, plan_affected=plan_affected)
         if outside_scope:
             fb = (
                 "refusing to sweep operator tracked WIP into the task commit; "
