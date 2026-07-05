@@ -1,0 +1,14 @@
+{
+  "goal": "Close #92's remaining proposals: round-staged reviewer (P3) then hard ceilings on the review loop (P5), both opt-in and default-off.",
+  "ceilings": {
+    "max_tasks": 2
+  },
+  "tasks": {
+    "task-001-p3-staged-reviewer": {
+      "depends_on": []
+    },
+    "task-002-p5-hard-ceilings": {
+      "depends_on": ["task-001-p3-staged-reviewer"]
+    }
+  }
+}

@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from adapters import MANUAL_REQUIRED, get_reviewer_adapter, get_worker_adapter, review_with_fallback
+from adapters import (
+    MANUAL_REQUIRED,
+    get_reviewer_adapter,
+    get_worker_adapter,
+    review_with_fallback,
+    review_with_fallback_for_provider,
+)
 
 from ._base import (
     PhaseResult,
@@ -115,6 +121,33 @@ def _narrowed_code_review_prompt(
     return "\n".join(parts)
 
 
+def _resolve_round_stage(
+    state: dict[str, Any],
+) -> Literal["manual", "unstaged", "frontier", "first_pass"]:
+    """Classify the current review round into one of the four dispatch cases (D5).
+
+    - "manual"     → Case A: no headless adapter or prior manual_required flag.
+    - "unstaged"   → Case B: headless adapter, staging config absent (today's path).
+    - "frontier"   → Case C: staging ON, round > escalate_after.
+    - "first_pass" → Case D: staging ON, round <= escalate_after.
+
+    Reads staging config lazily from `load_config(repo_root())` at dispatch time,
+    mirroring the live-config pattern of `default_model_for_role` and `project_config`.
+    """
+    manual_required = "review_code" in (state.get("manual_review_required") or {})
+    if get_reviewer_adapter(state) is None or manual_required:
+        return "manual"
+    from config import load_config
+
+    review_stages = load_config(repo_root()).models.review_stages
+    if review_stages is None:
+        return "unstaged"
+    round_count = int(state.get("implement_round_count") or 0)
+    if round_count > review_stages.escalate_after:
+        return "frontier"
+    return "first_pass"
+
+
 def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     if state.get("mode") == "agent-pair":
         rr = repo_root()
@@ -126,12 +159,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         diff = compute_repo_diff(cwd=repo_root())
         review_path = task_dir / "code_review.md"
 
-        # A prior fallback exhausted to manual for THIS phase → take the manual
-        # branch and wait on the pasted-review sentinel rather than re-invoking the
-        # failing headless primary (#37).
-        manual_required = "review_code" in (state.get("manual_review_required") or {})
-        adapter = get_reviewer_adapter(state)
-        if adapter is not None and not manual_required:
+        # D5 dispatch: classify the round into one of four cases.
+        stage = _resolve_round_stage(state)
+        staging_audit: str | None = None
+
+        if stage != "manual":
+            # Cases B, C, D — headless reviewer path.
             # Choose narrowed vs full prompt.  Narrowing is allowed only when ALL
             # four preconditions pass; any failure falls back to the full-diff
             # path (fail toward MORE review, not less).
@@ -150,13 +183,59 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                 prompt = _narrowed_code_review_prompt(task_dir, base_branch, prior_rev, open_items)
             else:
                 prompt = _code_review_prompt(task_dir, base_branch)
-            result = review_with_fallback(
-                state,
-                role="review_code",
-                prompt=prompt,
-                cwd=repo_root(),
-                target={"kind": "branch_diff", "base": base_branch},
-            )
+
+            review_target: dict = {"kind": "branch_diff", "base": base_branch}
+
+            if stage == "first_pass":
+                # Case D — dispatch to the cheap first-pass reviewer.  If it
+                # returns APPROVED with parse_status=="ok", promote immediately
+                # to the frontier reviewer within the same round (D3); all other
+                # first-pass outcomes are returned as-is.
+                from config import load_config
+
+                review_stages = load_config(repo_root()).models.review_stages
+                fp_result = review_with_fallback_for_provider(
+                    state,
+                    role="review_code",
+                    prompt=prompt,
+                    cwd=repo_root(),
+                    target=review_target,
+                    primary_provider=review_stages.first_pass_reviewer,
+                )
+                if fp_result["parse_status"] == "ok" and fp_result["decision"] == "APPROVED":
+                    # Promotion path (D3): persist first-pass raw BEFORE the frontier
+                    # call so a crash between the two calls doesn't lose the audit trail
+                    # (D7).  Then invoke the frontier reviewer and return ITS result.
+                    # No code path exists by which a first-pass APPROVED reaches
+                    # PhaseResult(status="approved") — only the frontier call can do that.
+                    first_pass_path = task_dir / "code_review.first_pass.md"
+                    first_pass_path.write_text(fp_result["raw"], encoding="utf-8")
+                    round_count = int(state.get("implement_round_count") or 0)
+                    staging_audit = (
+                        f"round {round_count}: first-pass '{review_stages.first_pass_reviewer}' approved; "
+                        f"promoted to frontier"
+                    )
+                    result = review_with_fallback(
+                        state,
+                        role="review_code",
+                        prompt=prompt,
+                        cwd=repo_root(),
+                        target=review_target,
+                    )
+                else:
+                    # Non-APPROVED first-pass outcome: return as-is (cost saving).
+                    result = fp_result
+            else:
+                # Cases B and C — state-default (frontier) reviewer; byte-identical
+                # to today's behavior (same function, same arguments, same audit trail).
+                result = review_with_fallback(
+                    state,
+                    role="review_code",
+                    prompt=prompt,
+                    cwd=repo_root(),
+                    target=review_target,
+                )
+
             if result["parse_status"] == MANUAL_REQUIRED:
                 return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
             review_text = result["raw"]
@@ -172,12 +251,17 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             # MUST NOT be set on the MANUAL_REQUIRED or parse_status != "ok" paths
             # above.  On RuntimeError (not a git repo / git unavailable) leave
             # last_reviewed_rev untouched so the next round takes the full-diff path.
+            # On a promoted round this is set exactly ONCE from the FRONTIER result's
+            # HEAD (the first-pass call never sets it, matching the narrowed-prompt
+            # single-set-per-round invariant).
             if decision in {"APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"}:
                 try:
                     state["last_reviewed_rev"] = git_rev_parse("HEAD", rr)
                 except RuntimeError:
                     pass
         else:
+            # Case A — manual branch (reviewer=human or prior manual_required flag).
+            # Staging is BYPASSED ENTIRELY; no review_with_fallback* call is made.
             review_text = read_text_if_exists(review_path)
             if review_text is None:
                 feedback = f"code_review.md was not produced at {review_path}"
@@ -189,6 +273,8 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             res = PhaseResult(status=status, feedback=feedback, log=review_text, diff=diff)
             if fallback_audit:
                 res["fallback_audit"] = fallback_audit
+            if staging_audit:
+                res["staging_audit"] = staging_audit
             return res
 
         if decision == "APPROVED":

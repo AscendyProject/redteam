@@ -56,6 +56,11 @@ class PhaseResult(TypedDict):
     # when an automatic fallback produced this decision. Trusted for the audit
     # trail so reviewer-controlled text can't spoof it (#37 review PR-002).
     fallback_audit: NotRequired[str]
+    # Staging provenance: set ONLY by review_code.run when a first-pass cheap
+    # reviewer approved and was promoted to the frontier reviewer in the same round.
+    # Mirrors fallback_audit — structured field set by the engine, never parsed
+    # from reviewer text, so a reviewer can't spoof a staging entry.
+    staging_audit: NotRequired[str]
 
 
 class ClaudeRunResult(TypedDict):
