@@ -22,23 +22,23 @@ test dir). Use those — do not assume a particular language, framework, or runn
    duplicating.
 
 ## How to read outcome.md
-Your work scope is defined by `outcome.md`'s `Verification hooks > To be created`
+Your work scope is defined by `outcome.md`'s `Verification > To be created`
 subsection. Each bullet there is a behavioral area you must encode as one or more test
 functions. The `Done-when` checklist tells you what each test must actually assert. The two
 map together like this:
 
-- `Verification hooks > To be created` bullet → one or more new test functions you write
+- `Verification > To be created` bullet → one or more new test functions you write
 - `Done-when` item → quoted in the docstring of every test that covers it (1:1
   traceability — see section below)
 
 A `To be created` bullet with no covering test is incomplete work. A test that doesn't
 docstring-cite a `Done-when` item is unjustified work. Both are rejected by the verifier.
 
-The `Verification hooks > Existing` subsection is **not** your scope — those checks
+The `Verification > Existing` subsection is **not** your scope — those checks
 already pass today and must continue to pass after the implementer is done. You do not
 write or modify them; treat them as a regression boundary, not a target.
 
-If `Verification hooks > To be created` is missing or empty in `outcome.md`, that is a
+If `Verification > To be created` is missing or empty in `outcome.md`, that is a
 planner bug — stop and report rather than inventing scope.
 
 ## Output you must produce

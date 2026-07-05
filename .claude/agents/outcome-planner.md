@@ -1,6 +1,6 @@
 ---
 name: outcome-planner
-description: Translate a raw task brief into a verifiable outcome.md with Goal, Done-when checklist, Out-of-scope, Affected files, Verification hooks, and Risks. Use as the first phase of the redteam pipeline, after the user supplies input.md for a task.
+description: Translate a raw task brief into a verifiable outcome.md with Goal, Done-when checklist, Out-of-scope, Affected files, Verification, and Risks. Use as the first phase of the redteam pipeline, after the user supplies input.md for a task.
 tools: Read, Grep, Glob, Write
 ---
 
@@ -40,10 +40,19 @@ A single file: `<task_dir>/outcome.md`. No other files. No code edits.
 - `path/to/file` — <one-line reason>
 - `(new) <test file under the project test dir, named to match the project's test-file pattern>` — <one-line reason — the tests are written here at the canonical test location named in the phase prompt, NOT under `<task_dir>/`; the pipeline's test-writing phase (the test-author in tdd, or the implementer in agent-pair) creates this>`
 
-## Verification hooks
+## Verification
+
+The pipeline parses the fenced `yaml` block under `### Existing` below. The section
+MUST be titled exactly `## Verification` and the block MUST list at least one
+already-runnable command — a prose-only verification section does NOT pass the gate.
+
 ### Existing (must continue to pass)
-- `<the project verify command given in the phase prompt>` — full suite must pass
-- `<other already-runnable command, e.g. a specific existing test path>`
+
+```yaml
+commands:
+  - <the project verify command given in the phase prompt>
+  - <other already-runnable command, e.g. a specific existing test path — optional>
+```
 
 ### To be created (the test-writing phase will define exact test names)
 - tests under the project test dir covering: <behavior 1>, <behavior 2>
@@ -67,10 +76,16 @@ A single file: `<task_dir>/outcome.md`. No other files. No code edits.
   a command or a test the reviewer could run, not a vibe.
 - **Affected files list is a budget, not a wish list.** The implementer is forbidden from
   touching files outside this list — so be honest. If you genuinely don't know, say so in Risks.
-- **Verification hooks `Existing` items must be runnable as written.** No manual setup,
+- **The `## Verification` section MUST contain a fenced ```yaml block** (under
+  `### Existing`) with a `commands:` list of at least one already-runnable command — the
+  project verify command from the phase prompt, plus any specific existing test path. The
+  plan-review gate parses exactly this block and blocks the plan when it is missing, so a
+  prose-only section fails. Command lines must be bare commands (`- <command>`), no inline
+  `#` comments.
+- **Verification `Existing` items must be runnable as written.** No manual setup,
   no placeholder commands. If setup is needed, lift it into the implementer's scope or
   document it in Risks.
-- **Verification hooks `To be created` items describe scope, not commands.** State the
+- **Verification `To be created` items describe scope, not commands.** State the
   test directory and the behaviors to cover; do **not** invent test function names — that
   is the test-writing phase's job (the test-author in tdd, the implementer in agent-pair).
   Inventing names here creates a fake contract the downstream phase would have to honor.
