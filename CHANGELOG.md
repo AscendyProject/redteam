@@ -7,6 +7,18 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-07
+
+This release is dominated by **goal mode becoming autonomous and then proving
+itself on the harness's own backlog.** `/redteam:goal` is reworked from a
+one-shot into a run-to-completion driver, backed by a new machine-readable
+`status --json`; two real autonomous goal runs then drove the rest of this
+release end-to-end — the first shipping #92's reviewer-cost pair (P3 round-staged
+reviewer, P5 hard ceilings) and the second closing the two floor gaps (#136/#137)
+the first run had surfaced. A planner-skeleton fix (#138) removes a recurring
+`plan_review` false-block those runs kept hitting. Everything is additive and
+opt-in; there are no breaking changes.
+
 ### Fixed
 - **Goal-mode floors are now harness-artifact-aware (#136, #141).** The
   pre-worker out-of-scope floor (#91) and the cross-run trust-root floor (#117)
@@ -29,6 +41,15 @@ releases may include behavior changes; breaking changes are called out).
   green against the worktree. `_cross_run_trust_root_floor` is deliberately NOT
   on the exemption path. Both #136 and #137 shipped by the **second autonomous
   `/redteam:goal` run** (batch `floor-hardening`).
+- **outcome-planner emits a parseable `## Verification` block (#138, #143).** The
+  planner skeleton instructed a prose `## Verification hooks` section, but the
+  `plan_review` gate parses a section titled exactly `## Verification` with a
+  fenced `yaml` `commands:` list — so the planner's own output kept failing the
+  gate, burning 1–3 frontier review rounds per task and escalating
+  otherwise-approved plans to `ask_user`. The skeleton now emits the parseable
+  block (kept stack-neutral — placeholder verify command); the TDD agents'
+  `Verification > Existing/To be created` pointers are realigned, and a
+  regression runs the real gate parser over the skeleton body. Engine unchanged.
 
 ### Added
 - **#92 P3 — opt-in round-staged reviewer model (#135).** The `review_code`
