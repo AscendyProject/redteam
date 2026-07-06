@@ -124,25 +124,25 @@ the first release cut by the raidostar-gated release automation (#128). It also
 adds the goal-mode operator docs to the README (EN+KO), closing the doc gap
 under #94.
 
-Post-0.7.0 (unreleased): `/redteam:goal` was reworked into an **autonomous
-run-to-completion driver** with a goal-aware machine-readable `status --json`
-(#134), and the **first autonomous goal run** then shipped #92's remaining
-proposals as a stacked pair — P3 round-staged reviewer (#135) and P5 hard
-review-loop ceilings (#140; review trail in #139) — closing #92. That run also
-surfaced three engine gaps, filed as #136 (goal-mode decompose seeds vs the
-#117/#91 floors, incl. a #117↔sweep-baseline catch-22), #137 (pre-worker floor
-ignores plan-declared Affected files → self-lock on review backtrack), and
-#138 (planner keeps emitting a non-parseable `## Verification hooks` section).
-A **second autonomous goal run** (batch `floor-hardening`) then closed #136
-(#141) and #137 (#142) — the latter after a cross-model stack review caught a
+`v0.8.0` makes **goal mode autonomous and then proves it on the harness's own
+backlog.** `/redteam:goal` is reworked from a one-shot into a **run-to-completion
+driver**, backed by a new machine-readable `status --json` (#134). Two real
+autonomous goal runs then drove the rest of the release: the **first** shipped
+#92's reviewer-cost pair — P3 round-staged reviewer (#135) and P5 hard review-loop
+ceilings (#140; review trail in #139), closing #92 — and **surfaced** three engine
+gaps (#136/#137/#138); the **second** (batch `floor-hardening`) closed #136 (#141)
+and #137 (#142), the latter after a cross-model *stack* review caught a
 reviewed-range integrity gap (IR-001) the per-task review missed, fixed via a
-post-commit plan-affected integrity layer.
+post-commit plan-affected integrity layer. #138 (planner emitting a non-parseable
+`## Verification hooks` section instead of the parseable `## Verification` yaml
+block) is fixed at the skeleton source (#143). Everything is additive and opt-in;
+no breaking changes.
 
 **Roadmap:** goal mode v1 engine + e2e + operator docs are shipped and #92 is
-closed; the autonomous-run floor-hardening pair #136/#137 is merged. Remaining
-open work is the native-diff coupling follow-up (#120), the pure-visual-task
-fit question (#132), plan-aware review (#133), and the planner Verification-block
-bug (#138). Floor exemptions are security boundaries — plan_review first. Goal mode v1 is a **single-parent
+closed; the autonomous-run pair #136/#137 and the planner fix #138 are merged.
+Remaining open work is the native-diff coupling follow-up (#120), the
+pure-visual-task fit question (#132), and plan-aware review (#133). Floor
+exemptions are security boundaries — plan_review first. Goal mode v1 is a **single-parent
 forest** — multi-parent (a task depending on ≥2 others) fails closed and is future
 work; if revived it restarts from a fresh `plan_review`. The reviewer-transport work
 (#37, umbrella) is fully resolved — step 4 (fallback ladder) shipped in 0.3.0; steps
