@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from adapters import get_worker_adapter
+from adapters import get_worker_adapter, worker_provider
 
 from ._base import (
     PhaseResult,
@@ -657,11 +657,17 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         fb = f"could not snapshot the working tree before implement ({exc})."
         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
     result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+    _tele = dict(
+        cost_usd=result.get("cost_usd"),
+        duration_sec=result.get("duration_sec"),
+        model=result.get("model"),
+        provider=worker_provider(state),
+    )
     try:
         diff, diff_sha = _write_current_diff(task_dir, rr, base_branch)
     except (RuntimeError, OSError) as exc:
         fb = f"could not capture the implementation diff ({exc})."
-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
 
     verification = state.setdefault("verification", {})
     verification["last_diff_sha256"] = diff_sha
@@ -673,7 +679,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"returncode={result['returncode']}\n"
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
 
     commands = state.get("verification", {}).get("commands") or []
     if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
@@ -690,7 +696,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             "legacy state is missing verification.verify_allowlist; re-run planning "
             "to snapshot the verification allowlist."
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
     rc, verify_output = _run_verification_commands(rr, commands, project_verify_command, verify_allowlist)
 
     verification["commands"] = commands
@@ -701,12 +707,12 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
     except (RuntimeError, OSError) as exc:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
     try:
         diff, diff_sha = _write_current_diff(task_dir, rr, base_branch)
     except (RuntimeError, OSError) as exc:
         fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
     verification["last_diff_sha256"] = diff_sha
 
     if rc == 0:
@@ -730,7 +736,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             # closed (don't approve a possibly-stale range); the generic retry path
             # re-runs, a repeat defers (#50 review PR-001).
             feedback = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
-            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
         stray = sorted(set(layer1) | set(layer2) | set(layer3))
         if stray:
             feedback = (
@@ -740,16 +746,17 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                 "(they belong in the implementation diff), or remove them — refusing to "
                 "hand a stale committed range to review."
             )
-            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
         return PhaseResult(
             status="approved",
             feedback="",
             log=result["stdout"] + "\n--- verification ---\n" + verify_output,
             diff=diff,
+            **_tele,
         )
 
     feedback = f"verification failed (exit {rc}). Address the failures below and try again.\n\n{verify_output[-4000:]}"
-    return PhaseResult(status="changes_requested", feedback=feedback, log=feedback, diff=diff)
+    return PhaseResult(status="changes_requested", feedback=feedback, log=feedback, diff=diff, **_tele)
 
 
 def _tdd_base_prompt(task_dir: Path, proj: Any) -> str:
@@ -843,6 +850,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)
+    _tele = dict(
+        cost_usd=result.get("cost_usd"),
+        duration_sec=result.get("duration_sec"),
+        model=result.get("model"),
+        provider=worker_provider(state),
+    )
 
     if result["returncode"] != 0:
         feedback = (
@@ -850,7 +863,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"returncode={result['returncode']}\n"
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
 
     rc, verify_output = _run_verify_sh(rr, verify_argv)
 
@@ -863,12 +876,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
     except (RuntimeError, OSError) as exc:
         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
     try:
         diff, _ = _write_current_diff(task_dir, rr, base_branch, _committed_range_diff(rr, base_branch))
     except (RuntimeError, OSError) as exc:
         fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
 
     if rc == 0:
         # Three-layer integrity gate (#50 + #112 + IR-001): verify passed on the
@@ -885,7 +898,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             layer3 = _uncommitted_plan_affected_paths(rr, plan_affected)
         except (OSError, RuntimeError) as exc:
             fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
-            return PhaseResult(status="error", feedback=fb, log=fb, diff=diff)
+            return PhaseResult(status="error", feedback=fb, log=fb, diff=diff, **_tele)
         stray = sorted(set(layer1) | set(layer2) | set(layer3))
         if stray:
             feedback = (
@@ -895,12 +908,13 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                 "(they belong in the implementation diff), or remove them — refusing to "
                 "hand a stale committed range to review."
             )
-            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
         return PhaseResult(
             status="approved",
             feedback="",
             log=result["stdout"] + "\n--- verify.sh ---\n" + verify_output,
             diff=diff,
+            **_tele,
         )
 
     feedback = f"verify.sh failed (exit {rc}). Address the failures below and try again.\n\n{verify_output[-4000:]}"
@@ -909,4 +923,5 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         feedback=feedback,
         log=feedback,
         diff=diff,
+        **_tele,
     )

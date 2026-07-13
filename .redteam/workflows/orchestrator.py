@@ -49,6 +49,7 @@ from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
 from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E402
     DEFAULT_TIMEOUT_SEC,
     PhaseResult,
+    build_telemetry_entry,
     compute_branch_changed_paths,
     default_model_for_role,
     extract_verification_commands,
@@ -1442,6 +1443,19 @@ def process_task(
                 return "deferred"
 
         result = runner(task_dir, state)
+
+        # Telemetry capture: iff the runner invoked a worker adapter, the result
+        # carries a `provider` field (the runner materialization rule's invariant).
+        # Append exactly one entry to state["phase_telemetry"] and swallow any
+        # exception so telemetry never alters a phase's outcome (#phase-0).
+        try:
+            if result.get("provider"):
+                state.setdefault("phase_telemetry", []).append(build_telemetry_entry(phase, result))
+        except Exception as _tele_exc:
+            print(
+                f"[telemetry] error building/appending entry for phase {phase!r}: {_tele_exc}",
+                file=sys.stderr,
+            )
 
         # Ceiling pre-check (D6, P5): runs BEFORE manual_required, BEFORE the
         # fallback_audit/staging_audit audit sites, and BEFORE retries/rescue

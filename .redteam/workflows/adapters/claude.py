@@ -40,10 +40,44 @@ class ClaudeWorkerAdapter:
             cwd=cwd,
             model=claude_model_for_role(self._state, role),
         )
+        parsed_json = result.get("parsed_json")
+        if parsed_json is None:
+            # No telemetry signal (timeout / transport error / non-result event).
+            # Return only the three base fields so callers that check exact equality
+            # against the legacy shape are not broken (NotRequired fields absent ↔
+            # field omitted, per the TypedDict contract).  Runners read cost_usd /
+            # duration_sec / model via .get() which returns None for absent keys;
+            # runners set provider via worker_provider(state), not from this result.
+            return WorkerRunResult(
+                returncode=result["returncode"],
+                stdout=result["stdout"],
+                stderr=result["stderr"],
+            )
+        cost_usd: float | None = None
+        duration_sec: float | None = None
+        model: str | None = None
+        try:
+            cost_usd = parsed_json.get("total_cost_usd")
+        except Exception:
+            pass
+        try:
+            duration_ms = parsed_json.get("duration_ms")
+            if duration_ms is not None:
+                duration_sec = duration_ms / 1000
+        except Exception:
+            pass
+        try:
+            model = parsed_json.get("model")
+        except Exception:
+            pass
         return WorkerRunResult(
             returncode=result["returncode"],
             stdout=result["stdout"],
             stderr=result["stderr"],
+            cost_usd=cost_usd,
+            duration_sec=duration_sec,
+            model=model,
+            provider="claude",
         )
 
 

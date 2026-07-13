@@ -82,6 +82,12 @@ class WorkerRunResult(TypedDict):
     returncode: int
     stdout: str
     stderr: str
+    # Telemetry fields — additive, NotRequired so existing callers stay valid.
+    # Claude path populates all four; Codex path omits them (None via .get()).
+    cost_usd: NotRequired[float | None]
+    duration_sec: NotRequired[float | None]
+    model: NotRequired[str | None]
+    provider: NotRequired[str]
 
 
 class WorkerAdapter(Protocol):
