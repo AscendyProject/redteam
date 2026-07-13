@@ -1,0 +1,11 @@
+{
+  "goal": "Fix `_plan_affected_files` in implement.py so the standard `- `path` — reason` bullet parses to the exact path token (#149), with a fail-closed, non-widening regression suite.",
+  "ceilings": {
+    "max_tasks": 1
+  },
+  "tasks": {
+    "task-001-plan-affected-parser": {
+      "depends_on": []
+    }
+  }
+}
