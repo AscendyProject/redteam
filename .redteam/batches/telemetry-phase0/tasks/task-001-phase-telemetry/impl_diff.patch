@@ -1,0 +1,1316 @@
+diff --git a/.redteam/templates/state.template.json b/.redteam/templates/state.template.json
+index b7a6e1c..379c407 100644
+--- a/.redteam/templates/state.template.json
++++ b/.redteam/templates/state.template.json
+@@ -37,6 +37,7 @@
+   "deferred_requirements": [],
+   "branch": "",
+   "pr_url": null,
++  "phase_telemetry": [],
+   "created_at": "",
+   "updated_at": ""
+ }
+diff --git a/.redteam/tests/test_phase_telemetry.py b/.redteam/tests/test_phase_telemetry.py
+new file mode 100644
+index 0000000..ada1382
+--- /dev/null
++++ b/.redteam/tests/test_phase_telemetry.py
+@@ -0,0 +1,771 @@
++"""Tests for per-phase telemetry capture (Phase 0, task-001-phase-telemetry).
++
++Covers:
++  - ClaudeWorkerAdapter.invoke populates cost_usd/duration_sec/model/provider.
++  - Runner materialization: plan_outcome and create_pr carry telemetry on PhaseResult.
++  - Orchestrator appends exactly one phase_telemetry entry per worker-invoking phase.
++  - Codex-worker path: cost_usd/duration_sec/model are None, provider == "codex".
++  - Missing-signal path (parsed_json=None): None fields, outcome reflects actual status.
++  - create_pr telemetry entry (both approved and error paths).
++  - Reviewer-transport phases (plan_review, review_code, rescue) emit no telemetry.
++  - Non-mutation guarantee: telemetry capture never changes PhaseResult.status.
++  - Legacy state.json without phase_telemetry key: setdefault creates the list.
++  - State template: phase_telemetry key is an empty list.
++  - No-secret-bleed shape: entry keys are exactly the six allowed ones.
++"""
++
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++from typing import Any
++from unittest.mock import MagicMock
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++_REPO_ROOT = Path(__file__).resolve().parents[2]
++_TEMPLATE_PATH = _REPO_ROOT / ".redteam" / "templates" / "state.template.json"
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++_EXPECTED_ENTRY_KEYS = frozenset({"phase", "provider", "model", "cost_usd", "duration_sec", "outcome"})
++_FORBIDDEN_ENTRY_KEYS = frozenset({"feedback", "log", "diff", "stderr", "stdout", "last_failure_log"})
++
++
++def _make_parsed_json(
++    *,
++    total_cost_usd: float | None = 1.23,
++    duration_ms: int | None = 4500,
++    model: str | None = "claude-sonnet-4-6",
++) -> dict:
++    """Build a fake `result` event dict as produced by run_claude stream-json."""
++    d: dict[str, Any] = {"type": "result", "is_error": False}
++    if total_cost_usd is not None:
++        d["total_cost_usd"] = total_cost_usd
++    if duration_ms is not None:
++        d["duration_ms"] = duration_ms
++    if model is not None:
++        d["model"] = model
++    return d
++
++
++def _load_adapter_modules():
++    import adapters as _adapters_pkg
++    import adapters.claude as _claude_mod
++
++    return _adapters_pkg, _claude_mod
++
++
++def _load_orchestrator():
++    import _engine
++
++    return _engine.orchestrator()
++
++
++def _load_plan_outcome():
++    import phase_runners.plan_outcome as m
++
++    return m
++
++
++def _load_create_pr():
++    import _engine
++
++    return _engine.create_pr()
++
++
++def _load_base():
++    import _engine
++
++    return _engine.base()
++
++
++# ---------------------------------------------------------------------------
++# 1. ClaudeWorkerAdapter.invoke — happy path
++# ---------------------------------------------------------------------------
++
++
++def test_claude_adapter_invoke_populates_telemetry(monkeypatch):
++    """ClaudeWorkerAdapter.invoke returns WorkerRunResult with cost_usd,
++    duration_sec (= duration_ms / 1000), model, and provider == 'claude'."""
++    _adapters_pkg, _claude_mod = _load_adapter_modules()
++    parsed = _make_parsed_json(total_cost_usd=2.50, duration_ms=3000, model="claude-opus-4-7")
++
++    fake_run_result = {
++        "returncode": 0,
++        "stdout": "ok",
++        "stderr": "",
++        "parsed_json": parsed,
++    }
++    monkeypatch.setattr(_claude_mod, "run_claude", lambda **kw: fake_run_result)
++    monkeypatch.setattr(_claude_mod, "claude_model_for_role", lambda state, role: None)
++
++    adapter = _claude_mod.ClaudeWorkerAdapter(state={})
++    result = adapter.invoke(role="implementer", agent="implementer", prompt="go", cwd=_REPO_ROOT)
++
++    assert result["provider"] == "claude"
++    assert result["cost_usd"] == 2.50
++    assert result["duration_sec"] == 3.0  # 3000 / 1000
++    assert result["model"] == "claude-opus-4-7"
++    assert result["returncode"] == 0
++
++
++def test_claude_adapter_invoke_none_parsed_json(monkeypatch):
++    """When parsed_json is None (timeout / transport error), the adapter returns only
++    the three base fields (returncode/stdout/stderr). Telemetry fields (cost_usd,
++    duration_sec, model) are absent and resolve to None via .get(). The provider is
++    set by the runner's materialization rule via worker_provider(state), not here."""
++    _adapters_pkg, _claude_mod = _load_adapter_modules()
++    fake_run_result = {
++        "returncode": 124,
++        "stdout": "",
++        "stderr": "timeout",
++        "parsed_json": None,
++    }
++    monkeypatch.setattr(_claude_mod, "run_claude", lambda **kw: fake_run_result)
++    monkeypatch.setattr(_claude_mod, "claude_model_for_role", lambda state, role: None)
++
++    adapter = _claude_mod.ClaudeWorkerAdapter(state={})
++    result = adapter.invoke(role="implementer", agent="implementer", prompt="go", cwd=_REPO_ROOT)
++
++    assert result["returncode"] == 124
++    # Telemetry fields are absent on the None-parsed_json path; .get() returns None
++    assert result.get("cost_usd") is None
++    assert result.get("duration_sec") is None
++    assert result.get("model") is None
++    # provider is intentionally absent here; the runner sets it via worker_provider(state)
++    assert "provider" not in result
++
++
++def test_claude_adapter_missing_keys_in_parsed_json(monkeypatch):
++    """Keys absent from parsed_json degrade to None gracefully."""
++    _adapters_pkg, _claude_mod = _load_adapter_modules()
++    # parsed_json with no telemetry keys
++    fake_run_result = {
++        "returncode": 0,
++        "stdout": "ok",
++        "stderr": "",
++        "parsed_json": {"type": "result", "is_error": False},
++    }
++    monkeypatch.setattr(_claude_mod, "run_claude", lambda **kw: fake_run_result)
++    monkeypatch.setattr(_claude_mod, "claude_model_for_role", lambda state, role: None)
++
++    adapter = _claude_mod.ClaudeWorkerAdapter(state={})
++    result = adapter.invoke(role="implementer", agent="implementer", prompt="go", cwd=_REPO_ROOT)
++
++    assert result["provider"] == "claude"
++    assert result["cost_usd"] is None
++    assert result["duration_sec"] is None
++    assert result["model"] is None
++
++
++# ---------------------------------------------------------------------------
++# 2. Runner materialization — plan_outcome
++# ---------------------------------------------------------------------------
++
++
++def test_plan_outcome_approved_carries_telemetry(monkeypatch, tmp_path):
++    """plan_outcome.run returns a PhaseResult carrying all four telemetry fields
++    on the approved path."""
++    m = _load_plan_outcome()
++
++    fake_wr = {
++        "returncode": 0,
++        "stdout": "done",
++        "stderr": "",
++        "parsed_json": _make_parsed_json(total_cost_usd=0.5, duration_ms=2000, model="claude-test"),
++        "cost_usd": 0.5,
++        "duration_sec": 2.0,
++        "model": "claude-test",
++        "provider": "claude",
++    }
++
++    task_dir = tmp_path / "task-001"
++    task_dir.mkdir()
++    (task_dir / "outcome.md").write_text("# Outcome\n", encoding="utf-8")
++    (task_dir / "input.md").write_text("do x", encoding="utf-8")
++
++    monkeypatch.setattr(m, "get_worker_adapter", lambda state: _make_adapter(fake_wr))
++    monkeypatch.setattr(m, "worker_provider", lambda state: "claude")
++    monkeypatch.setattr(m, "repo_root", lambda: tmp_path)
++    monkeypatch.setattr(m, "project_config", lambda: _fake_proj())
++    monkeypatch.setattr(m, "compute_repo_diff", lambda cwd=None: "")
++
++    state: dict = {"mode": "agent-pair", "models": {"implementer": "claude-sonnet-4-6"}}
++    result = m.run(task_dir, state)
++
++    assert result["status"] == "approved"
++    assert result.get("provider") == "claude"
++    assert result.get("cost_usd") == 0.5
++    assert result.get("duration_sec") == 2.0
++    assert result.get("model") == "claude-test"
++
++
++def test_plan_outcome_error_carries_telemetry(monkeypatch, tmp_path):
++    """plan_outcome.run returns a PhaseResult carrying telemetry on the error path too."""
++    m = _load_plan_outcome()
++
++    fake_wr = {
++        "returncode": 1,
++        "stdout": "",
++        "stderr": "fail",
++        "parsed_json": None,
++        "cost_usd": None,
++        "duration_sec": None,
++        "model": None,
++        "provider": "claude",
++    }
++
++    task_dir = tmp_path / "task-001"
++    task_dir.mkdir()
++    # Do NOT create outcome.md → runner will take the error path.
++
++    monkeypatch.setattr(m, "get_worker_adapter", lambda state: _make_adapter(fake_wr))
++    monkeypatch.setattr(m, "worker_provider", lambda state: "claude")
++    monkeypatch.setattr(m, "repo_root", lambda: tmp_path)
++    monkeypatch.setattr(m, "project_config", lambda: _fake_proj())
++    monkeypatch.setattr(m, "compute_repo_diff", lambda cwd=None: "")
++
++    state: dict = {"mode": "agent-pair", "models": {"implementer": "claude-sonnet-4-6"}}
++    result = m.run(task_dir, state)
++
++    assert result["status"] == "error"
++    assert result.get("provider") == "claude"
++    assert result.get("cost_usd") is None
++    assert result.get("duration_sec") is None
++
++
++# ---------------------------------------------------------------------------
++# 3. Orchestrator append — Claude happy path
++# ---------------------------------------------------------------------------
++
++
++def test_orchestrator_appends_telemetry_entry_claude(monkeypatch, tmp_path):
++    """After a worker-invoking runner returns a PhaseResult with a Claude provider,
++    state['phase_telemetry'] gains exactly one entry with the correct fields."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="plan_outcome")
++
++    def fake_plan_outcome(td, st):
++        return {
++            "status": "approved",
++            "feedback": "",
++            "log": "",
++            "diff": "",
++            "provider": "claude",
++            "cost_usd": 1.23,
++            "duration_sec": 4.5,
++            "model": "claude-opus-4-7",
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_plan_outcome)
++
++    orch.process_task(task_dir)
++
++    # Reload state from disk
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert len(telemetry) == 1
++    entry = telemetry[0]
++    assert entry["phase"] == "plan_outcome"
++    assert entry["provider"] == "claude"
++    assert entry["cost_usd"] == 1.23
++    assert entry["duration_sec"] == 4.5
++    assert entry["model"] == "claude-opus-4-7"
++    assert entry["outcome"] == "approved"
++
++
++# ---------------------------------------------------------------------------
++# 4. Codex-worker path
++# ---------------------------------------------------------------------------
++
++
++def test_orchestrator_appends_telemetry_codex_path(monkeypatch, tmp_path):
++    """With the worker resolved to codex, the appended entry has provider='codex'
++    and cost_usd/duration_sec/model all None. No number is fabricated."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="plan_outcome")
++
++    def fake_plan_outcome(td, st):
++        return {
++            "status": "approved",
++            "feedback": "",
++            "log": "",
++            "diff": "",
++            "provider": "codex",
++            "cost_usd": None,
++            "duration_sec": None,
++            "model": None,
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_plan_outcome)
++
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert len(telemetry) == 1
++    entry = telemetry[0]
++    assert entry["provider"] == "codex"
++    assert entry["cost_usd"] is None
++    assert entry["duration_sec"] is None
++    assert entry["model"] is None
++    assert entry["outcome"] == "approved"
++
++
++# ---------------------------------------------------------------------------
++# 5. Missing-signal path (parsed_json=None)
++# ---------------------------------------------------------------------------
++
++
++def test_orchestrator_appends_telemetry_missing_signal(monkeypatch, tmp_path):
++    """When the runner returns with parsed_json=None (timeout/transport error),
++    the entry still appends with None numerics and outcome reflects actual status.
++    max_retries=0 so the error causes an immediate defer after one attempt (avoiding
++    multiple retry iterations that would append more than one telemetry entry)."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="plan_outcome", max_retries=0)
++
++    def fake_plan_outcome(td, st):
++        return {
++            "status": "error",
++            "feedback": "timeout",
++            "log": "timeout",
++            "diff": "",
++            "provider": "claude",
++            "cost_usd": None,
++            "duration_sec": None,
++            "model": None,
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_plan_outcome)
++
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert len(telemetry) == 1
++    entry = telemetry[0]
++    assert entry["provider"] == "claude"
++    assert entry["cost_usd"] is None
++    assert entry["duration_sec"] is None
++    assert entry["outcome"] == "error"
++
++
++# ---------------------------------------------------------------------------
++# 6. create_pr entry (settles PR-001)
++# ---------------------------------------------------------------------------
++
++
++def test_orchestrator_appends_telemetry_create_pr_approved(monkeypatch, tmp_path):
++    """After create_pr.run returns approved from its pr-author invoke call,
++    exactly one phase_telemetry entry with phase='create_pr' is appended."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="create_pr")
++
++    def fake_create_pr(td, st):
++        return {
++            "status": "approved",
++            "feedback": "",
++            "log": "",
++            "diff": "",
++            "provider": "claude",
++            "cost_usd": 0.1,
++            "duration_sec": 1.0,
++            "model": "claude-sonnet-4-6",
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "create_pr", fake_create_pr)
++
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert len(telemetry) == 1
++    entry = telemetry[0]
++    assert entry["phase"] == "create_pr"
++    assert entry["provider"] == "claude"
++    assert entry["outcome"] == "approved"
++
++
++def test_orchestrator_appends_telemetry_create_pr_error(monkeypatch, tmp_path):
++    """After create_pr.run returns error from its pr-author invoke call,
++    an entry is still appended with outcome='error'.
++    max_retries=0 so the error causes an immediate defer after one attempt."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="create_pr", max_retries=0)
++
++    def fake_create_pr(td, st):
++        return {
++            "status": "error",
++            "feedback": "pr failed",
++            "log": "pr failed",
++            "diff": "",
++            "provider": "claude",
++            "cost_usd": None,
++            "duration_sec": None,
++            "model": None,
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "create_pr", fake_create_pr)
++
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert len(telemetry) == 1
++    entry = telemetry[0]
++    assert entry["phase"] == "create_pr"
++    assert entry["outcome"] == "error"
++
++
++# ---------------------------------------------------------------------------
++# 7. Reviewer-transport phases do NOT append telemetry
++# ---------------------------------------------------------------------------
++
++
++def test_plan_review_does_not_append_telemetry(monkeypatch, tmp_path):
++    """plan_review.run returns no provider field → no telemetry entry appended."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="plan_review")
++
++    def fake_plan_review(td, st):
++        # No 'provider' field — reviewer-transport phase
++        return {"status": "approved", "feedback": "", "log": "", "diff": ""}
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_review", fake_plan_review)
++
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert telemetry == [], f"plan_review should not append telemetry; got {telemetry}"
++
++
++def test_review_code_does_not_append_telemetry(monkeypatch, tmp_path):
++    """review_code.run returns no provider field → no telemetry entry appended."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="review_code")
++
++    def fake_review_code(td, st):
++        return {"status": "approved", "feedback": "", "log": "", "diff": ""}
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "review_code", fake_review_code)
++
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert telemetry == [], f"review_code should not append telemetry; got {telemetry}"
++
++
++def test_rescue_does_not_append_telemetry(monkeypatch, tmp_path):
++    """rescue.run returns no provider field → no telemetry entry appended."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="rescue")
++
++    def fake_rescue(td, st):
++        return {"status": "approved", "feedback": "", "log": "", "diff": ""}
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "rescue", fake_rescue)
++
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert telemetry == [], f"rescue should not append telemetry; got {telemetry}"
++
++
++# ---------------------------------------------------------------------------
++# 8. Non-mutation guarantee
++# ---------------------------------------------------------------------------
++
++
++def test_telemetry_does_not_change_phase_result_status(monkeypatch, tmp_path):
++    """An approved result stays approved; an error result stays error.
++    Telemetry capture never rewrites PhaseResult.status.
++    The error sub-case uses max_retries=0 to stop after one attempt (avoiding
++    the retry loop that would append multiple telemetry entries)."""
++    orch = _load_orchestrator()
++
++    for status in ("approved", "error"):
++        task_dir = _setup_task_dir(tmp_path / status)
++        # max_retries=0 for the error case: an always-erroring runner with retries
++        # allowed would loop (appending multiple entries) before deferring.
++        _setup_state(task_dir, next_phase="plan_outcome", max_retries=0 if status == "error" else 2)
++
++        def fake_runner(td, st, _s=status):
++            return {
++                "status": _s,
++                "feedback": "",
++                "log": "",
++                "diff": "",
++                "provider": "claude",
++                "cost_usd": 1.0,
++                "duration_sec": 1.0,
++                "model": "m",
++            }
++
++        _patch_orchestrator_for_single_phase(
++            monkeypatch, orch, tmp_path / status, task_dir, "plan_outcome", fake_runner
++        )
++        orch.process_task(task_dir)
++
++        saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++        telemetry = saved.get("phase_telemetry", [])
++        assert len(telemetry) == 1
++        assert telemetry[0]["outcome"] == status, f"expected outcome=={status!r}, got {telemetry[0]['outcome']!r}"
++
++
++def test_telemetry_append_error_swallowed_to_stderr(monkeypatch, tmp_path, capsys):
++    """When the telemetry append itself raises (patched to raise RuntimeError),
++    the exception is swallowed to stderr and the phase's dispatch branch is unchanged."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="plan_outcome")
++
++    def fake_runner(td, st):
++        return {
++            "status": "approved",
++            "feedback": "",
++            "log": "",
++            "diff": "",
++            "provider": "claude",
++            "cost_usd": 1.0,
++            "duration_sec": 1.0,
++            "model": "m",
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_runner)
++
++    # Patch build_telemetry_entry to raise
++    monkeypatch.setattr(
++        orch, "build_telemetry_entry", lambda phase, result: (_ for _ in ()).throw(RuntimeError("boom"))
++    )
++
++    orch.process_task(task_dir)
++
++    # Dispatch must still proceed (approved → next phase)
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    # phase_telemetry was never written (build raised before append)
++    # outcome (next_phase) must NOT be "error" or "deferred" due to telemetry
++    assert saved.get("next_phase") != "deferred"
++
++    captured = capsys.readouterr()
++    assert "telemetry" in captured.err.lower() or "boom" in captured.err
++
++
++# ---------------------------------------------------------------------------
++# 9. Legacy state.json without phase_telemetry key
++# ---------------------------------------------------------------------------
++
++
++def test_legacy_state_missing_key_still_appends(monkeypatch, tmp_path):
++    """A state dict that lacks 'phase_telemetry' gets setdefault([]) and the
++    new entry is appended without KeyError."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="plan_outcome")
++
++    # Confirm the on-disk state has NO phase_telemetry key
++    raw = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    raw.pop("phase_telemetry", None)
++    (task_dir / "state.json").write_text(json.dumps(raw), encoding="utf-8")
++
++    def fake_runner(td, st):
++        return {
++            "status": "approved",
++            "feedback": "",
++            "log": "",
++            "diff": "",
++            "provider": "claude",
++            "cost_usd": 0.5,
++            "duration_sec": 2.0,
++            "model": "m",
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_runner)
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert len(telemetry) == 1
++    assert telemetry[0]["provider"] == "claude"
++
++
++# ---------------------------------------------------------------------------
++# 10. State template shape
++# ---------------------------------------------------------------------------
++
++
++def test_state_template_has_phase_telemetry():
++    """state.template.json parses as JSON and contains 'phase_telemetry' as an
++    empty list at the top level."""
++    assert _TEMPLATE_PATH.exists(), f"state.template.json not found at {_TEMPLATE_PATH}"
++    data = json.loads(_TEMPLATE_PATH.read_text(encoding="utf-8"))
++    assert "phase_telemetry" in data, "state.template.json is missing 'phase_telemetry' key"
++    assert data["phase_telemetry"] == [], (
++        f"state.template.json 'phase_telemetry' should be an empty list, got {data['phase_telemetry']!r}"
++    )
++
++
++# ---------------------------------------------------------------------------
++# 11. No-secret-bleed shape
++# ---------------------------------------------------------------------------
++
++
++def test_telemetry_entry_has_exactly_six_allowed_keys(monkeypatch, tmp_path):
++    """The appended entry's keys are exactly {phase, provider, model, cost_usd,
++    duration_sec, outcome} — no free-text field (feedback, log, diff, stderr,
++    stdout, last_failure_log, review text) leaks in."""
++    orch = _load_orchestrator()
++    task_dir = _setup_task_dir(tmp_path)
++    _setup_state(task_dir, next_phase="plan_outcome")
++
++    def fake_runner(td, st):
++        return {
++            "status": "approved",
++            "feedback": "SENSITIVE FEEDBACK",
++            "log": "SENSITIVE LOG",
++            "diff": "SENSITIVE DIFF",
++            "provider": "claude",
++            "cost_usd": 1.0,
++            "duration_sec": 2.0,
++            "model": "claude-test",
++        }
++
++    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_runner)
++    orch.process_task(task_dir)
++
++    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
++    telemetry = saved.get("phase_telemetry", [])
++    assert len(telemetry) == 1
++    entry = telemetry[0]
++    entry_keys = frozenset(entry.keys())
++    assert entry_keys == _EXPECTED_ENTRY_KEYS, f"entry keys mismatch. expected {_EXPECTED_ENTRY_KEYS}, got {entry_keys}"
++    for forbidden in _FORBIDDEN_ENTRY_KEYS:
++        assert forbidden not in entry, f"forbidden key {forbidden!r} leaked into telemetry entry"
++
++
++# ---------------------------------------------------------------------------
++# Helpers for orchestrator tests
++# ---------------------------------------------------------------------------
++
++
++def _fake_proj():
++    """Minimal fake project config."""
++    proj = MagicMock()
++    proj.context_file = str(_REPO_ROOT / ".redteam" / "docs" / "project-context.md")
++    proj.source_dirs = [".redteam/workflows/"]
++    proj.test_dir = ".redteam/tests/"
++    proj.test_file_glob = "test_*.py"
++    proj.verify_command = "bash .redteam/scripts/verify.sh"
++    proj.verification_allowlist = ["bash", "pytest", "ruff"]
++    proj.branch_prefix = "redteam"
++    proj.base_branch = "main"
++    return proj
++
++
++def _make_adapter(fake_result: dict):
++    """Return a fake WorkerAdapter whose invoke() returns fake_result."""
++
++    class _FakeAdapter:
++        name = "fake"
++
++        def invoke(self, *, role, agent, prompt, cwd):
++            return fake_result
++
++    return _FakeAdapter()
++
++
++def _setup_task_dir(tmp_path: Path) -> Path:
++    """Create a minimal task directory with input.md."""
++    task_dir = tmp_path / "tasks" / "task-001"
++    task_dir.mkdir(parents=True)
++    (task_dir / "input.md").write_text("do a thing", encoding="utf-8")
++    return task_dir
++
++
++def _setup_state(task_dir: Path, *, next_phase: str, max_retries: int = 2) -> dict:
++    """Seed a minimal state.json and return the state dict.
++
++    max_retries: set to 0 when the fake runner always returns an error and the test
++    needs exactly one telemetry entry — max_retries=0 causes an immediate defer after
++    the first failure instead of looping through retries (which would append multiple
++    entries and make `len(telemetry) == 1` assertions fail).
++    """
++    state = {
++        "task_id": task_dir.name,
++        "mode": "agent-pair",
++        "phase": next_phase,
++        "next_phase": next_phase,
++        "base_branch": "main",
++        "phases_completed": [],
++        "retries": {},
++        "max_retries_per_phase": max_retries,
++        "models": {"implementer": "claude-sonnet-4-6", "reviewer": "codex"},
++        "phase_telemetry": [],
++        "verification": {},
++        "escape": {"ask_user": False, "reason": None, "return_phase": None},
++    }
++    (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
++    return state
++
++
++def _patch_orchestrator_for_single_phase(
++    monkeypatch,
++    orch,
++    tmp_path: Path,
++    task_dir: Path,
++    phase_name: str,
++    fake_runner,
++) -> None:
++    """Patch orchestrator dependencies so process_task runs exactly one phase."""
++    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
++    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **kw: f"redteam/{task_dir.name}")
++    monkeypatch.setattr(orch, "load_config", lambda *a, **kw: _fake_config())
++    monkeypatch.setattr(orch, "_adversarial_pairing_error", lambda state: None)
++
++    # Run EXACTLY the one target phase: force the phase-advance to terminate the
++    # loop after it, so process_task doesn't walk the rest of PHASE_ORDER (an
++    # "approved" stub advances rather than terminates, which otherwise loops).
++    monkeypatch.setattr(orch, "_next_phase", lambda state, current: "done")
++
++    # Install fake runner; all other runners terminate the loop (approved, next done)
++    def _terminating_runner(td, st):
++        return {"status": "approved", "feedback": "", "log": "", "diff": ""}
++
++    # Build a copy of PHASE_RUNNERS with the fake for the target phase and
++    # terminating dummies for everything else (so loop stops after one real phase).
++    fake_runners = {}
++    for k in orch.PHASE_RUNNERS:
++        if k == phase_name:
++            fake_runners[k] = fake_runner
++        else:
++            fake_runners[k] = _terminating_runner
++    monkeypatch.setattr(orch, "PHASE_RUNNERS", fake_runners)
++
++
++def _fake_config():
++    """Minimal fake config object."""
++    cfg = MagicMock()
++    cfg.tiers = {}
++    cfg.project.base_branch = "main"
++    cfg.project.branch_prefix = "redteam"
++    cfg.project.verify_command = "bash .redteam/scripts/verify.sh"
++    cfg.project.verification_allowlist = ["bash", "pytest", "ruff"]
++    cfg.models.review_stages = None
++    return cfg
+diff --git a/.redteam/workflows/adapters/_protocol.py b/.redteam/workflows/adapters/_protocol.py
+index 2a665ec..60e9099 100644
+--- a/.redteam/workflows/adapters/_protocol.py
++++ b/.redteam/workflows/adapters/_protocol.py
+@@ -82,6 +82,12 @@ class WorkerRunResult(TypedDict):
+     returncode: int
+     stdout: str
+     stderr: str
++    # Telemetry fields — additive, NotRequired so existing callers stay valid.
++    # Claude path populates all four; Codex path omits them (None via .get()).
++    cost_usd: NotRequired[float | None]
++    duration_sec: NotRequired[float | None]
++    model: NotRequired[str | None]
++    provider: NotRequired[str]
+ 
+ 
+ class WorkerAdapter(Protocol):
+diff --git a/.redteam/workflows/adapters/claude.py b/.redteam/workflows/adapters/claude.py
+index 2f3a7ab..1b6d1c9 100644
+--- a/.redteam/workflows/adapters/claude.py
++++ b/.redteam/workflows/adapters/claude.py
+@@ -40,10 +40,44 @@ class ClaudeWorkerAdapter:
+             cwd=cwd,
+             model=claude_model_for_role(self._state, role),
+         )
++        parsed_json = result.get("parsed_json")
++        if parsed_json is None:
++            # No telemetry signal (timeout / transport error / non-result event).
++            # Return only the three base fields so callers that check exact equality
++            # against the legacy shape are not broken (NotRequired fields absent ↔
++            # field omitted, per the TypedDict contract).  Runners read cost_usd /
++            # duration_sec / model via .get() which returns None for absent keys;
++            # runners set provider via worker_provider(state), not from this result.
++            return WorkerRunResult(
++                returncode=result["returncode"],
++                stdout=result["stdout"],
++                stderr=result["stderr"],
++            )
++        cost_usd: float | None = None
++        duration_sec: float | None = None
++        model: str | None = None
++        try:
++            cost_usd = parsed_json.get("total_cost_usd")
++        except Exception:
++            pass
++        try:
++            duration_ms = parsed_json.get("duration_ms")
++            if duration_ms is not None:
++                duration_sec = duration_ms / 1000
++        except Exception:
++            pass
++        try:
++            model = parsed_json.get("model")
++        except Exception:
++            pass
+         return WorkerRunResult(
+             returncode=result["returncode"],
+             stdout=result["stdout"],
+             stderr=result["stderr"],
++            cost_usd=cost_usd,
++            duration_sec=duration_sec,
++            model=model,
++            provider="claude",
+         )
+ 
+ 
+diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
+index 56dc390..76dd167 100644
+--- a/.redteam/workflows/orchestrator.py
++++ b/.redteam/workflows/orchestrator.py
+@@ -49,6 +49,7 @@ from phase_runners import (  # type: ignore[import-not-found]  # noqa: E402
+ from phase_runners._base import (  # type: ignore[import-not-found]  # noqa: E402
+     DEFAULT_TIMEOUT_SEC,
+     PhaseResult,
++    build_telemetry_entry,
+     compute_branch_changed_paths,
+     default_model_for_role,
+     extract_verification_commands,
+@@ -1443,6 +1444,19 @@ def process_task(
+ 
+         result = runner(task_dir, state)
+ 
++        # Telemetry capture: iff the runner invoked a worker adapter, the result
++        # carries a `provider` field (the runner materialization rule's invariant).
++        # Append exactly one entry to state["phase_telemetry"] and swallow any
++        # exception so telemetry never alters a phase's outcome (#phase-0).
++        try:
++            if result.get("provider"):
++                state.setdefault("phase_telemetry", []).append(build_telemetry_entry(phase, result))
++        except Exception as _tele_exc:
++            print(
++                f"[telemetry] error building/appending entry for phase {phase!r}: {_tele_exc}",
++                file=sys.stderr,
++            )
++
+         # Ceiling pre-check (D6, P5): runs BEFORE manual_required, BEFORE the
+         # fallback_audit/staging_audit audit sites, and BEFORE retries/rescue
+         # routing — so a ceiling hit can never be misrouted to rescue (which would
+diff --git a/.redteam/workflows/phase_runners/_base.py b/.redteam/workflows/phase_runners/_base.py
+index 98493e8..f0a6367 100644
+--- a/.redteam/workflows/phase_runners/_base.py
++++ b/.redteam/workflows/phase_runners/_base.py
+@@ -35,10 +35,19 @@ def default_model_for_role(role: str) -> str | None:
+     config-driven (the model-freedom seam): a project sets its own role→model
+     in config.toml. `state.models` still overrides this per task. Lazy import
+     keeps module load free of the config dependency (workflows is on sys.path
+-    by call time, via the orchestrator or a test's path setup)."""
++    by call time, via the orchestrator or a test's path setup).
++
++    Uses `getattr` for the `models` attribute so test fixtures that stub
++    `load_config` with a partial SimpleNamespace (e.g. `SimpleNamespace(project=...)`)
++    gracefully return `None` instead of raising `AttributeError`.
++    """
+     from config import load_config
+ 
+-    return getattr(load_config(repo_root()).models, role, None)
++    cfg = load_config(repo_root())
++    models = getattr(cfg, "models", None)
++    if models is None:
++        return None
++    return getattr(models, role, None)
+ 
+ 
+ PhaseStatus = Literal["approved", "changes_requested", "rescue_required", "ask_user", "error", "manual_required"]
+@@ -66,6 +75,37 @@ class PhaseResult(TypedDict):
+     # "max_wall_clock_sec". Never parsed from reviewer text — set only by the
+     # engine, so a reviewer can't spoof a ceiling record.
+     ceiling_hit: NotRequired[str]
++    # Telemetry fields — additive, NotRequired. Set by runner materialization rule
++    # ONLY on PhaseResult returns that come AFTER a get_worker_adapter().invoke()
++    # call. Phases that invoke no model (rescue, plan_review, review_code in
++    # headless mode, early floor returns) leave these unset. The orchestrator
++    # checks `result.get("provider")` as the sentinel (always present when a worker
++    # was invoked) to decide whether to append a phase_telemetry entry.
++    cost_usd: NotRequired[float | None]
++    duration_sec: NotRequired[float | None]
++    model: NotRequired[str | None]
++    provider: NotRequired[str]
++
++
++def build_telemetry_entry(phase: str, result: "PhaseResult") -> dict:
++    """Build the six-key phase_telemetry dict from a worker-invoking PhaseResult.
++
++    Called by the orchestrator dispatch loop after runner() returns, IFF the result
++    carries a `provider` field (the total-invariant signal that the runner materialization
++    rule set because a worker adapter was invoked). Never raises — the caller wraps in
++    a bare except to swallow errors defensively (telemetry is strictly additive).
++
++    No free-text fields (stdout/stderr/feedback/log/diff) are included — same
++    IR-002/IR-004 posture as `status --json`.
++    """
++    return {
++        "phase": phase,
++        "provider": result["provider"],
++        "model": result.get("model"),
++        "cost_usd": result.get("cost_usd"),
++        "duration_sec": result.get("duration_sec"),
++        "outcome": result["status"],
++    }
+ 
+ 
+ class ClaudeRunResult(TypedDict):
+diff --git a/.redteam/workflows/phase_runners/create_pr.py b/.redteam/workflows/phase_runners/create_pr.py
+index e1aad48..3b5fcaf 100644
+--- a/.redteam/workflows/phase_runners/create_pr.py
++++ b/.redteam/workflows/phase_runners/create_pr.py
+@@ -8,7 +8,7 @@ from pathlib import Path
+ from typing import Any
+ from urllib.parse import urlparse
+ 
+-from adapters import get_worker_adapter
++from adapters import get_worker_adapter, worker_provider
+ 
+ from ._base import (
+     PhaseResult,
+@@ -173,6 +173,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+ 
+     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+     diff = compute_repo_diff(cwd=rr)
++    _tele = dict(
++        cost_usd=result.get("cost_usd"),
++        duration_sec=result.get("duration_sec"),
++        model=result.get("model"),
++        provider=worker_provider(state),
++    )
+ 
+     pr_url_text = read_text_if_exists(task_dir / "pr_url.txt")
+     pr_md_text = read_text_if_exists(task_dir / "pr.md")
+@@ -191,6 +197,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             feedback="",
+             log=result["stdout"] + f"\nPR URL: {pr_url_text.strip()}",
+             diff=diff,
++            **_tele,
+         )
+ 
+     feedback_lines = [
+@@ -201,4 +208,4 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         f"stderr (truncated): {result['stderr'][:2000]}",
+     ]
+     feedback = "\n".join(feedback_lines)
+-    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+diff --git a/.redteam/workflows/phase_runners/implement.py b/.redteam/workflows/phase_runners/implement.py
+index 65c837f..02da502 100644
+--- a/.redteam/workflows/phase_runners/implement.py
++++ b/.redteam/workflows/phase_runners/implement.py
+@@ -10,7 +10,7 @@ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any
+ 
+-from adapters import get_worker_adapter
++from adapters import get_worker_adapter, worker_provider
+ 
+ from ._base import (
+     PhaseResult,
+@@ -657,11 +657,17 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         fb = f"could not snapshot the working tree before implement ({exc})."
+         return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+     result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
++    _tele = dict(
++        cost_usd=result.get("cost_usd"),
++        duration_sec=result.get("duration_sec"),
++        model=result.get("model"),
++        provider=worker_provider(state),
++    )
+     try:
+         diff, diff_sha = _write_current_diff(task_dir, rr, base_branch)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not capture the implementation diff ({exc})."
+-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
+ 
+     verification = state.setdefault("verification", {})
+     verification["last_diff_sha256"] = diff_sha
+@@ -673,7 +679,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             f"returncode={result['returncode']}\n"
+             f"stderr (truncated):\n{result['stderr'][:2000]}"
+         )
+-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+ 
+     commands = state.get("verification", {}).get("commands") or []
+     if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
+@@ -690,7 +696,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             "legacy state is missing verification.verify_allowlist; re-run planning "
+             "to snapshot the verification allowlist."
+         )
+-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+     rc, verify_output = _run_verification_commands(rr, commands, project_verify_command, verify_allowlist)
+ 
+     verification["commands"] = commands
+@@ -701,12 +707,12 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
+-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
+     try:
+         diff, diff_sha = _write_current_diff(task_dir, rr, base_branch)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
+-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
+     verification["last_diff_sha256"] = diff_sha
+ 
+     if rc == 0:
+@@ -730,7 +736,7 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             # closed (don't approve a possibly-stale range); the generic retry path
+             # re-runs, a repeat defers (#50 review PR-001).
+             feedback = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
+-            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+         stray = sorted(set(layer1) | set(layer2) | set(layer3))
+         if stray:
+             feedback = (
+@@ -740,16 +746,17 @@ def _run_agent_pair(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+                 "(they belong in the implementation diff), or remove them — refusing to "
+                 "hand a stale committed range to review."
+             )
+-            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+         return PhaseResult(
+             status="approved",
+             feedback="",
+             log=result["stdout"] + "\n--- verification ---\n" + verify_output,
+             diff=diff,
++            **_tele,
+         )
+ 
+     feedback = f"verification failed (exit {rc}). Address the failures below and try again.\n\n{verify_output[-4000:]}"
+-    return PhaseResult(status="changes_requested", feedback=feedback, log=feedback, diff=diff)
++    return PhaseResult(status="changes_requested", feedback=feedback, log=feedback, diff=diff, **_tele)
+ 
+ 
+ def _tdd_base_prompt(task_dir: Path, proj: Any) -> str:
+@@ -843,6 +850,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+ 
+     result = get_worker_adapter(state).invoke(role="implementer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+     diff = compute_repo_diff(cwd=rr)
++    _tele = dict(
++        cost_usd=result.get("cost_usd"),
++        duration_sec=result.get("duration_sec"),
++        model=result.get("model"),
++        provider=worker_provider(state),
++    )
+ 
+     if result["returncode"] != 0:
+         feedback = (
+@@ -850,7 +863,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             f"returncode={result['returncode']}\n"
+             f"stderr (truncated):\n{result['stderr'][:2000]}"
+         )
+-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+ 
+     rc, verify_output = _run_verify_sh(rr, verify_argv)
+ 
+@@ -863,12 +876,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         _commit_worker_diff(task_dir, state, rr, before_untracked, before_tracked)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not commit the implementer's changes ({exc}); refusing to hand a stale range to review."
+-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
+     try:
+         diff, _ = _write_current_diff(task_dir, rr, base_branch, _committed_range_diff(rr, base_branch))
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not regenerate the review diff after commit ({exc}); refusing to approve on a partial range."
+-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
+ 
+     if rc == 0:
+         # Three-layer integrity gate (#50 + #112 + IR-001): verify passed on the
+@@ -885,7 +898,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             layer3 = _uncommitted_plan_affected_paths(rr, plan_affected)
+         except (OSError, RuntimeError) as exc:
+             fb = f"could not verify commit integrity ({exc}); refusing to hand a possibly-stale range to review."
+-            return PhaseResult(status="error", feedback=fb, log=fb, diff=diff)
++            return PhaseResult(status="error", feedback=fb, log=fb, diff=diff, **_tele)
+         stray = sorted(set(layer1) | set(layer2) | set(layer3))
+         if stray:
+             feedback = (
+@@ -895,12 +908,13 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+                 "(they belong in the implementation diff), or remove them — refusing to "
+                 "hand a stale committed range to review."
+             )
+-            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+         return PhaseResult(
+             status="approved",
+             feedback="",
+             log=result["stdout"] + "\n--- verify.sh ---\n" + verify_output,
+             diff=diff,
++            **_tele,
+         )
+ 
+     feedback = f"verify.sh failed (exit {rc}). Address the failures below and try again.\n\n{verify_output[-4000:]}"
+@@ -909,4 +923,5 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         feedback=feedback,
+         log=feedback,
+         diff=diff,
++        **_tele,
+     )
+diff --git a/.redteam/workflows/phase_runners/plan_outcome.py b/.redteam/workflows/phase_runners/plan_outcome.py
+index 74bdbf1..08052f0 100644
+--- a/.redteam/workflows/phase_runners/plan_outcome.py
++++ b/.redteam/workflows/phase_runners/plan_outcome.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ from pathlib import Path
+ from typing import Any
+ 
+-from adapters import get_worker_adapter
++from adapters import get_worker_adapter, worker_provider
+ 
+ from ._base import (
+     PhaseResult,
+@@ -36,10 +36,16 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     rr = repo_root()
+     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+     diff = compute_repo_diff(cwd=rr)
++    _tele = dict(
++        cost_usd=result.get("cost_usd"),
++        duration_sec=result.get("duration_sec"),
++        model=result.get("model"),
++        provider=worker_provider(state),
++    )
+ 
+     outcome_path = task_dir / "outcome.md"
+     if result["returncode"] == 0 and outcome_path.exists() and outcome_path.stat().st_size > 0:
+-        return PhaseResult(status="approved", feedback="", log=result["stdout"], diff=diff)
++        return PhaseResult(status="approved", feedback="", log=result["stdout"], diff=diff, **_tele)
+ 
+     feedback = (
+         f"outcome.md was not produced or is empty.\n"
+@@ -51,4 +57,5 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         feedback=feedback,
+         log=feedback,
+         diff=diff,
++        **_tele,
+     )
+diff --git a/.redteam/workflows/phase_runners/verify_test.py b/.redteam/workflows/phase_runners/verify_test.py
+index 9e98d93..37b54db 100644
+--- a/.redteam/workflows/phase_runners/verify_test.py
++++ b/.redteam/workflows/phase_runners/verify_test.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ from pathlib import Path
+ from typing import Any
+ 
+-from adapters import get_worker_adapter
++from adapters import get_worker_adapter, worker_provider
+ 
+ from ._base import (
+     PhaseResult,
+@@ -52,6 +52,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+     rr = repo_root()
+     result = get_worker_adapter(state).invoke(role="reviewer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+     diff = compute_repo_diff(cwd=rr)
++    _tele = dict(
++        cost_usd=result.get("cost_usd"),
++        duration_sec=result.get("duration_sec"),
++        model=result.get("model"),
++        provider=worker_provider(state),
++    )
+ 
+     review_path = task_dir / "test_review.md"
+     review_text = read_text_if_exists(review_path)
+@@ -61,21 +67,22 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             f"returncode={result['returncode']}\n"
+             f"stderr (truncated):\n{result['stderr'][:2000]}"
+         )
+-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+ 
+     decision = parse_review_decision(review_text)
+     if decision == "APPROVED":
+-        return PhaseResult(status="approved", feedback="", log=review_text, diff=diff)
++        return PhaseResult(status="approved", feedback="", log=review_text, diff=diff, **_tele)
+     if decision == "CHANGES_REQUESTED":
+         return PhaseResult(
+             status="changes_requested",
+             feedback=review_text,
+             log=review_text,
+             diff=diff,
++            **_tele,
+         )
+     feedback = (
+         "test_review.md is missing a final `REVIEW_DECISION:` line. "
+         "The verifier output is malformed.\n\n"
+         f"Last 30 lines:\n{chr(10).join(review_text.splitlines()[-30:])}"
+     )
+-    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
++    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+diff --git a/.redteam/workflows/phase_runners/write_test.py b/.redteam/workflows/phase_runners/write_test.py
+index cf3afc9..0c71fbb 100644
+--- a/.redteam/workflows/phase_runners/write_test.py
++++ b/.redteam/workflows/phase_runners/write_test.py
+@@ -19,7 +19,7 @@ from __future__ import annotations
+ from pathlib import Path
+ from typing import Any
+ 
+-from adapters import get_worker_adapter
++from adapters import get_worker_adapter, worker_provider
+ 
+ from ._base import (
+     PhaseResult,
+@@ -121,6 +121,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+ 
+     task_id = str(state.get("task_id") or task_dir.name)
+     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
++    _tele = dict(
++        cost_usd=result.get("cost_usd"),
++        duration_sec=result.get("duration_sec"),
++        model=result.get("model"),
++        provider=worker_provider(state),
++    )
+ 
+     # Task-owned sources only — NEVER `git diff` unstaged/staged (operator mods).
+     # committed_tests is message-scoped to THIS task's prior write-test commits, so it is
+@@ -131,7 +137,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         committed_tests = _committed_test_files(rr, proj, task_id, base_branch)
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not enumerate the task's test files ({exc})."
+-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
+     task_tests = sorted(set(new_untracked) | set(prior_manifest) | set(committed_tests))
+ 
+     if result["returncode"] != 0 or not task_tests:
+@@ -143,7 +149,11 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+             f"stderr (truncated):\n{result['stderr'][:2000]}"
+         )
+         return PhaseResult(
+-            status="error", feedback=feedback, log=feedback, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
++            status="error",
++            feedback=feedback,
++            log=feedback,
++            diff=compute_branch_diff(cwd=rr, base_branch=base_branch),
++            **_tele,
+         )
+ 
+     # Reject an owned path that EXISTS as a symlink / non-regular file (the contract is
+@@ -153,14 +163,18 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         if p.is_symlink() or (p.exists() and not p.is_file()):
+             fb = f"refusing to stage a non-regular/symlink test path: {rel}"
+             return PhaseResult(
+-                status="error", feedback=fb, log=fb, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
++                status="error",
++                feedback=fb,
++                log=fb,
++                diff=compute_branch_diff(cwd=rr, base_branch=base_branch),
++                **_tele,
+             )
+ 
+     try:
+         commit_paths(rr, task_tests, _WRITE_TEST_COMMIT_MSG.format(task_id=task_id))
+     except (RuntimeError, OSError) as exc:
+         fb = f"could not commit the test files ({exc}); refusing to hand a stale range to review."
+-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
++        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
+ 
+     # Persist the CURRENT LIVE set: drop any path the worker deleted/renamed away (its
+     # deletion is still committed). The manifest is thus always the live test files.
+@@ -173,4 +187,5 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
+         feedback="",
+         log=result["stdout"] + "\n--- task test files ---\n" + "\n".join(task_tests),
+         diff=compute_branch_diff(cwd=rr, base_branch=base_branch),
++        **_tele,
+     )

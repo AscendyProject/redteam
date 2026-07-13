@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from adapters import get_worker_adapter
+from adapters import get_worker_adapter, worker_provider
 
 from ._base import (
     PhaseResult,
@@ -36,10 +36,16 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     rr = repo_root()
     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)
+    _tele = dict(
+        cost_usd=result.get("cost_usd"),
+        duration_sec=result.get("duration_sec"),
+        model=result.get("model"),
+        provider=worker_provider(state),
+    )
 
     outcome_path = task_dir / "outcome.md"
     if result["returncode"] == 0 and outcome_path.exists() and outcome_path.stat().st_size > 0:
-        return PhaseResult(status="approved", feedback="", log=result["stdout"], diff=diff)
+        return PhaseResult(status="approved", feedback="", log=result["stdout"], diff=diff, **_tele)
 
     feedback = (
         f"outcome.md was not produced or is empty.\n"
@@ -51,4 +57,5 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         feedback=feedback,
         log=feedback,
         diff=diff,
+        **_tele,
     )

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from adapters import get_worker_adapter
+from adapters import get_worker_adapter, worker_provider
 
 from ._base import (
     PhaseResult,
@@ -173,6 +173,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)
+    _tele = dict(
+        cost_usd=result.get("cost_usd"),
+        duration_sec=result.get("duration_sec"),
+        model=result.get("model"),
+        provider=worker_provider(state),
+    )
 
     pr_url_text = read_text_if_exists(task_dir / "pr_url.txt")
     pr_md_text = read_text_if_exists(task_dir / "pr.md")
@@ -191,6 +197,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             feedback="",
             log=result["stdout"] + f"\nPR URL: {pr_url_text.strip()}",
             diff=diff,
+            **_tele,
         )
 
     feedback_lines = [
@@ -201,4 +208,4 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         f"stderr (truncated): {result['stderr'][:2000]}",
     ]
     feedback = "\n".join(feedback_lines)
-    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)

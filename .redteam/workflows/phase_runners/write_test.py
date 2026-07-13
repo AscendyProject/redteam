@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from adapters import get_worker_adapter
+from adapters import get_worker_adapter, worker_provider
 
 from ._base import (
     PhaseResult,
@@ -121,6 +121,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     task_id = str(state.get("task_id") or task_dir.name)
     result = get_worker_adapter(state).invoke(role="planner", agent=AGENT_NAME, prompt=prompt, cwd=rr)
+    _tele = dict(
+        cost_usd=result.get("cost_usd"),
+        duration_sec=result.get("duration_sec"),
+        model=result.get("model"),
+        provider=worker_provider(state),
+    )
 
     # Task-owned sources only — NEVER `git diff` unstaged/staged (operator mods).
     # committed_tests is message-scoped to THIS task's prior write-test commits, so it is
@@ -131,7 +137,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         committed_tests = _committed_test_files(rr, proj, task_id, base_branch)
     except (RuntimeError, OSError) as exc:
         fb = f"could not enumerate the task's test files ({exc})."
-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
     task_tests = sorted(set(new_untracked) | set(prior_manifest) | set(committed_tests))
 
     if result["returncode"] != 0 or not task_tests:
@@ -143,7 +149,11 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
         return PhaseResult(
-            status="error", feedback=feedback, log=feedback, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
+            status="error",
+            feedback=feedback,
+            log=feedback,
+            diff=compute_branch_diff(cwd=rr, base_branch=base_branch),
+            **_tele,
         )
 
     # Reject an owned path that EXISTS as a symlink / non-regular file (the contract is
@@ -153,14 +163,18 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         if p.is_symlink() or (p.exists() and not p.is_file()):
             fb = f"refusing to stage a non-regular/symlink test path: {rel}"
             return PhaseResult(
-                status="error", feedback=fb, log=fb, diff=compute_branch_diff(cwd=rr, base_branch=base_branch)
+                status="error",
+                feedback=fb,
+                log=fb,
+                diff=compute_branch_diff(cwd=rr, base_branch=base_branch),
+                **_tele,
             )
 
     try:
         commit_paths(rr, task_tests, _WRITE_TEST_COMMIT_MSG.format(task_id=task_id))
     except (RuntimeError, OSError) as exc:
         fb = f"could not commit the test files ({exc}); refusing to hand a stale range to review."
-        return PhaseResult(status="error", feedback=fb, log=fb, diff="")
+        return PhaseResult(status="error", feedback=fb, log=fb, diff="", **_tele)
 
     # Persist the CURRENT LIVE set: drop any path the worker deleted/renamed away (its
     # deletion is still committed). The manifest is thus always the live test files.
@@ -173,4 +187,5 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         feedback="",
         log=result["stdout"] + "\n--- task test files ---\n" + "\n".join(task_tests),
         diff=compute_branch_diff(cwd=rr, base_branch=base_branch),
+        **_tele,
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from adapters import get_worker_adapter
+from adapters import get_worker_adapter, worker_provider
 
 from ._base import (
     PhaseResult,
@@ -52,6 +52,12 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     rr = repo_root()
     result = get_worker_adapter(state).invoke(role="reviewer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
     diff = compute_repo_diff(cwd=rr)
+    _tele = dict(
+        cost_usd=result.get("cost_usd"),
+        duration_sec=result.get("duration_sec"),
+        model=result.get("model"),
+        provider=worker_provider(state),
+    )
 
     review_path = task_dir / "test_review.md"
     review_text = read_text_if_exists(review_path)
@@ -61,21 +67,22 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"returncode={result['returncode']}\n"
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
 
     decision = parse_review_decision(review_text)
     if decision == "APPROVED":
-        return PhaseResult(status="approved", feedback="", log=review_text, diff=diff)
+        return PhaseResult(status="approved", feedback="", log=review_text, diff=diff, **_tele)
     if decision == "CHANGES_REQUESTED":
         return PhaseResult(
             status="changes_requested",
             feedback=review_text,
             log=review_text,
             diff=diff,
+            **_tele,
         )
     feedback = (
         "test_review.md is missing a final `REVIEW_DECISION:` line. "
         "The verifier output is malformed.\n\n"
         f"Last 30 lines:\n{chr(10).join(review_text.splitlines()[-30:])}"
     )
-    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)

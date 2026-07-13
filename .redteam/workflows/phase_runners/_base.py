@@ -35,10 +35,19 @@ def default_model_for_role(role: str) -> str | None:
     config-driven (the model-freedom seam): a project sets its own role→model
     in config.toml. `state.models` still overrides this per task. Lazy import
     keeps module load free of the config dependency (workflows is on sys.path
-    by call time, via the orchestrator or a test's path setup)."""
+    by call time, via the orchestrator or a test's path setup).
+
+    Uses `getattr` for the `models` attribute so test fixtures that stub
+    `load_config` with a partial SimpleNamespace (e.g. `SimpleNamespace(project=...)`)
+    gracefully return `None` instead of raising `AttributeError`.
+    """
     from config import load_config
 
-    return getattr(load_config(repo_root()).models, role, None)
+    cfg = load_config(repo_root())
+    models = getattr(cfg, "models", None)
+    if models is None:
+        return None
+    return getattr(models, role, None)
 
 
 PhaseStatus = Literal["approved", "changes_requested", "rescue_required", "ask_user", "error", "manual_required"]
@@ -66,6 +75,37 @@ class PhaseResult(TypedDict):
     # "max_wall_clock_sec". Never parsed from reviewer text — set only by the
     # engine, so a reviewer can't spoof a ceiling record.
     ceiling_hit: NotRequired[str]
+    # Telemetry fields — additive, NotRequired. Set by runner materialization rule
+    # ONLY on PhaseResult returns that come AFTER a get_worker_adapter().invoke()
+    # call. Phases that invoke no model (rescue, plan_review, review_code in
+    # headless mode, early floor returns) leave these unset. The orchestrator
+    # checks `result.get("provider")` as the sentinel (always present when a worker
+    # was invoked) to decide whether to append a phase_telemetry entry.
+    cost_usd: NotRequired[float | None]
+    duration_sec: NotRequired[float | None]
+    model: NotRequired[str | None]
+    provider: NotRequired[str]
+
+
+def build_telemetry_entry(phase: str, result: "PhaseResult") -> dict:
+    """Build the six-key phase_telemetry dict from a worker-invoking PhaseResult.
+
+    Called by the orchestrator dispatch loop after runner() returns, IFF the result
+    carries a `provider` field (the total-invariant signal that the runner materialization
+    rule set because a worker adapter was invoked). Never raises — the caller wraps in
+    a bare except to swallow errors defensively (telemetry is strictly additive).
+
+    No free-text fields (stdout/stderr/feedback/log/diff) are included — same
+    IR-002/IR-004 posture as `status --json`.
+    """
+    return {
+        "phase": phase,
+        "provider": result["provider"],
+        "model": result.get("model"),
+        "cost_usd": result.get("cost_usd"),
+        "duration_sec": result.get("duration_sec"),
+        "outcome": result["status"],
+    }
 
 
 class ClaudeRunResult(TypedDict):
