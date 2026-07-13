@@ -802,5 +802,10 @@ def test_parser_adversarial_empty_backtick_span_skipped(tmp_path):
 
     result = impl._plan_affected_files(task_dir)
 
-    assert not any(p == "" for p in result), "empty backtick span must not produce an empty-string path"
-    assert "docs/good.md" in result, "well-formed entry after adversarial bullet must still be collected"
+    # Exact equality: the malformed bullet must be skipped entirely (fail-closed),
+    # so only the well-formed bare-path bullet contributes.  Pre-change parsers that
+    # used strip("`") would extract the residue "— reason after empty span" as a
+    # spurious path, making result != frozenset({"docs/good.md"}) and failing here.
+    assert result == frozenset({"docs/good.md"}), (
+        f"empty backtick span must be skipped; only the well-formed bullet may be collected, got {result!r}"
+    )
