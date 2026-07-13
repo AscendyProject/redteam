@@ -1,0 +1,45 @@
+# Operator decision on the escalated plan_review (delegation clause)
+
+The reviewer correctly refused to approve a plan that left the model-invoking
+boundary as "operator to confirm." Resolving it here (goal.md delegates
+plan-level scope questions to the operator; this is not a security boundary).
+
+**The boundary is `get_worker_adapter`.** Phase 0 records a `phase_telemetry`
+entry for every phase that invokes `get_worker_adapter(state).invoke(...)` — no
+more, no less. Concretely:
+
+- **IN (PR-001):** `create_pr` **is included.** It calls
+  `get_worker_adapter(state).invoke(...)` (`create_pr.py:174`) for the pr-author
+  model, so it has a real cost/duration and must record an entry — same as
+  `plan_outcome`, `implement`, and the TDD `write_test` / `verify_test`. Update
+  outcome.md's Affected files + Done-when to include `create_pr.py` copying its
+  `WorkerRunResult` telemetry into its returned `PhaseResult`, and add a
+  create_pr telemetry test. No "operator to confirm" may remain in the plan.
+
+- **Materialize nulls after any worker invocation (PR-002):** a phase that
+  invoked the worker adapter records an entry **even when the numeric signal is
+  absent** (e.g. the Codex worker path, which exposes no cost). After any
+  `get_worker_adapter(...).invoke(...)`, the runner sets
+  `cost_usd` / `duration_sec` / `model` to their value **or `None`** and
+  `provider` to the resolved provider — so a Codex-driven worker phase yields a
+  well-formed entry `{provider:"codex", cost_usd:null, duration_sec:null,
+  model:null, outcome:...}`, never a silently-missing entry. The Codex adapter
+  itself stays unmodified (stdout-only); the runner materializes the nulls. This
+  keeps the "one entry per worker-adapter invocation" invariant total.
+
+- **OUT — reviewer-transport phases:** `plan_review` and `review_code` invoke
+  the **reviewer** transport (`review_with_fallback` / the reviewer adapter),
+  **not** `get_worker_adapter`. They are OUT of Phase 0 — reviewer-cost capture
+  is the separate #92 track, and Phase 0 must not touch the reviewer transport.
+  Do not plumb telemetry through `ReviewResult`.
+
+- **OUT — `decompose.py` (PR-003):** it invokes the worker adapter but is the
+  goal-decomposer path, **not** a per-task `PHASE_RUNNERS` runner in the
+  `process_task` dispatch loop. Out of Phase 0 scope; the per-task telemetry
+  loop never dispatches it.
+
+Rule of thumb for the implementer: grep `get_worker_adapter` in
+`phase_runners/*.py`; every hit inside a `PHASE_RUNNERS` runner records
+telemetry (materializing nulls), and nothing else does.
+
+USER_DECISION: REVISE_PLAN
