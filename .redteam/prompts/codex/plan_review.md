@@ -11,7 +11,18 @@ You are reviewing Claude's plan before implementation.
 
 ## Output
 
-Overwrite `plan_review.md` in the task directory, then create `plan_review.done`. Do not append to an existing review file.
+The harness invokes this review two ways, and the output channel differs:
+
+- **Headless adapter (default — read-only sandbox):** the harness captures your
+  review from **stdout** and persists it itself. Output the entire review to
+  stdout and do **not** write any file or create any `.done` sentinel — file
+  writes are impossible under the read-only sandbox and are not needed. This is
+  the default; the harness prompt that reaches you also states it.
+- **Manual fallback only** (a human or agent running Codex by hand, outside the
+  read-only adapter): overwrite `plan_review.md` in the task directory, then
+  create `plan_review.done`. Do not append to an existing review file.
+
+Either way, end with exactly one `REVIEW_DECISION:` line (see Decision below).
 
 ## Scope discipline
 
