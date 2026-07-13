@@ -41,6 +41,24 @@ def test_plan_review_prompt_flags_saturating_specs() -> None:
     assert "degenerate" in body
 
 
+def test_review_prompts_are_channel_aware_for_read_only_adapter() -> None:
+    """#144: the headless review adapter runs `codex exec --sandbox read-only` and
+    captures the review from stdout, but the prompt files instructed an unconditional
+    file write + `.done` sentinel — impossible under read-only, so a strict Codex
+    burned turns / stalled to timeout and fell back to manual. The `## Output` section
+    must make the channel explicit: read-only adapter → stdout only, no writes; the
+    file-write + `.done` sentinel is qualified as the MANUAL fallback path only.
+    """
+    for name, sentinel in (("code_review.md", "code_review.done"), ("plan_review.md", "plan_review.done")):
+        body = _read(name)
+        assert "read-only" in body  # the adapter's sandbox is named
+        assert "stdout" in body  # the adapter's actual output channel
+        # the write + sentinel instruction must be scoped to the manual fallback,
+        # not stated unconditionally (which contradicts the read-only adapter path)
+        assert "manual fallback" in body
+        assert sentinel in body  # the manual path still documents the sentinel
+
+
 def test_standalone_review_prompt_keeps_output_validity_active() -> None:
     """#97 review (IR-001): the standalone `review` surface SUSPENDS code_review.md's
     Required Checks (#103), so a new diff-level check placed there would be skipped on
