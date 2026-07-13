@@ -1,0 +1,11 @@
+{
+  "goal": "Capture per-phase model/cost/duration/outcome telemetry from the Claude worker's result event and persist it to state.json (Phase 0 of #146).",
+  "ceilings": {
+    "max_tasks": 1
+  },
+  "tasks": {
+    "task-001-phase-telemetry": {
+      "depends_on": []
+    }
+  }
+}
