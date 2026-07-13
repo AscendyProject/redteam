@@ -79,7 +79,7 @@ collected 754 items
 ...                                                                      [ 98%]
 .redteam/tests/test_verify_command_config.py ............                [100%]
 
-======================== 754 passed in 96.80s (0:01:36) ========================
+======================= 754 passed in 138.12s (0:02:18) ========================
 ✅ verify.sh OK
 
 [exit 0]
