@@ -702,3 +702,110 @@ def test_ir001_integrity_gate_refuses_uncommitted_plan_affected_path(monkeypatch
         f"integrity gate must refuse when a plan-affected path is dirty after commit; got {result['status']!r}"
     )
     assert doc_path in result["feedback"], "feedback must name the uncommitted plan-affected path"
+
+
+# =============================================================================
+# 14. Parser — backtick form with description separator regression (#149)
+# =============================================================================
+
+
+def test_parser_backtick_form_em_dash_separator(tmp_path):
+    """Standard backtick form '- `path` — reason' (em-dash separator) extracts the exact path (#149)."""
+    impl = _impl()
+    _, task_dir = _make_task_layout(tmp_path)
+
+    (task_dir / "outcome.md").write_text(
+        "## Affected files\n- `.redteam/templates/x.json` — one-line reason\n",
+        encoding="utf-8",
+    )
+
+    result = impl._plan_affected_files(task_dir)
+
+    assert ".redteam/templates/x.json" in result, "backtick form with em-dash separator must parse to the exact path"
+    assert not any("reason" in p for p in result), "description residue must not appear in extracted path"
+    assert not any(p.endswith("`") for p in result), "trailing backtick must not appear in extracted path"
+
+
+def test_parser_backtick_new_inside_with_em_dash_separator(tmp_path):
+    """Standard `- `(new) path` — reason` form: (new) inside backtick + em-dash separator."""
+    impl = _impl()
+    _, task_dir = _make_task_layout(tmp_path)
+
+    (task_dir / "outcome.md").write_text(
+        "## Affected files\n- `(new) .redteam/templates/x.json` — new file added\n",
+        encoding="utf-8",
+    )
+
+    result = impl._plan_affected_files(task_dir)
+
+    assert ".redteam/templates/x.json" in result
+    assert not any("(new)" in p for p in result), "(new) prefix must not appear in extracted path"
+    assert not any("reason" in p for p in result), "description residue must not appear in extracted path"
+
+
+def test_parser_bare_path_no_separator(tmp_path):
+    """Bare `- path/to/file` (no description, no backticks) parses to that exact path."""
+    impl = _impl()
+    _, task_dir = _make_task_layout(tmp_path)
+
+    (task_dir / "outcome.md").write_text(
+        "## Affected files\n- .redteam/workflows/impl.py\n",
+        encoding="utf-8",
+    )
+
+    result = impl._plan_affected_files(task_dir)
+
+    assert ".redteam/workflows/impl.py" in result
+
+
+def test_parser_bare_path_hyphen_separator(tmp_path):
+    """Bare `- path/to/file - reason` (hyphen separator) parses to the path only."""
+    impl = _impl()
+    _, task_dir = _make_task_layout(tmp_path)
+
+    (task_dir / "outcome.md").write_text(
+        "## Affected files\n- .redteam/workflows/impl.py - modify the parser\n",
+        encoding="utf-8",
+    )
+
+    result = impl._plan_affected_files(task_dir)
+
+    assert ".redteam/workflows/impl.py" in result
+    assert not any("modify" in p for p in result), "description residue must not appear in extracted path"
+
+
+def test_parser_adversarial_multiple_backtick_spans_yields_only_first(tmp_path):
+    """Adversarial: bullet with two backtick spans yields only the first — never both (#149)."""
+    impl = _impl()
+    _, task_dir = _make_task_layout(tmp_path)
+
+    (task_dir / "outcome.md").write_text(
+        "## Affected files\n- `docs/a.md` and `docs/b.md` — dual path attempt\n",
+        encoding="utf-8",
+    )
+
+    result = impl._plan_affected_files(task_dir)
+
+    assert "docs/a.md" in result, "first backtick span must be extracted"
+    assert "docs/b.md" not in result, "second backtick span must not produce a second exemption"
+
+
+def test_parser_adversarial_empty_backtick_span_skipped(tmp_path):
+    """Adversarial: empty backtick span is skipped (fail-closed) — no over-exemption (#149)."""
+    impl = _impl()
+    _, task_dir = _make_task_layout(tmp_path)
+
+    (task_dir / "outcome.md").write_text(
+        "## Affected files\n- `` — reason after empty span\n- docs/good.md\n",
+        encoding="utf-8",
+    )
+
+    result = impl._plan_affected_files(task_dir)
+
+    # Exact equality: the malformed bullet must be skipped entirely (fail-closed),
+    # so only the well-formed bare-path bullet contributes.  Pre-change parsers that
+    # used strip("`") would extract the residue "— reason after empty span" as a
+    # spurious path, making result != frozenset({"docs/good.md"}) and failing here.
+    assert result == frozenset({"docs/good.md"}), (
+        f"empty backtick span must be skipped; only the well-formed bullet may be collected, got {result!r}"
+    )

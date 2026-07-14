@@ -1,0 +1,77 @@
+## What
+Make `_plan_affected_files` in `.redteam/workflows/phase_runners/implement.py`
+extract the correct single repo-relative path from the standard
+`` - `path/to/file` — one-line reason `` bullet emitted by the outcome-planner
+template, so that a plan-declared out-of-scope file is actually exempted by the
+#137 pre-worker floor — without ever widening exemption to more than that one
+declared path.
+
+## Why
+Issue #149: `_plan_affected_files` currently only strips leading/trailing
+backtick runs, so on the standard template bullet `` - `path/to/file` — reason ``
+the closing backtick + ` — reason` residue survives (`raw.strip("`")` peels the
+leading backtick, but the line ends in prose, not a backtick). The parsed
+"path" never matches the real git path, so a legitimately-declared **out-of-scope**
+file is not exempted and the #137 pre-worker floor fail-closes — the exact false
+positive that self-blocked the #146 Phase 0 goal run. The fix must stay
+strictly narrower-or-equal in exemption: never widen beyond the one declared
+path (security boundary — floor exemption).
+
+## Done-when
+- [ ] `_plan_affected_files` parses `` - `.redteam/templates/x.json` — one-line reason ``
+      to `frozenset({".redteam/templates/x.json"})` (exact string equality —
+      no trailing backtick, no ` — reason` residue, no directory prefix).
+- [ ] A new regression test in `.redteam/tests/test_floor_plan_affected_files_exemption.py`
+      asserts the standard `` - `path` — reason `` form with an out-of-scope path
+      is present in the returned set (positive case for #149).
+- [ ] A new adversarial regression test in the same file asserts that a
+      malformed / comment-laden bullet yields either the correct single path or
+      an empty result — never a broad path, never a directory prefix, never a
+      second path per bullet.
+- [ ] Existing behaviour preserved and asserted still-green by the pre-existing
+      cases in `test_floor_plan_affected_files_exemption.py`:
+      bare `- path`, `- (new) path` (case-insensitive, positional, single
+      occurrence), absolute-path skip, `..`-segment skip, `\` → `/`
+      normalization, missing/unreadable `outcome.md` → empty frozenset,
+      no-heading → empty frozenset, stop-at-same-or-higher-heading boundary,
+      set-once snapshot semantics, cross-run trust-root floor NOT exempted.
+- [ ] A bare `- path/to/file` bullet with no description still parses to
+      `path/to/file` (no separator required).
+- [ ] The description separator handling accepts both ` — ` (em dash) and
+      ` - ` (hyphen) when the path is bare (no backticks).
+- [ ] `bash .redteam/scripts/verify.sh` (ruff + pytest over `.redteam/`) exits 0.
+- [ ] No code outside `.redteam/workflows/phase_runners/implement.py` and
+      `.redteam/tests/test_floor_plan_affected_files_exemption.py` is modified.
+- [ ] Inside `implement.py`, only `_plan_affected_files`'s per-bullet
+      path-extraction logic changes; `_floor_outside_scope`,
+      `_cross_run_trust_root_floor`, `_is_harness_artifact`,
+      `_get_or_set_plan_affected_files_baseline`, the commit/integrity gate,
+      and every guard listed in the input brief (absolute skip, `..` skip,
+      empty skip, `\` → `/`, fail-closed empty frozenset, stop-at-heading)
+      remain byte-identical in behaviour.
+- [ ] The engine adds no non-stdlib import (`re` is already imported).
+
+## Verification
+- Tests: test_parser_backtick_form_em_dash_separator, test_parser_backtick_new_inside_with_em_dash_separator, test_parser_bare_path_no_separator, test_parser_bare_path_hyphen_separator, test_parser_adversarial_multiple_backtick_spans_yields_only_first, test_parser_adversarial_empty_backtick_span_skipped
+- Verify command: `bash .redteam/scripts/verify.sh` ✅
+
+## Code review summary
+- Diff summary: parser change is scoped to `_plan_affected_files` in
+  `.redteam/workflows/phase_runners/implement.py` — backtick bullets extract
+  only the first closed non-empty span (malformed/empty spans skipped);
+  bare bullets split only on ` — ` or ` - ` (whole line if neither).
+- Existing normalization and absolute/`..` fail-closed guards remain in place;
+  `_floor_outside_scope` still uses direct equality against `plan_affected`,
+  not prefix or directory matching — exact-path exemption boundary unchanged.
+- IR-001 (major, empty-backtick-span discriminator was too weak in round 1)
+  resolved in round 2: the empty-backtick-span test now asserts exact-frozenset
+  equality, so the pre-change `strip("`")` parser would fail the test.
+- New tests discriminate against the pre-change parser for the backtick +
+  em-dash, `(new)` inside backticks, bare hyphen-separator, multiple-span,
+  and empty-span cases; bare no-separator is compatibility coverage.
+- Verification: `state.json` records `verification.last_exit_code == 0`,
+  `verification.log` reports `754 passed`.
+- Reviewer decision (Codex): `REVIEW_DECISION: APPROVED`.
+
+## Generated by
+redteam / batch fix-149-parser / task task-001-plan-affected-parser

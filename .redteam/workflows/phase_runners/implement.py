@@ -240,8 +240,25 @@ def _plan_affected_files(task_dir: Path) -> frozenset[str]:
         elif heading_level is not None:
             bm = bullet_re.match(line)
             if bm:
-                raw = bm.group(1).strip().strip("`").strip()
-                raw = new_prefix_re.sub("", raw).strip().strip("`").strip()
+                body = bm.group(1).strip()
+                # Strip a single positional '(new) ' prefix that may precede
+                # the backtick span or the bare path (case-insensitive).
+                body = new_prefix_re.sub("", body).strip()
+                if body.startswith("`"):
+                    # Backtick form: extract content of the first `...` span;
+                    # any trailing residue (` — reason`, ` - reason`, etc.) is
+                    # discarded.  Empty span or no closing backtick → fail-closed.
+                    m = re.match(r"`([^`]+)`", body)
+                    if not m:
+                        continue
+                    raw = m.group(1).strip()
+                    # Strip '(new) ' that may appear inside the backtick span.
+                    raw = new_prefix_re.sub("", raw).strip()
+                else:
+                    # Bare path: take text up to the first description separator
+                    # (' — ' em-dash or ' - ' hyphen); whole line if none present.
+                    sep_m = re.search(r" (?:—|-) ", body)
+                    raw = body[: sep_m.start()].strip() if sep_m else body.strip()
                 raw = raw.replace("\\", "/")
                 if not raw:
                     continue
