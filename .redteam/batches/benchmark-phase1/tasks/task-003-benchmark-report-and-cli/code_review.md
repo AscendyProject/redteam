@@ -2,15 +2,13 @@ Disagree:
 No open IR findings.
 
 Uncertain:
-No unresolved uncertainties. I did not rerun `bash .redteam/scripts/verify.sh` in this read-only review sandbox; I relied on the required task artifacts. `.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json` records `verification.last_exit_code == 0`, and `verification.log` shows `847 passed` with `verify.sh OK`.
+No unresolved uncertainties. I did not rerun `bash .redteam/scripts/verify.sh` in this read-only review sandbox; I relied on the task artifacts. `state.json` records `verification.last_exit_code == 0`, and `verification.log` shows `847 passed` with `verify.sh OK`.
 
 Agree:
-The diff is scoped to the three approved files only: `.redteam/workflows/benchmark.py`, `.redteam/workflows/orchestrator.py`, and `.redteam/tests/test_benchmark_report_and_cli.py`. No adapter, phase-runner, installer, config, plugin, or marketplace boundary was touched.
+The implementation matches the approved outcome. `build_report` preserves declaration-order config columns, keeps zero-record configs visible, renders `n/a` for the required Claude-cost cases, and avoids score/Pareto/winner output. The output is meaningfully discriminating: varied done counts, rounds, retries, rescues, scope-creep counts, wall time, and costs produce distinct cells rather than collapsing to constants.
 
-`build_report` keeps declaration-order config columns, keeps zero-record configs, renders `n/a` for zero/unknown cost cases, avoids Pareto/scores/winner language, and produces discriminating output: realistic records with different done counts, rounds, retries, rescues, scope-creep counts, wall time, and costs produce different cells rather than collapsing to a constant.
+CLI wiring is scoped to thin `cmd_benchmark` / `cmd_benchmark_report` helpers and the `main` dispatch ladder. Bad args return `2` before invoking the benchmark runners, and the new paths do not touch `_run_pipeline`, batch state, `create_pr`, or `gh`.
 
-The new tests would have failed pre-change because `benchmark.build_report` / `benchmark.run_report` did not exist and the orchestrator had no `benchmark` or `benchmark-report` dispatch. CLI tests monkeypatch the benchmark runners, so they do not execute real benchmark runs.
-
-Security checklist: no new non-stdlib runtime imports, no `shell=True`, no verifier allowlist/snapshot changes, no installer changes, no reviewer-adapter capability changes, and no `gh`/PR creation path added by these new subcommands.
+The new tests would have failed pre-change because `benchmark.build_report` / `benchmark.run_report` did not exist and `orchestrator.main` had no `benchmark` / `benchmark-report` dispatch. Security checklist review found no verifier allowlist, installer, adapter-trust, subprocess-shell, credential, or non-stdlib dependency regression.
 
 REVIEW_DECISION: APPROVED
