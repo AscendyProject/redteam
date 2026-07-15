@@ -147,14 +147,30 @@ def _run_verification_commands(
 
     for argv in validated:
         chunks.append(f"$ {' '.join(argv)}\n")
-        proc = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=False,
-        )
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            # The command passed the allowlist but its executable is not on PATH
+            # (e.g. a tool that only lives in a project venv the verify command
+            # activates). Fail closed LEGIBLY: return a non-zero code with an
+            # actionable reason so the phase surfaces a PhaseResult error, instead
+            # of letting a raw FileNotFoundError bubble to the batch driver, which
+            # drops the traceback and reports an opaque `error: FileNotFoundError`.
+            chunks.append(
+                f"[error] verification command not found on PATH: {argv[0]!r}. "
+                "Is it installed and resolvable in this environment? Tools that only "
+                "live in a project venv are not on PATH unless the verify command "
+                "activates it — prefer the project verify command (e.g. a wrapper "
+                "script) over a bare tool invocation.\n"
+            )
+            return 127, "".join(chunks)
         output = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
         chunks.append(output)
         chunks.append(f"\n[exit {proc.returncode}]\n\n")
