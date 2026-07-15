@@ -10,6 +10,8 @@ Usage:
     python3 .redteam/workflows/orchestrator.py new <batch-dir> <slug> [--title <text>]
     python3 .redteam/workflows/orchestrator.py review
     python3 .redteam/workflows/orchestrator.py config
+    python3 .redteam/workflows/orchestrator.py benchmark <set-root> [--dry-run]
+    python3 .redteam/workflows/orchestrator.py benchmark-report <set-root>
 
 Walks each task in <batch-dir>/tasks/ through the 8-phase pipeline,
 persists state.json after every phase, blocks at human gates (sentinel files),
@@ -70,6 +72,7 @@ from adapters import (  # type: ignore[import-not-found]  # noqa: E402
 )
 from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
 import config_cli  # type: ignore[import-not-found]  # noqa: E402
+import benchmark  # type: ignore[import-not-found]  # noqa: E402
 
 
 # ---------- phase order & runner registry ----------
@@ -2518,6 +2521,24 @@ def cmd_config(repo: Path | None = None) -> int:
     return config_cli.run_config(rr, _adversarial_pairing_error)
 
 
+def cmd_benchmark(set_root: Path, *, dry_run: bool = False) -> int:
+    """Dispatch to benchmark.run_benchmark.
+
+    Returns the exit code from run_benchmark (0 = complete, 3 = budget abort).
+    Does NOT touch batch state, _run_pipeline, or create_pr.
+    """
+    return benchmark.run_benchmark(set_root, dry_run=dry_run)
+
+
+def cmd_benchmark_report(set_root: Path) -> int:
+    """Dispatch to benchmark.run_report.
+
+    Returns 0 on success, 2 when results.jsonl is missing or empty.
+    Does NOT touch batch state, _run_pipeline, or create_pr.
+    """
+    return benchmark.run_report(set_root)
+
+
 USAGE = (
     "usage: orchestrator.py decompose <batch-dir>\n"
     "       orchestrator.py {start|resume|wait-and-resume} <batch-dir>\n"
@@ -2525,6 +2546,8 @@ USAGE = (
     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
     "       orchestrator.py review\n"
     "       orchestrator.py config\n"
+    "       orchestrator.py benchmark <set-root> [--dry-run]\n"
+    "       orchestrator.py benchmark-report <set-root>\n"
     "  decompose        — generate goal.json + task briefs from goal.md; run the\n"
     "                     cross-provider decomposition review gate; stop before any\n"
     "                     task is dispatched (run `start` after to execute the stack)\n"
@@ -2538,7 +2561,10 @@ USAGE = (
     "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
     "  review           — one-shot adversarial review of the current branch diff with the\n"
     "                     configured reviewer (a different provider than the worker); no batch\n"
-    "  config           — interactively pick per-role models and write .redteam/config.toml"
+    "  config           — interactively pick per-role models and write .redteam/config.toml\n"
+    "  benchmark        — run configs × tasks × repetitions against .redteam/benchmarks/<set>;\n"
+    "                     [--dry-run] prints the plan + cost estimate without executing\n"
+    "  benchmark-report — aggregate results.jsonl into a markdown diff table (no Pareto/score)"
 )
 
 
@@ -2576,6 +2602,33 @@ def main(argv: list[str]) -> int:
             print(f"error: unknown status argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
             return 2
         return cmd_status(batch_dir, as_json=bool(extra))
+
+    if command in ("benchmark", "benchmark-report"):
+        # Chosen --dry-run ordering: benchmark <set-root> [--dry-run].
+        # A flag in the argv[2] (set-root) position signals wrong ordering → USAGE.
+        if argv[2].startswith("--"):
+            print(USAGE, file=sys.stderr)
+            return 2
+        set_root = batch_dir  # already Path(argv[2]).resolve()
+        if not set_root.is_dir():
+            print(
+                f"error: set-root does not exist or is not a directory: {argv[2]}",
+                file=sys.stderr,
+            )
+            return 2
+        extra = argv[3:]
+        if command == "benchmark":
+            if extra == ["--dry-run"]:
+                return cmd_benchmark(set_root, dry_run=True)
+            if not extra:
+                return cmd_benchmark(set_root, dry_run=False)
+            print(f"error: unknown benchmark argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
+            return 2
+        # benchmark-report
+        if extra:
+            print(f"error: unknown benchmark-report argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
+            return 2
+        return cmd_benchmark_report(set_root)
 
     print(f"error: unknown command: {command!r}\n\n{USAGE}", file=sys.stderr)
     return 2
