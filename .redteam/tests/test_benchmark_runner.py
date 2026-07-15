@@ -308,28 +308,32 @@ def test_run_benchmark_budget_abort_stderr_names_refused_triple(tmp_path: Path, 
 
 
 def test_run_benchmark_budget_scope_per_invocation(tmp_path: Path) -> None:
-    """Per-invocation budget: prior Codex-only records do not inflate accumulated.
+    """Per-invocation budget: prior Claude costs do not count toward in-invocation accumulated.
 
-    Pre-seeds historical records (claude_cost_usd=None, triples outside the plan)
-    representing significant prior wall-clock spend.  Since these contribute
-    no Claude cost, estimated_next remains None (→ est=0.0), and the abort
-    point is identical to the no-history case: stub called exactly 5 times.
+    Pre-seeds 50 historical records with REAL Claude costs ($0.10 each = $5.00 total),
+    using triples NOT in the plan (config='hist' is not in the benchmark set).
 
-    The key contract: accumulated = sum of THIS invocation's records only.
-    If prior costs were counted, 5×$0.20 = $1.00 would be reached after fewer
-    dispatches (or immediately if the historical estimate were large).
+    These prior records DO affect estimated_next (mean = $0.10), but the abort
+    count is still 5 — identical to the no-history case — because accumulated
+    tracks only THIS invocation's records:
+
+      Before 1st: 0.00 + 0.10 = 0.10 < 1.00 → dispatch
+      Before 5th: 0.80 + 0.10 = 0.90 < 1.00 → dispatch  (5th call occurs)
+      Before 6th: 1.00 + 0.10 = 1.10 ≥ 1.00 → ABORT
+
+    KEY CONTRACT: accumulated = sum of THIS invocation's claude_cost_usd only.
+    The $5.00 of historical Claude spend is NEVER added to accumulated.
     """
     set_root = tmp_path / "bset"
     # 2 configs × 2 tasks × 3 reps = 12 triples
     _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=3, budget_usd=1.00)
 
-    # Pre-seed historical records for triples OUTSIDE the plan (config "hist")
-    # Total wall-clock "spend" = 25 × 12s = 300s ≈ 5 minutes; claude_cost_usd=None.
+    # Pre-seed 50 historical records with REAL Claude costs: 50 × $0.10 = $5.00.
+    # These are OUTSIDE the plan (config "hist" not in benchmark set).
+    # estimated_next = mean($0.10 × 50) = $0.10 — exercises the non-None estimated_next path.
     results_path = set_root / "results.jsonl"
-    for i in range(1, 26):
-        r = _make_record("hist", "hist-task", i, outcome="done", claude_cost_usd=None)
-        r["wall_clock_sec"] = 12.0
-        append_record(results_path, r)
+    for i in range(1, 51):
+        append_record(results_path, _make_record("hist", f"hist-task-{i}", 1, outcome="done", claude_cost_usd=0.10))
 
     calls: list[tuple] = []
 
@@ -339,8 +343,8 @@ def test_run_benchmark_budget_scope_per_invocation(tmp_path: Path) -> None:
 
     rc = run_benchmark(set_root, run_one=stub_with_cost)
 
-    # Prior Codex-only records do NOT shrink the in-invocation budget:
-    # same 5-call count as the no-history case.
+    # $5.00 of prior Claude spend does NOT change the abort count:
+    # accumulated is per-invocation only; abort count is 5 (same as no-history case).
     assert len(calls) == 5
     assert rc == 3
 
@@ -535,16 +539,69 @@ def test_extract_metrics_empty_telemetry() -> None:
 
 
 def test_extract_metrics_scope_creep_count_returns_zero() -> None:
-    """scope_creep_count=0: engine writes floor-trips as retries not deferred_requirements."""
+    """scope_creep_count=0: stalled entry without floor-trip feedback prefix is not scope creep."""
     state = {
         "next_phase": "done",
         "phase_telemetry": [],
         "deferred_requirements": [
+            # "stalled" with no floor-trip marker in feedback → not a floor trip
             {"phase": "implement", "reason": "stalled", "attempts": 1},
+            # "stalled" with non-floor-trip feedback → not a floor trip
+            {
+                "phase": "implement",
+                "reason": "stalled",
+                "attempts": 2,
+                "feedback": "implementer agent exited non-zero.",
+            },
         ],
     }
     m = extract_metrics(state)
     assert m["scope_creep_count"] == 0
+
+
+def test_extract_metrics_scope_creep_count_counts_floor_trips() -> None:
+    """scope_creep_count counts deferred_requirements entries with floor-trip feedback.
+
+    Both stable floor-trip feedback prefixes (from phase_runners/implement.py):
+    - "cross-run trust-root floor:" (_cross_run_trust_root_floor, #117)
+    - "refusing to sweep operator tracked WIP" (_floor_outside_scope, #91)
+    Both are stable, actually-emitted strings — never invented.
+    """
+    state = {
+        "next_phase": "deferred",
+        "phase_telemetry": [],
+        "deferred_requirements": [
+            {
+                "phase": "implement",
+                "reason": "stalled",
+                "attempts": 2,
+                "feedback": (
+                    "cross-run trust-root floor: outside-scope paths detected before "
+                    "worker invocation; commit or stash these files and re-run. "
+                    "Offending paths: some/untracked.txt"
+                ),
+            },
+            {
+                "phase": "implement",
+                "reason": "stalled",
+                "attempts": 3,
+                "feedback": (
+                    "refusing to sweep operator tracked WIP into the task commit; "
+                    "commit or stash your unrelated tracked WIP before re-running. "
+                    "Out-of-scope tracked paths: other/wip.py"
+                ),
+            },
+            {
+                "phase": "implement",
+                "reason": "stalled",
+                "attempts": 4,
+                "feedback": "implementer agent exited non-zero.\nreturncode=1",
+            },  # NOT a floor trip
+        ],
+    }
+    m = extract_metrics(state)
+    # Two floor-trip entries, one plain stall → scope_creep_count = 2
+    assert m["scope_creep_count"] == 2
 
 
 def test_extract_metrics_retry_count_sums_retries_dict() -> None:

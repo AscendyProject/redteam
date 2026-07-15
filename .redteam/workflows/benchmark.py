@@ -244,6 +244,17 @@ def completed_triples(records: list[dict]) -> set[tuple[str, str, int]]:
 # Metric extractor — deterministic metrics from a completed task state.json
 # ---------------------------------------------------------------------------
 
+# Floor-trip feedback prefixes emitted by phase_runners/implement.py (#91/#117).
+# These are the actually-emitted strings for:
+#   - _floor_outside_scope ("refusing to sweep operator tracked WIP…")
+#   - _cross_run_trust_root_floor ("cross-run trust-root floor: outside-scope paths…")
+# Both end up in deferred_requirements[].feedback when retries are exhausted (reason="stalled").
+# No floor-trip-specific reason string exists, so we match on the stable feedback prefix.
+_FLOOR_TRIP_FEEDBACK_PREFIXES = (
+    "cross-run trust-root floor:",
+    "refusing to sweep operator tracked WIP",
+)
+
 
 def extract_metrics(state: dict) -> dict:
     """Extract deterministic benchmark metrics from a completed task state dict.
@@ -268,10 +279,15 @@ def extract_metrics(state: dict) -> dict:
     # retry_count: deterministic sum of the per-phase retry counter (existing field, no new key).
     retry_count = sum(state.get("retries", {}).values())
     # scope_creep_count: floor-trip count from deferred_requirements.
-    # The engine writes floor-trip outcomes as PhaseResult(status="error") → retry,
-    # NOT as deferred_requirements entries with a stable "floor trip" reason string.
-    # No stable predicate exists → return 0 rather than invent a new state.json key.
-    scope_creep_count = 0
+    # The engine records floor-trip events (pre-worker out-of-scope tracked floor #91
+    # and cross-run trust-root floor #117) as PhaseResult(status="error") feedback;
+    # when retries are exhausted they land in deferred_requirements as reason="stalled"
+    # with the original floor-trip message preserved in the "feedback" field.
+    # Both stable feedback prefixes are from phase_runners/implement.py — not invented.
+    deferred_requirements = state.get("deferred_requirements", [])
+    scope_creep_count = sum(
+        1 for e in deferred_requirements if e.get("feedback", "").startswith(_FLOOR_TRIP_FEEDBACK_PREFIXES)
+    )
     wall_clock_sec = sum((e.get("duration_sec") or 0.0) for e in telemetry)
     # claude_cost_usd: sum costs from Claude-provider phases; None when no Claude entry.
     # Never fabricate a cost from Codex-only runs.
