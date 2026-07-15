@@ -400,6 +400,29 @@ def test_main_benchmark_runner_not_called_on_bad_args(tmp_path, monkeypatch, cap
     capsys.readouterr()
 
 
+def test_main_benchmark_report_runner_not_called_on_bad_args(tmp_path, monkeypatch, capsys):
+    """run_report must NOT be called on any bad-arg path — verified by raising sentinel."""
+    orch = _orch()
+
+    def _fail(*a, **kw) -> int:  # pragma: no cover
+        raise AssertionError("run_report must NOT be called on bad args")
+
+    monkeypatch.setattr(bm, "run_report", _fail)
+
+    # Missing set-root
+    assert orch.main(["orchestrator.py", "benchmark-report"]) == 2
+    capsys.readouterr()
+
+    # Non-existent directory
+    assert orch.main(["orchestrator.py", "benchmark-report", str(tmp_path / "no-such")]) == 2
+    capsys.readouterr()
+
+    # Unknown flag after set-root
+    set_dir = _make_set_dir(tmp_path)
+    assert orch.main(["orchestrator.py", "benchmark-report", str(set_dir), "--unknown"]) == 2
+    capsys.readouterr()
+
+
 # ---------------------------------------------------------------------------
 # USAGE constant
 # ---------------------------------------------------------------------------
