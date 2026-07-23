@@ -61,7 +61,14 @@ class BenchmarkSet:
 
     Attributes:
         repetitions: Number of times each (config, task) pair is run. >= 1.
-        budget_usd:  Hard cost ceiling in USD, or None for no cap.
+        budget_usd:  Best-effort Claude-cost cap in USD (or None for no cap). It
+                     stops dispatching further triples once the accumulated
+                     observed cost this invocation (plus a prior-data estimate)
+                     would reach the cap. Because a triple's cost is unknown
+                     before it runs, a run with no prior cost estimate — notably
+                     the FIRST paid run — can overshoot the cap; run `--dry-run`
+                     once some records exist for a tighter pre-estimate. NOT a
+                     hard ceiling on the first run.
         configs:     Ordered mapping of config-name → {role: model-id} overrides.
                      Declaration order from benchmark.toml is preserved.
         task_ids:    Sorted tuple of task ids that have a non-empty input.md.
@@ -603,6 +610,16 @@ def run_benchmark(
 
     # Live run: iterate the plan, budget-check before each dispatch.
     # this_inv_records tracks only records appended in THIS invocation (budget scope).
+    # Cold-start heads-up: a budget cap with no prior cost estimate cannot bound the
+    # first run(s) (a triple's cost is unknown before it runs), so it can overshoot
+    # until cost data accumulates. Warn legibly — do NOT abort or change dispatch.
+    if bset.budget_usd is not None and estimated_next is None:
+        print(
+            f"benchmark: warning — budget_usd=${bset.budget_usd:.4f} is set but there is no "
+            "prior cost data to estimate against; the first run(s) may overshoot the cap "
+            "until cost accumulates. Run `--dry-run` after some records exist for a tighter bound.",
+            file=sys.stderr,
+        )
     this_inv_records: list[dict] = []
     workspace = Path(tempfile.gettempdir())
 

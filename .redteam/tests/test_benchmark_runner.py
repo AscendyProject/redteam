@@ -302,6 +302,36 @@ def test_run_benchmark_budget_abort_stderr_names_refused_triple(tmp_path: Path, 
     assert "rep=" in err  # repetition named
 
 
+def test_run_benchmark_cold_start_budget_warns_but_still_dispatches(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """IR-001 (stack review): budget_usd is a best-effort cap, NOT a hard ceiling
+    on the first run. On a cold start (budget set, no prior cost records to
+    estimate against), the runner must WARN legibly that the first run(s) may
+    overshoot — but must NOT abort before the first dispatch. It keeps dispatching
+    and bounds by accumulated OBSERVED cost, matching the mid-run abort design."""
+    set_root = tmp_path / "bset"
+    # 1 config × 1 task × 1 rep, tiny budget, NO pre-seeded records (cold start).
+    _make_set(set_root, ["alpha"], ["task-001"], repetitions=1, budget_usd=0.01)
+
+    calls: list[tuple] = []
+
+    def stub_with_cost(set_root, config_name, task_id, repetition, *, config_overrides, workspace):
+        calls.append((config_name, task_id, repetition))
+        return _make_record(config_name, task_id, repetition, claude_cost_usd=0.50)
+
+    rc = run_benchmark(set_root, run_one=stub_with_cost)
+
+    # Still dispatched the (only) triple despite the $0.01 cap — the first run's
+    # cost is unknowable in advance, so it is NOT aborted before dispatch.
+    assert len(calls) == 1
+    assert rc == 0
+    err = capsys.readouterr().err
+    # Legible cold-start warning naming the overshoot risk.
+    assert "warning" in err.lower()
+    assert "overshoot" in err.lower()
+
+
 # ---------------------------------------------------------------------------
 # Budget scope is per-invocation: $5.00 of historical Codex-only records
 # ---------------------------------------------------------------------------
