@@ -1,0 +1,17 @@
+{
+  "goal": "Ship the #146 Phase 1 MVP benchmark: named-config comparisons over a curated task-set, JSONL result store, deterministic-only metrics, hard cost controls, and an `orchestrator benchmark` / `benchmark-report` command pair — stdlib-only, testable without real model runs, never mutating the operator's repo.",
+  "ceilings": {
+    "max_tasks": 3
+  },
+  "tasks": {
+    "task-001-benchmark-config-and-store": {
+      "depends_on": []
+    },
+    "task-002-benchmark-runner": {
+      "depends_on": ["task-001-benchmark-config-and-store"]
+    },
+    "task-003-benchmark-report-and-cli": {
+      "depends_on": ["task-002-benchmark-runner"]
+    }
+  }
+}
