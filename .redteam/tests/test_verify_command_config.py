@@ -146,6 +146,24 @@ def test_run_verify_sh_runs_given_argv_shell_free() -> None:
     assert captured["shell"] is False
 
 
+def test_run_verification_missing_executable_fails_closed_legibly() -> None:
+    """#152: a command that passes the allowlist but whose executable is not on
+    PATH (e.g. a tool that only lives in a project venv the verify command
+    activates) must fail closed LEGIBLY — a non-zero code with an actionable
+    'not found on PATH' reason — not raise FileNotFoundError. The raw exception
+    would bubble to the batch driver, which drops the traceback and reports an
+    opaque `error: FileNotFoundError`. Fails pre-change (which raised)."""
+    from phase_runners import implement
+
+    bogus = "redteam-nonexistent-tool-xyz"
+    rc, output = implement._run_verification_commands(
+        Path("."), [f"{bogus} --version"], project_verify_command=None, allowlist=[bogus]
+    )
+    assert rc != 0  # fail closed
+    assert "not found on PATH" in output  # legible, actionable
+    assert bogus in output  # names the offending command
+
+
 def test_legacy_run_snapshots_verify_before_implementer() -> None:
     """IR-001 regression: the verify command is captured + validated BEFORE the
     implementer runs, so a same-round edit to config.toml's verify_command
