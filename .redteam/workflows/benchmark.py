@@ -1,9 +1,11 @@
-"""Benchmark data-layer for the redteam harness Phase 1 MVP.
+"""Benchmark data-layer and execution layer for the redteam harness Phase 1 MVP.
 
 Cross-cutting invariants:
-- Zero non-stdlib imports: only tomllib, json, dataclasses, pathlib, datetime, typing.
+- Zero non-stdlib imports: only tomllib, json, shutil, statistics, subprocess, sys,
+  pathlib, tempfile, time, datetime, dataclasses, typing.
 - No filesystem side effects at import time.
-- Never touches .redteam/config.toml or any .redteam/batches/ path.
+- Never opens .redteam/config.toml or any .redteam/batches/ path for WRITE in the
+  operator's real repo; isolation is enforced by subprocess + tempcopy.
 
 Exposes:
 - BenchmarkSet          — frozen dataclass: parsed benchmark.toml + task enumeration.
@@ -12,15 +14,31 @@ Exposes:
 - append_record()       — JSONL append helper (creates parent dir/file on first call).
 - load_records()        — JSONL reader; raises ValueError on malformed lines.
 - completed_triples()   — (config, task, repetition) resume set from a record list.
+- extract_metrics()     — deterministic metric extractor over state["phase_telemetry"].
+- run_one()             — isolated subprocess dispatch for one (config, task, rep) triple.
+- run_benchmark()       — outer loop: configs × tasks × repetitions, resumable + budgeted.
 """
+# NOTE: benchmark.py source intentionally contains no "gh ", "git push", "pr create",
+# "--force", or auto-merge language, and does not import phase_runners.create_pr.
+# This is enforced by a static grep test in test_benchmark_runner.py.
 
 from __future__ import annotations
 
+import datetime
 import json
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # Config constants
@@ -220,3 +238,416 @@ def completed_triples(records: list[dict]) -> set[tuple[str, str, int]]:
     result; that is a Phase 2 concern.
     """
     return {(r["config"], r["task"], r["repetition"]) for r in records}
+
+
+# ---------------------------------------------------------------------------
+# Metric extractor — deterministic metrics from a completed task state.json
+# ---------------------------------------------------------------------------
+
+# Floor-trip feedback prefixes emitted by phase_runners/implement.py (#91/#117).
+# These are the actually-emitted strings for:
+#   - _floor_outside_scope ("refusing to sweep operator tracked WIP…")
+#   - _cross_run_trust_root_floor ("cross-run trust-root floor: outside-scope paths…")
+# Both end up in deferred_requirements[].feedback when retries are exhausted (reason="stalled").
+# No floor-trip-specific reason string exists, so we match on the stable feedback prefix.
+_FLOOR_TRIP_FEEDBACK_PREFIXES = (
+    "cross-run trust-root floor:",
+    "refusing to sweep operator tracked WIP",
+)
+
+
+def extract_metrics(state: dict) -> dict:
+    """Extract deterministic benchmark metrics from a completed task state dict.
+
+    Reads only fields the engine already emits; never adds new state.json keys.
+
+    Returns a mapping with keys:
+      outcome, review_rounds, retry_count, rescue_count, scope_creep_count,
+      wall_clock_sec, claude_cost_usd.
+    """
+    next_phase = state.get("next_phase", "")
+    if next_phase == "done":
+        outcome = "done"
+    elif state.get("deferred") is True or next_phase == "deferred":
+        outcome = "deferred"
+    else:
+        outcome = "error"
+
+    telemetry: list[dict] = state.get("phase_telemetry", [])
+    review_rounds = sum(1 for e in telemetry if e.get("phase") == "review_code")
+    rescue_count = sum(1 for e in telemetry if e.get("phase") == "rescue")
+    # retry_count: deterministic sum of the per-phase retry counter (existing field, no new key).
+    retry_count = sum(state.get("retries", {}).values())
+    # scope_creep_count: floor-trip count from deferred_requirements.
+    # The engine records floor-trip events (pre-worker out-of-scope tracked floor #91
+    # and cross-run trust-root floor #117) as PhaseResult(status="error") feedback;
+    # when retries are exhausted they land in deferred_requirements as reason="stalled"
+    # with the original floor-trip message preserved in the "feedback" field.
+    # Both stable feedback prefixes are from phase_runners/implement.py — not invented.
+    deferred_requirements = state.get("deferred_requirements", [])
+    scope_creep_count = sum(
+        1 for e in deferred_requirements if e.get("feedback", "").startswith(_FLOOR_TRIP_FEEDBACK_PREFIXES)
+    )
+    wall_clock_sec = sum((e.get("duration_sec") or 0.0) for e in telemetry)
+    # claude_cost_usd: sum costs from Claude-provider phases; None when no Claude entry.
+    # Never fabricate a cost from Codex-only runs.
+    claude_costs = [e["cost_usd"] for e in telemetry if e.get("provider") == "claude" and e.get("cost_usd") is not None]
+    claude_cost_usd: float | None = sum(claude_costs) if claude_costs else None
+
+    return {
+        "outcome": outcome,
+        "review_rounds": review_rounds,
+        "retry_count": retry_count,
+        "rescue_count": rescue_count,
+        "scope_creep_count": scope_creep_count,
+        "wall_clock_sec": wall_clock_sec,
+        "claude_cost_usd": claude_cost_usd,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers for run_one isolation
+# ---------------------------------------------------------------------------
+
+
+def _repo_root() -> Path:
+    """Real repo root. benchmark.py lives at <repo>/.redteam/workflows/benchmark.py."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _utc_now_iso() -> str:
+    """Current UTC time as ISO-8601 string."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _toml_value(v: object) -> str:
+    """Format a Python scalar or list-of-scalars as a TOML value fragment."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    return repr(v)
+
+
+def _write_merged_config(dest_path: Path, base_config: dict, config_overrides: dict) -> None:
+    """Write a merged config.toml to dest_path.
+
+    Preserves all non-[models] sections from base_config; merges the [models]
+    section with config_overrides (overrides win). Never writes to the real
+    config.toml in the operator's repo.
+    """
+    merged_models = {**base_config.get("models", {}), **config_overrides}
+
+    lines: list[str] = ["# benchmark-generated merged config\n"]
+    for section, values in base_config.items():
+        if section == "models":
+            continue
+        if not isinstance(values, dict):
+            continue
+        lines.append(f"[{section}]")
+        for k, v in values.items():
+            lines.append(f"{k} = {_toml_value(v)}")
+        lines.append("")
+
+    lines.append("[models]")
+    for role, model_id in merged_models.items():
+        lines.append(f'{role} = "{model_id}"')
+    lines.append("")
+
+    dest_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# Bootstrap driver template written to <tempcopy>/_bench_driver.py.
+# Formatted with .format(batch_dir_repr=repr(str(batch_dir))).
+#
+# Safety contract (enforced by static test in test_benchmark_runner.py):
+# - Contains no "gh ", "git push", "pr create", or "--force" literals.
+# - Runtime-rebinds orchestrator.PHASE_RUNNERS["create_pr"] to a no-op BEFORE
+#   cmd_start is called, so the real create_pr runner is never invoked.
+# - Defense-in-depth: even if the rebind were bypassed, the tempcopy has no
+#   'origin' remote, so create_pr.py's git-remote preflight (create_pr.py:82)
+#   fails closed before any push/PR action.
+_BENCH_DRIVER_TEMPLATE = """\
+import sys
+import pathlib
+
+_BATCH_DIR = pathlib.Path({batch_dir_repr})
+
+# Insert the tempcopy's workflows dir so `import orchestrator` resolves to the
+# tempcopy's copy — repo_root() then points to the tempcopy, not the real repo.
+sys.path.insert(0, str(pathlib.Path(__file__).parent / ".redteam" / "workflows"))
+import orchestrator  # noqa: E402
+
+
+def _noop_create_pr(task_dir, state):
+    \"\"\"Neutralised create_pr: marks the task done without opening any PR.\"\"\"
+    state["next_phase"] = "done"
+    return {{"status": "approved", "feedback": "benchmark no-op", "log": "benchmark no-op", "diff": ""}}
+
+
+# Runtime rebind: PHASE_RUNNERS is a module-level mutable dict (orchestrator.py:119),
+# looked up per phase step (orchestrator.py:1364), so this takes effect before
+# cmd_start dispatches any task.
+orchestrator.PHASE_RUNNERS["create_pr"] = _noop_create_pr
+
+sys.exit(orchestrator.cmd_start(_BATCH_DIR))
+"""
+
+# ---------------------------------------------------------------------------
+# run_one — isolated subprocess dispatch for one (config, task, rep) triple
+# ---------------------------------------------------------------------------
+
+
+def run_one(
+    set_root: Path,
+    config_name: str,
+    task_id: str,
+    repetition: int,
+    *,
+    config_overrides: dict,
+    workspace: Path,
+) -> dict:
+    """Real isolated dispatch for one benchmark triple.
+
+    Isolation (subprocess + tempcopy, zero engine changes required):
+    1. shutil.copytree snapshot of the real repo → temp dir under workspace.
+    2. git init the snapshot on branch 'main'; no 'origin' remote configured.
+    3. Write merged .redteam/config.toml into the snapshot (real config untouched).
+    4. Seed the task's input.md into the batch dir under the snapshot.
+    5. Write a bootstrap driver that rebinds PHASE_RUNNERS["create_pr"] to a no-op.
+    6. subprocess.run the driver (cwd=tempcopy, sys.executable).
+    7. Read state.json from the snapshot; call extract_metrics; build record.
+    8. TemporaryDirectory context manager auto-deletes the snapshot on exit.
+
+    wall_clock_sec is measured via time.monotonic() around the subprocess call, NOT
+    re-derived from telemetry sums (which miss non-worker phases like plan_review).
+    started_at / finished_at are ISO-8601 UTC strings.
+    """
+    real_repo = _repo_root()
+    real_config = tomllib.loads((real_repo / ".redteam" / "config.toml").read_text(encoding="utf-8"))
+
+    started_at = _utc_now_iso()
+    t_start = time.monotonic()
+
+    with tempfile.TemporaryDirectory(dir=workspace) as td:
+        tempcopy = Path(td) / "repo"
+
+        # Step 1: snapshot harness tree (exclude .git, venv, existing batches, results)
+        shutil.copytree(
+            str(real_repo),
+            str(tempcopy),
+            ignore=shutil.ignore_patterns(
+                ".git",
+                "venv",
+                ".venv",
+                "__pycache__",
+                "batches",
+                "results",
+                "results.jsonl",
+                "*.egg-info",
+            ),
+        )
+
+        # Step 2: git init on main, no origin remote
+        for cmd in (
+            ["git", "init"],
+            ["git", "config", "user.email", "bench@redteam.local"],
+            ["git", "config", "user.name", "benchmark"],
+            ["git", "add", "-A"],
+            ["git", "commit", "-m", "benchmark seed"],
+        ):
+            subprocess.run(cmd, cwd=str(tempcopy), check=True, capture_output=True, encoding="utf-8")
+        # Rename to 'main' (handles git < 2.28 where default branch is 'master')
+        subprocess.run(
+            ["git", "branch", "-M", "main"],
+            cwd=str(tempcopy),
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+        )
+
+        # Step 3: write merged config.toml (real repo config is never opened for write)
+        _write_merged_config(
+            tempcopy / ".redteam" / "config.toml",
+            real_config,
+            config_overrides,
+        )
+
+        # Step 4: seed the task's input.md into the batch dir
+        batch_name = f"bench-{config_name}-{task_id}-rep{repetition}"
+        batch_dir = tempcopy / ".redteam" / "batches" / batch_name
+        task_dir_in_batch = batch_dir / "tasks" / task_id
+        task_dir_in_batch.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            str(set_root / "tasks" / task_id / "input.md"),
+            str(task_dir_in_batch / "input.md"),
+        )
+
+        # Step 5: write bootstrap driver
+        driver_path = tempcopy / "_bench_driver.py"
+        driver_text = _BENCH_DRIVER_TEMPLATE.format(batch_dir_repr=repr(str(batch_dir)))
+        driver_path.write_text(driver_text, encoding="utf-8")
+
+        # Step 6: run driver subprocess (cwd=tempcopy so repo_root() resolves correctly)
+        subprocess.run(
+            [sys.executable, "-u", str(driver_path)],
+            cwd=str(tempcopy),
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=1800,  # 30-minute hard cap per run
+        )
+
+        t_end = time.monotonic()
+        finished_at = _utc_now_iso()
+        wall_clock_sec = t_end - t_start
+
+        # Step 7: read state.json and extract metrics
+        state_path = task_dir_in_batch / "state.json"
+        if state_path.is_file():
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            metrics = extract_metrics(state)
+        else:
+            # Subprocess failed before seeding state — all metrics are error defaults
+            metrics = {
+                "outcome": "error",
+                "review_rounds": 0,
+                "retry_count": 0,
+                "rescue_count": 0,
+                "scope_creep_count": 0,
+                "wall_clock_sec": 0.0,
+                "claude_cost_usd": None,
+            }
+
+        return {
+            "schema_version": 1,
+            "config": config_name,
+            "task": task_id,
+            "repetition": repetition,
+            "outcome": metrics["outcome"],
+            "review_rounds": metrics["review_rounds"],
+            "retry_count": metrics["retry_count"],
+            "rescue_count": metrics["rescue_count"],
+            "scope_creep_count": metrics["scope_creep_count"],
+            "wall_clock_sec": wall_clock_sec,  # monotonic-measured; NOT telemetry sum
+            "claude_cost_usd": metrics["claude_cost_usd"],
+            "started_at": started_at,
+            "finished_at": finished_at,
+        }
+        # TemporaryDirectory context manager auto-deletes tempcopy on exit
+
+
+# ---------------------------------------------------------------------------
+# run_benchmark — outer loop: configs × tasks × repetitions, resumable + budgeted
+# ---------------------------------------------------------------------------
+
+
+def run_benchmark(
+    set_root: Path,
+    *,
+    dry_run: bool = False,
+    run_one: "Callable[..., dict]" = run_one,
+) -> int:
+    """Configs × tasks × repetitions benchmark loop, resumable and budget-fenced.
+
+    Budget scope (per-invocation): accumulated = sum of claude_cost_usd for records
+    appended in THIS call only.  Prior JSONL records (already spent and skipped by
+    resume) do NOT count toward the in-invocation budget.  Cross-invocation cumulative
+    budgeting is a Phase 2 refinement.
+
+    Returns:
+      0   — normal completion (including after run_one errors that are caught + continued)
+      3   — budget abort (a pending dispatch would exceed set.budget_usd)
+    """
+    bset = load_benchmark_set(set_root)
+    results_path = set_root / "results.jsonl"
+
+    # Load existing records for resume / cost estimation
+    prior_records: list[dict] = []
+    if results_path.is_file():
+        prior_records = load_records(results_path)
+
+    done = completed_triples(prior_records)
+
+    # Build the full plan in declaration order: configs × task_ids × repetitions
+    plan = [
+        (cfg, tid, rep)
+        for cfg in bset.configs
+        for tid in bset.task_ids
+        for rep in range(1, bset.repetitions + 1)
+        if (cfg, tid, rep) not in done
+    ]
+    skipped = len(done)
+
+    # Cost estimate from prior records (used by dry-run and budget check).
+    prior_claude_costs = [r["claude_cost_usd"] for r in prior_records if r.get("claude_cost_usd") is not None]
+    estimated_next: float | None = statistics.mean(prior_claude_costs) if prior_claude_costs else None
+
+    if dry_run:
+        planned = len(plan)
+        if estimated_next is not None:
+            cost_str = f"{estimated_next * planned:.4f}"
+        else:
+            cost_str = "unknown"
+        print(f"benchmark dry-run: planned={planned} skipped={skipped} estimated_cost_usd={cost_str}")
+        return 0
+
+    # Live run: iterate the plan, budget-check before each dispatch.
+    # this_inv_records tracks only records appended in THIS invocation (budget scope).
+    this_inv_records: list[dict] = []
+    workspace = Path(tempfile.gettempdir())
+
+    for cfg, tid, rep in plan:
+        # Budget check BEFORE dispatch (fail-loud on cost)
+        if bset.budget_usd is not None:
+            accumulated = sum((r.get("claude_cost_usd") or 0.0) for r in this_inv_records)
+            est = estimated_next if estimated_next is not None else 0.0
+            if accumulated + est >= bset.budget_usd:
+                print(
+                    f"benchmark: aborting before {cfg}/{tid}/rep={rep}: "
+                    f"accumulated ${accumulated:.4f} + estimate ${est:.4f} "
+                    f"would exceed budget ${bset.budget_usd:.4f}",
+                    file=sys.stderr,
+                )
+                return 3
+
+        # Dispatch
+        try:
+            record = run_one(
+                set_root,
+                cfg,
+                tid,
+                rep,
+                config_overrides=bset.configs[cfg],
+                workspace=workspace,
+            )
+        except Exception:
+            now = _utc_now_iso()
+            record = {
+                "schema_version": 1,
+                "config": cfg,
+                "task": tid,
+                "repetition": rep,
+                "outcome": "error",
+                "review_rounds": 0,
+                "retry_count": 0,
+                "rescue_count": 0,
+                "scope_creep_count": 0,
+                "wall_clock_sec": 0.0,
+                "claude_cost_usd": None,
+                "started_at": now,
+                "finished_at": now,
+            }
+
+        # Append immediately so Ctrl-C between runs still resumes cleanly
+        append_record(results_path, record)
+        this_inv_records.append(record)
+
+    return 0
