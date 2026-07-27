@@ -17,6 +17,8 @@ Exposes:
 - extract_metrics()     — deterministic metric extractor over state["phase_telemetry"].
 - run_one()             — isolated subprocess dispatch for one (config, task, rep) triple.
 - run_benchmark()       — outer loop: configs × tasks × repetitions, resumable + budgeted.
+- build_report()        — pure: markdown diff table from config_names + records list.
+- run_report()          — I/O wrapper: reads results.jsonl, prints report to stdout.
 """
 # NOTE: benchmark.py source intentionally contains no "gh ", "git push", "pr create",
 # "--force", or auto-merge language, and does not import phase_runners.create_pr.
@@ -59,7 +61,14 @@ class BenchmarkSet:
 
     Attributes:
         repetitions: Number of times each (config, task) pair is run. >= 1.
-        budget_usd:  Hard cost ceiling in USD, or None for no cap.
+        budget_usd:  Best-effort Claude-cost cap in USD (or None for no cap). It
+                     stops dispatching further triples once the accumulated
+                     observed cost this invocation (plus a prior-data estimate)
+                     would reach the cap. Because a triple's cost is unknown
+                     before it runs, a run with no prior cost estimate — notably
+                     the FIRST paid run — can overshoot the cap; run `--dry-run`
+                     once some records exist for a tighter pre-estimate. NOT a
+                     hard ceiling on the first run.
         configs:     Ordered mapping of config-name → {role: model-id} overrides.
                      Declaration order from benchmark.toml is preserved.
         task_ids:    Sorted tuple of task ids that have a non-empty input.md.
@@ -601,6 +610,16 @@ def run_benchmark(
 
     # Live run: iterate the plan, budget-check before each dispatch.
     # this_inv_records tracks only records appended in THIS invocation (budget scope).
+    # Cold-start heads-up: a budget cap with no prior cost estimate cannot bound the
+    # first run(s) (a triple's cost is unknown before it runs), so it can overshoot
+    # until cost data accumulates. Warn legibly — do NOT abort or change dispatch.
+    if bset.budget_usd is not None and estimated_next is None:
+        print(
+            f"benchmark: warning — budget_usd=${bset.budget_usd:.4f} is set but there is no "
+            "prior cost data to estimate against; the first run(s) may overshoot the cap "
+            "until cost accumulates. Run `--dry-run` after some records exist for a tighter bound.",
+            file=sys.stderr,
+        )
     this_inv_records: list[dict] = []
     workspace = Path(tempfile.gettempdir())
 
@@ -650,4 +669,144 @@ def run_benchmark(
         append_record(results_path, record)
         this_inv_records.append(record)
 
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# build_report — pure aggregation + markdown diff table
+# ---------------------------------------------------------------------------
+
+
+def build_report(config_names: list[str], records: list[dict]) -> str:
+    """Build a markdown diff table from declared config names and raw records.
+
+    Pure: no I/O. config_names drives column ordering (declaration order from
+    benchmark.toml), so a zero-record config is still shown as a column (PR-001).
+    Records whose "config" key is not in config_names are silently ignored.
+
+    Formatting rules:
+    - Floats: f"{x:.2f}"
+    - Rates: f"{x:.2f}%" (percentage form)
+    - Costs: f"${x:.2f}" or "n/a" (never "$0.00" when there is no real data)
+    - Integers: plain int str
+    - n/a: any cell that cannot be computed (zero total, zero done, no cost data)
+    """
+    # Group records by config in insertion order; unknown configs skipped
+    by_config: dict[str, list[dict]] = {name: [] for name in config_names}
+    for r in records:
+        cfg = r.get("config", "")
+        if cfg in by_config:
+            by_config[cfg].append(r)
+
+    def _cells(name: str) -> dict[str, str]:
+        recs = by_config[name]
+        total = len(recs)
+        done_count = sum(1 for r in recs if r.get("outcome") == "done")
+        deferred_count = sum(1 for r in recs if r.get("outcome") == "deferred")
+        error_count = sum(1 for r in recs if r.get("outcome") == "error")
+
+        sample = f"{total} (done={done_count}, deferred={deferred_count}, error={error_count})"
+        if total == 0:
+            return {
+                "sample_size": sample,
+                "approval_rate": "n/a",
+                "avg_review_rounds": "n/a",
+                "retry_rate": "n/a",
+                "rescue_rate": "n/a",
+                "scope_creep_rate": "n/a",
+                "avg_wall_clock_sec": "n/a",
+                "claude_cost": "n/a",
+            }
+
+        approval = f"{done_count / total * 100:.2f}%"
+        avg_rounds = f"{sum(r.get('review_rounds', 0) for r in recs) / total:.2f}"
+        retry = f"{sum(r.get('retry_count', 0) for r in recs) / total * 100:.2f}%"
+        rescue = f"{sum(r.get('rescue_count', 0) for r in recs) / total * 100:.2f}%"
+        scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
+        avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
+
+        if done_count == 0:
+            cost_cell = "n/a"
+        else:
+            done_costs = [
+                r["claude_cost_usd"]
+                for r in recs
+                if r.get("outcome") == "done" and r.get("claude_cost_usd") is not None
+            ]
+            cost_cell = f"${sum(done_costs) / done_count:.2f}" if done_costs else "n/a"
+
+        return {
+            "sample_size": sample,
+            "approval_rate": approval,
+            "avg_review_rounds": avg_rounds,
+            "retry_rate": retry,
+            "rescue_rate": rescue,
+            "scope_creep_rate": scope,
+            "avg_wall_clock_sec": avg_wall,
+            "claude_cost": cost_cell,
+        }
+
+    aggs = {name: _cells(name) for name in config_names}
+
+    metric_rows = [
+        ("sample_size", "Sample size"),
+        ("approval_rate", "Approval rate"),
+        ("avg_review_rounds", "Avg review rounds"),
+        ("retry_rate", "Retry rate"),
+        ("rescue_rate", "Rescue rate"),
+        ("scope_creep_rate", "Scope-creep rate"),
+        ("avg_wall_clock_sec", "Avg wall-clock sec"),
+        ("claude_cost", "Claude cost / approved task"),
+    ]
+
+    header = "| Metric | " + " | ".join(config_names) + " |"
+    sep = "| --- |" + " --- |" * len(config_names)
+    lines = [header, sep]
+    for key, label in metric_rows:
+        cells = " | ".join(aggs[n][key] for n in config_names)
+        lines.append(f"| {label} | {cells} |")
+
+    # Notes — ordered list comprehension preserves config_names declaration order
+    total_records = len(records)
+    zero_configs = [name for name in config_names if not by_config[name]]
+
+    notes: list[str] = ["", "## Notes", ""]
+    notes.append(f"- {total_records} record(s) read.")
+    if zero_configs:
+        notes.append(f"- Zero-record config(s): {', '.join(zero_configs)}.")
+    notes.append("- Codex-role phases contribute n/a to the Claude cost column; costs are never fabricated.")
+
+    return "\n".join(lines) + "\n" + "\n".join(notes) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# run_report — I/O wrapper around build_report
+# ---------------------------------------------------------------------------
+
+
+def run_report(set_root: Path) -> int:
+    """Read results.jsonl, build a markdown diff report, and print to stdout.
+
+    Returns 0 on success. Returns 2 when the JSONL is missing or has zero
+    records, naming `orchestrator benchmark <set>` as the next step.
+    """
+    results_path = set_root / "results.jsonl"
+    if not results_path.exists():
+        print(
+            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
+            file=sys.stderr,
+        )
+        return 2
+
+    records = load_records(results_path)
+    if not records:
+        print(
+            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
+            file=sys.stderr,
+        )
+        return 2
+
+    bset = load_benchmark_set(set_root)
+    config_names = list(bset.configs.keys())
+    sys.stdout.write(build_report(config_names, records))
     return 0
