@@ -13,7 +13,10 @@ keywords = ["llm", "agents", "code-review", "tdd", "claude", "codex", "ai-pair"]
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["ruff", "pytest"]
+# Pinned so a local venv and CI run the identical gate — keep in sync with
+# .github/workflows/ci.yml. Unpinned, a new ruff release changes the verdict of
+# `verify.sh` with no commit behind it. Bump these deliberately, in their own PR.
+dev = ["ruff==0.15.20", "pytest==9.1.1"]
 
 [project.urls]
 Homepage = "https://github.com/AscendyProject/redteam"
