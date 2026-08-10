@@ -1,0 +1,3360 @@
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
+new file mode 100644
+index 0000000..f4ba739
+--- /dev/null
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
+@@ -0,0 +1,16 @@
++Disagree:
++No open IR findings.
++
++Uncertain:
++No unresolved uncertainties. I did not rerun `bash .redteam/scripts/verify.sh` in this read-only review sandbox; I relied on the required task artifacts. `.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json` records `verification.last_exit_code == 0`, and `verification.log` shows `847 passed` with `verify.sh OK`.
++
++Agree:
++The diff is scoped to the three approved files only: `.redteam/workflows/benchmark.py`, `.redteam/workflows/orchestrator.py`, and `.redteam/tests/test_benchmark_report_and_cli.py`. No adapter, phase-runner, installer, config, plugin, or marketplace boundary was touched.
++
++`build_report` keeps declaration-order config columns, keeps zero-record configs, renders `n/a` for zero/unknown cost cases, avoids Pareto/scores/winner language, and produces discriminating output: realistic records with different done counts, rounds, retries, rescues, scope-creep counts, wall time, and costs produce different cells rather than collapsing to a constant.
++
++The new tests would have failed pre-change because `benchmark.build_report` / `benchmark.run_report` did not exist and the orchestrator had no `benchmark` or `benchmark-report` dispatch. CLI tests monkeypatch the benchmark runners, so they do not execute real benchmark runs.
++
++Security checklist: no new non-stdlib runtime imports, no `shell=True`, no verifier allowlist/snapshot changes, no installer changes, no reviewer-adapter capability changes, and no `gh`/PR creation path added by these new subcommands.
++
++REVIEW_DECISION: APPROVED
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch
+new file mode 100644
+index 0000000..aa6f8ec
+--- /dev/null
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch
+@@ -0,0 +1,786 @@
++diff --git a/.redteam/tests/test_benchmark_report_and_cli.py b/.redteam/tests/test_benchmark_report_and_cli.py
++new file mode 100644
++index 0000000..2b18d7f
++--- /dev/null
+++++ b/.redteam/tests/test_benchmark_report_and_cli.py
++@@ -0,0 +1,418 @@
+++"""Tests for build_report, run_report, and orchestrator.main CLI dispatch for benchmark subcommands.
+++
+++Covers:
+++- build_report: table shape, arithmetic (approval rate, avg wall-clock), column ordering,
+++  zero-record config (PR-001), n/a Claude cost paths, formatting rules.
+++- run_report: missing JSONL, empty JSONL → non-zero exit + operator message.
+++- orchestrator.main dispatch: benchmark / benchmark --dry-run / benchmark-report,
+++  unknown-flag / missing-arg / non-existent-dir → exit 2, USAGE or clear message.
+++- USAGE constant contains both new subcommand names (including --dry-run).
+++All CLI tests monkeypatch benchmark.run_benchmark / benchmark.run_report — no real execution.
+++"""
+++
+++from __future__ import annotations
+++
+++import sys
+++from pathlib import Path
+++
+++_WF = Path(__file__).resolve().parents[1] / "workflows"
+++if str(_WF) not in sys.path:
+++    sys.path.insert(0, str(_WF))
+++
+++import _engine  # noqa: E402
+++import benchmark as bm  # noqa: E402
+++from benchmark import build_report, run_report  # noqa: E402
+++
+++
+++# ---------------------------------------------------------------------------
+++# Shared helpers
+++# ---------------------------------------------------------------------------
+++
+++
+++def _orch():
+++    return _engine.orchestrator()
+++
+++
+++def _rec(
+++    config: str,
+++    outcome: str = "done",
+++    *,
+++    review_rounds: int = 2,
+++    retry_count: int = 0,
+++    rescue_count: int = 0,
+++    scope_creep_count: int = 0,
+++    wall_clock_sec: float = 60.0,
+++    claude_cost_usd: float | None = 0.10,
+++) -> dict:
+++    return {
+++        "schema_version": 1,
+++        "config": config,
+++        "task": "t1",
+++        "repetition": 1,
+++        "outcome": outcome,
+++        "review_rounds": review_rounds,
+++        "retry_count": retry_count,
+++        "rescue_count": rescue_count,
+++        "scope_creep_count": scope_creep_count,
+++        "wall_clock_sec": wall_clock_sec,
+++        "claude_cost_usd": claude_cost_usd,
+++        "started_at": "2024-01-01T00:00:00+00:00",
+++        "finished_at": "2024-01-01T00:01:00+00:00",
+++    }
+++
+++
+++def _make_set_dir(tmp_path: Path) -> Path:
+++    """Create a minimal benchmark set directory (just needs to exist as a dir)."""
+++    d = tmp_path / "myset"
+++    d.mkdir()
+++    return d
+++
+++
+++# ---------------------------------------------------------------------------
+++# build_report — table shape and arithmetic
+++# ---------------------------------------------------------------------------
+++
+++
+++def test_build_report_basic_table_shape():
+++    """2 configs, 3 records each → exactly 2 config columns in declaration order."""
+++    records = [
+++        _rec("alpha", "done", wall_clock_sec=60.0),
+++        _rec("alpha", "done", wall_clock_sec=90.0),
+++        _rec("alpha", "deferred", wall_clock_sec=120.0),
+++        _rec("beta", "done", wall_clock_sec=100.0),
+++        _rec("beta", "deferred", wall_clock_sec=50.0),
+++        _rec("beta", "error", wall_clock_sec=75.0),
+++    ]
+++    report = build_report(["alpha", "beta"], records)
+++
+++    # Header row has both config names
+++    assert "alpha" in report
+++    assert "beta" in report
+++    header_line = report.splitlines()[0]
+++    assert header_line.index("alpha") < header_line.index("beta")
+++
+++    # All 8 metric rows present
+++    for label in (
+++        "Sample size",
+++        "Approval rate",
+++        "Avg review rounds",
+++        "Retry rate",
+++        "Rescue rate",
+++        "Scope-creep rate",
+++        "Avg wall-clock sec",
+++        "Claude cost / approved task",
+++    ):
+++        assert label in report, f"metric row missing: {label!r}"
+++
+++
+++def test_build_report_approval_rate_arithmetic():
+++    """alpha: 2/3 done → 66.67%; beta: 1/3 done → 33.33%."""
+++    records = [
+++        _rec("alpha", "done"),
+++        _rec("alpha", "done"),
+++        _rec("alpha", "deferred"),
+++        _rec("beta", "done"),
+++        _rec("beta", "deferred"),
+++        _rec("beta", "error"),
+++    ]
+++    report = build_report(["alpha", "beta"], records)
+++    assert "66.67%" in report
+++    assert "33.33%" in report
+++
+++
+++def test_build_report_avg_wall_clock_arithmetic():
+++    """avg wall-clock: (60 + 90 + 120) / 3 = 90.00."""
+++    records = [
+++        _rec("cfg", "done", wall_clock_sec=60.0),
+++        _rec("cfg", "done", wall_clock_sec=90.0),
+++        _rec("cfg", "done", wall_clock_sec=120.0),
+++    ]
+++    report = build_report(["cfg"], records)
+++    assert "90.00" in report
+++
+++
+++def test_build_report_column_declaration_order():
+++    """Columns follow config_names declaration order, not record arrival order."""
+++    records = [_rec("zz"), _rec("aa")]
+++    report = build_report(["aa", "zz"], records)
+++    header = report.splitlines()[0]
+++    assert header.index("aa") < header.index("zz")
+++
+++
+++# ---------------------------------------------------------------------------
+++# build_report — n/a Claude cost paths
+++# ---------------------------------------------------------------------------
+++
+++
+++def test_build_report_claude_cost_na_when_all_approved_have_none_cost():
+++    """All done records have claude_cost_usd=None → cell is 'n/a', never '$0.00'."""
+++    records = [
+++        _rec("cfg", "done", claude_cost_usd=None),
+++        _rec("cfg", "done", claude_cost_usd=None),
+++    ]
+++    report = build_report(["cfg"], records)
+++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
+++    assert "n/a" in cost_line
+++    assert "$0.00" not in cost_line
+++
+++
+++def test_build_report_claude_cost_na_when_done_count_zero():
+++    """Config with only error/deferred records → Claude cost cell is 'n/a'."""
+++    records = [
+++        _rec("cfg", "error", claude_cost_usd=5.0),
+++        _rec("cfg", "deferred", claude_cost_usd=3.0),
+++    ]
+++    report = build_report(["cfg"], records)
+++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
+++    assert "n/a" in cost_line
+++
+++
+++# ---------------------------------------------------------------------------
+++# build_report — zero-record config (PR-001)
+++# ---------------------------------------------------------------------------
+++
+++
+++def test_build_report_zero_record_config_shown_as_column():
+++    """Config declared in config_names but absent from records still appears as a column."""
+++    records = [_rec("a", "done"), _rec("a", "done"), _rec("a", "deferred")]
+++    report = build_report(["a", "b"], records)
+++    header = report.splitlines()[0]
+++    assert "a" in header
+++    assert "b" in header
+++
+++
+++def test_build_report_zero_record_config_in_notes():
+++    """Notes section names the zero-record config."""
+++    records = [_rec("a")]
+++    report = build_report(["a", "b"], records)
+++    notes = report[report.index("## Notes") :]
+++    assert "b" in notes
+++
+++
+++def test_build_report_zero_record_config_notes_declaration_order():
+++    """Notes zero-record list follows config_names order (ordered list comprehension, not set diff)."""
+++    records = [_rec("b")]  # only 'b' has records; 'a' and 'c' are zero
+++    report = build_report(["a", "b", "c"], records)
+++    notes = report[report.index("## Notes") :]
+++    # The zero-record line should list 'a' before 'c' in declaration order
+++    zero_line = next(ln for ln in notes.splitlines() if "Zero-record" in ln)
+++    # "a, c" appears in the line (not "c, a"), confirming declaration order
+++    assert "a, c" in zero_line
+++
+++
+++# ---------------------------------------------------------------------------
+++# build_report — formatting rules
+++# ---------------------------------------------------------------------------
+++
+++
+++def test_build_report_rates_formatted_as_percentage():
+++    """Rates appear as 'XX.XX%', not raw decimals."""
+++    records = [_rec("cfg", "done"), _rec("cfg", "done"), _rec("cfg", "deferred")]
+++    report = build_report(["cfg"], records)
+++    # approval_rate = 2/3 ≈ 66.67%
+++    assert "66.67%" in report
+++
+++
+++def test_build_report_cost_formatted_as_dollar():
+++    """A non-n/a Claude cost appears as '$X.XX'."""
+++    records = [_rec("cfg", "done", claude_cost_usd=0.42)]
+++    report = build_report(["cfg"], records)
+++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
+++    assert "$0.42" in cost_line
+++
+++
+++def test_build_report_notes_has_record_count():
+++    """Notes section states the total number of records read."""
+++    records = [_rec("cfg"), _rec("cfg")]
+++    report = build_report(["cfg"], records)
+++    notes = report[report.index("## Notes") :]
+++    assert "2" in notes  # 2 record(s) read
+++
+++
+++def test_build_report_notes_codex_disclaimer():
+++    """Notes section mentions Codex and n/a in the cost disclaimer."""
+++    report = build_report(["cfg"], [_rec("cfg")])
+++    notes = report[report.index("## Notes") :]
+++    assert "Codex" in notes
+++    assert "n/a" in notes
+++
+++
+++# ---------------------------------------------------------------------------
+++# run_report — error cases
+++# ---------------------------------------------------------------------------
+++
+++
+++def test_run_report_missing_jsonl(tmp_path, capsys):
+++    """run_report on a dir without results.jsonl returns non-zero + operator message."""
+++    set_root = tmp_path / "myset"
+++    set_root.mkdir()
+++    rc = run_report(set_root)
+++    assert rc != 0
+++    captured = capsys.readouterr()
+++    assert "orchestrator benchmark" in (captured.out + captured.err)
+++
+++
+++def test_run_report_empty_jsonl(tmp_path, capsys):
+++    """run_report on a results.jsonl with zero records returns non-zero + operator message."""
+++    set_root = tmp_path / "myset"
+++    set_root.mkdir()
+++    (set_root / "results.jsonl").write_text("", encoding="utf-8")
+++    rc = run_report(set_root)
+++    assert rc != 0
+++    captured = capsys.readouterr()
+++    assert "orchestrator benchmark" in (captured.out + captured.err)
+++
+++
+++# ---------------------------------------------------------------------------
+++# orchestrator.main — CLI dispatch (all runners monkeypatched)
+++# ---------------------------------------------------------------------------
+++
+++
+++def test_main_benchmark_calls_run_benchmark(tmp_path, monkeypatch):
+++    """benchmark <set> dispatches to run_benchmark with dry_run=False."""
+++    orch = _orch()
+++    set_dir = _make_set_dir(tmp_path)
+++    calls: list[tuple] = []
+++    monkeypatch.setattr(bm, "run_benchmark", lambda path, *, dry_run=False, **kw: calls.append(("call", dry_run)) or 0)
+++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir)])
+++    assert rc == 0
+++    assert calls == [("call", False)]
+++
+++
+++def test_main_benchmark_dry_run_flag(tmp_path, monkeypatch):
+++    """benchmark <set> --dry-run calls run_benchmark with dry_run=True."""
+++    orch = _orch()
+++    set_dir = _make_set_dir(tmp_path)
+++    calls: list = []
+++    monkeypatch.setattr(bm, "run_benchmark", lambda path, *, dry_run=False, **kw: calls.append(dry_run) or 0)
+++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir), "--dry-run"])
+++    assert rc == 0
+++    assert calls == [True]
+++
+++
+++def test_main_benchmark_wrong_dry_run_ordering_rejected(tmp_path, monkeypatch, capsys):
+++    """benchmark --dry-run <set> (wrong ordering) → exit 2, USAGE on stderr, no run_benchmark."""
+++    orch = _orch()
+++    set_dir = _make_set_dir(tmp_path)
+++    calls: list = []
+++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
+++    rc = orch.main(["orchestrator.py", "benchmark", "--dry-run", str(set_dir)])
+++    assert rc == 2
+++    assert not calls
+++    err = capsys.readouterr().err
+++    assert err  # some output on stderr (USAGE or error message)
+++
+++
+++def test_main_benchmark_report_calls_run_report(tmp_path, monkeypatch):
+++    """benchmark-report <set> dispatches to run_report."""
+++    orch = _orch()
+++    set_dir = _make_set_dir(tmp_path)
+++    calls: list = []
+++    monkeypatch.setattr(bm, "run_report", lambda path: calls.append(str(path)) or 0)
+++    rc = orch.main(["orchestrator.py", "benchmark-report", str(set_dir)])
+++    assert rc == 0
+++    assert len(calls) == 1
+++
+++
+++def test_main_benchmark_returns_runner_exit_code(tmp_path, monkeypatch):
+++    """main forwards the exit code from run_benchmark."""
+++    orch = _orch()
+++    set_dir = _make_set_dir(tmp_path)
+++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: 3)
+++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir)])
+++    assert rc == 3
+++
+++
+++def test_main_benchmark_unknown_flag_rejected(tmp_path, monkeypatch, capsys):
+++    """benchmark <set> --unknown → exit 2 + message on stderr, run_benchmark not called."""
+++    orch = _orch()
+++    set_dir = _make_set_dir(tmp_path)
+++    calls: list = []
+++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
+++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir), "--unknown"])
+++    assert rc == 2
+++    assert not calls
+++    assert capsys.readouterr().err
+++
+++
+++def test_main_benchmark_missing_set_root(capsys):
+++    """benchmark with no <set-root> → exit 2 + output on stderr."""
+++    orch = _orch()
+++    rc = orch.main(["orchestrator.py", "benchmark"])
+++    assert rc == 2
+++    assert capsys.readouterr().err
+++
+++
+++def test_main_benchmark_report_missing_set_root(capsys):
+++    """benchmark-report with no <set-root> → exit 2 + output on stderr."""
+++    orch = _orch()
+++    rc = orch.main(["orchestrator.py", "benchmark-report"])
+++    assert rc == 2
+++    assert capsys.readouterr().err
+++
+++
+++def test_main_benchmark_nonexistent_dir(tmp_path, monkeypatch, capsys):
+++    """benchmark with non-existent <set-root> → exit 2 + message, run_benchmark not called."""
+++    orch = _orch()
+++    calls: list = []
+++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
+++    rc = orch.main(["orchestrator.py", "benchmark", str(tmp_path / "no-such-dir")])
+++    assert rc == 2
+++    assert not calls
+++    assert capsys.readouterr().err
+++
+++
+++def test_main_benchmark_report_nonexistent_dir(tmp_path, monkeypatch, capsys):
+++    """benchmark-report with non-existent <set-root> → exit 2 + message, run_report not called."""
+++    orch = _orch()
+++    calls: list = []
+++    monkeypatch.setattr(bm, "run_report", lambda *a, **kw: calls.append(1) or 0)
+++    rc = orch.main(["orchestrator.py", "benchmark-report", str(tmp_path / "no-such-dir")])
+++    assert rc == 2
+++    assert not calls
+++    assert capsys.readouterr().err
+++
+++
+++def test_main_benchmark_runner_not_called_on_bad_args(tmp_path, monkeypatch, capsys):
+++    """run_benchmark must NOT be called on any bad-arg path — verified by raising sentinel."""
+++    orch = _orch()
+++
+++    def _fail(*a, **kw) -> int:  # pragma: no cover
+++        raise AssertionError("run_benchmark must NOT be called on bad args")
+++
+++    monkeypatch.setattr(bm, "run_benchmark", _fail)
+++
+++    # Missing set-root
+++    assert orch.main(["orchestrator.py", "benchmark"]) == 2
+++    capsys.readouterr()
+++
+++    # Unknown flag
+++    set_dir = _make_set_dir(tmp_path)
+++    assert orch.main(["orchestrator.py", "benchmark", str(set_dir), "--bad"]) == 2
+++    capsys.readouterr()
+++
+++    # Non-existent directory
+++    assert orch.main(["orchestrator.py", "benchmark", str(tmp_path / "no-such")]) == 2
+++    capsys.readouterr()
+++
+++    # Wrong --dry-run ordering
+++    assert orch.main(["orchestrator.py", "benchmark", "--dry-run", str(set_dir)]) == 2
+++    capsys.readouterr()
+++
+++
+++# ---------------------------------------------------------------------------
+++# USAGE constant
+++# ---------------------------------------------------------------------------
+++
+++
+++def test_usage_constant_lists_benchmark_subcommands():
+++    """USAGE constant in orchestrator.py mentions both new subcommand names."""
+++    orch = _orch()
+++    assert "benchmark" in orch.USAGE
+++    assert "benchmark-report" in orch.USAGE
+++
+++
+++def test_usage_constant_documents_dry_run():
+++    """USAGE constant documents the --dry-run flag for the benchmark subcommand."""
+++    orch = _orch()
+++    assert "--dry-run" in orch.USAGE
++diff --git a/.redteam/workflows/benchmark.py b/.redteam/workflows/benchmark.py
++index f90d17e..6c82a76 100644
++--- a/.redteam/workflows/benchmark.py
+++++ b/.redteam/workflows/benchmark.py
++@@ -17,6 +17,8 @@ Exposes:
++ - extract_metrics()     — deterministic metric extractor over state["phase_telemetry"].
++ - run_one()             — isolated subprocess dispatch for one (config, task, rep) triple.
++ - run_benchmark()       — outer loop: configs × tasks × repetitions, resumable + budgeted.
+++- build_report()        — pure: markdown diff table from config_names + records list.
+++- run_report()          — I/O wrapper: reads results.jsonl, prints report to stdout.
++ """
++ # NOTE: benchmark.py source intentionally contains no "gh ", "git push", "pr create",
++ # "--force", or auto-merge language, and does not import phase_runners.create_pr.
++@@ -651,3 +653,143 @@ def run_benchmark(
++         this_inv_records.append(record)
++ 
++     return 0
+++
+++
+++# ---------------------------------------------------------------------------
+++# build_report — pure aggregation + markdown diff table
+++# ---------------------------------------------------------------------------
+++
+++
+++def build_report(config_names: list[str], records: list[dict]) -> str:
+++    """Build a markdown diff table from declared config names and raw records.
+++
+++    Pure: no I/O. config_names drives column ordering (declaration order from
+++    benchmark.toml), so a zero-record config is still shown as a column (PR-001).
+++    Records whose "config" key is not in config_names are silently ignored.
+++
+++    Formatting rules:
+++    - Floats: f"{x:.2f}"
+++    - Rates: f"{x:.2f}%" (percentage form)
+++    - Costs: f"${x:.2f}" or "n/a" (never "$0.00" when there is no real data)
+++    - Integers: plain int str
+++    - n/a: any cell that cannot be computed (zero total, zero done, no cost data)
+++    """
+++    # Group records by config in insertion order; unknown configs skipped
+++    by_config: dict[str, list[dict]] = {name: [] for name in config_names}
+++    for r in records:
+++        cfg = r.get("config", "")
+++        if cfg in by_config:
+++            by_config[cfg].append(r)
+++
+++    def _cells(name: str) -> dict[str, str]:
+++        recs = by_config[name]
+++        total = len(recs)
+++        done_count = sum(1 for r in recs if r.get("outcome") == "done")
+++        deferred_count = sum(1 for r in recs if r.get("outcome") == "deferred")
+++        error_count = sum(1 for r in recs if r.get("outcome") == "error")
+++
+++        sample = f"{total} (done={done_count}, deferred={deferred_count}, error={error_count})"
+++        if total == 0:
+++            return {
+++                "sample_size": sample,
+++                "approval_rate": "n/a",
+++                "avg_review_rounds": "n/a",
+++                "retry_rate": "n/a",
+++                "rescue_rate": "n/a",
+++                "scope_creep_rate": "n/a",
+++                "avg_wall_clock_sec": "n/a",
+++                "claude_cost": "n/a",
+++            }
+++
+++        approval = f"{done_count / total * 100:.2f}%"
+++        avg_rounds = f"{sum(r.get('review_rounds', 0) for r in recs) / total:.2f}"
+++        retry = f"{sum(r.get('retry_count', 0) for r in recs) / total * 100:.2f}%"
+++        rescue = f"{sum(r.get('rescue_count', 0) for r in recs) / total * 100:.2f}%"
+++        scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
+++        avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
+++
+++        if done_count == 0:
+++            cost_cell = "n/a"
+++        else:
+++            done_costs = [
+++                r["claude_cost_usd"]
+++                for r in recs
+++                if r.get("outcome") == "done" and r.get("claude_cost_usd") is not None
+++            ]
+++            cost_cell = f"${sum(done_costs) / done_count:.2f}" if done_costs else "n/a"
+++
+++        return {
+++            "sample_size": sample,
+++            "approval_rate": approval,
+++            "avg_review_rounds": avg_rounds,
+++            "retry_rate": retry,
+++            "rescue_rate": rescue,
+++            "scope_creep_rate": scope,
+++            "avg_wall_clock_sec": avg_wall,
+++            "claude_cost": cost_cell,
+++        }
+++
+++    aggs = {name: _cells(name) for name in config_names}
+++
+++    metric_rows = [
+++        ("sample_size", "Sample size"),
+++        ("approval_rate", "Approval rate"),
+++        ("avg_review_rounds", "Avg review rounds"),
+++        ("retry_rate", "Retry rate"),
+++        ("rescue_rate", "Rescue rate"),
+++        ("scope_creep_rate", "Scope-creep rate"),
+++        ("avg_wall_clock_sec", "Avg wall-clock sec"),
+++        ("claude_cost", "Claude cost / approved task"),
+++    ]
+++
+++    header = "| Metric | " + " | ".join(config_names) + " |"
+++    sep = "| --- |" + " --- |" * len(config_names)
+++    lines = [header, sep]
+++    for key, label in metric_rows:
+++        cells = " | ".join(aggs[n][key] for n in config_names)
+++        lines.append(f"| {label} | {cells} |")
+++
+++    # Notes — ordered list comprehension preserves config_names declaration order
+++    total_records = len(records)
+++    zero_configs = [name for name in config_names if not by_config[name]]
+++
+++    notes: list[str] = ["", "## Notes", ""]
+++    notes.append(f"- {total_records} record(s) read.")
+++    if zero_configs:
+++        notes.append(f"- Zero-record config(s): {', '.join(zero_configs)}.")
+++    notes.append("- Codex-role phases contribute n/a to the Claude cost column; costs are never fabricated.")
+++
+++    return "\n".join(lines) + "\n" + "\n".join(notes) + "\n"
+++
+++
+++# ---------------------------------------------------------------------------
+++# run_report — I/O wrapper around build_report
+++# ---------------------------------------------------------------------------
+++
+++
+++def run_report(set_root: Path) -> int:
+++    """Read results.jsonl, build a markdown diff report, and print to stdout.
+++
+++    Returns 0 on success. Returns 2 when the JSONL is missing or has zero
+++    records, naming `orchestrator benchmark <set>` as the next step.
+++    """
+++    results_path = set_root / "results.jsonl"
+++    if not results_path.exists():
+++        print(
+++            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
+++            file=sys.stderr,
+++        )
+++        return 2
+++
+++    records = load_records(results_path)
+++    if not records:
+++        print(
+++            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
+++            file=sys.stderr,
+++        )
+++        return 2
+++
+++    bset = load_benchmark_set(set_root)
+++    config_names = list(bset.configs.keys())
+++    sys.stdout.write(build_report(config_names, records))
+++    return 0
++diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
++index 76dd167..6778dde 100644
++--- a/.redteam/workflows/orchestrator.py
+++++ b/.redteam/workflows/orchestrator.py
++@@ -10,6 +10,8 @@ Usage:
++     python3 .redteam/workflows/orchestrator.py new <batch-dir> <slug> [--title <text>]
++     python3 .redteam/workflows/orchestrator.py review
++     python3 .redteam/workflows/orchestrator.py config
+++    python3 .redteam/workflows/orchestrator.py benchmark <set-root> [--dry-run]
+++    python3 .redteam/workflows/orchestrator.py benchmark-report <set-root>
++ 
++ Walks each task in <batch-dir>/tasks/ through the 8-phase pipeline,
++ persists state.json after every phase, blocks at human gates (sentinel files),
++@@ -70,6 +72,7 @@ from adapters import (  # type: ignore[import-not-found]  # noqa: E402
++ )
++ from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
++ import config_cli  # type: ignore[import-not-found]  # noqa: E402
+++import benchmark  # type: ignore[import-not-found]  # noqa: E402
++ 
++ 
++ # ---------- phase order & runner registry ----------
++@@ -2518,6 +2521,24 @@ def cmd_config(repo: Path | None = None) -> int:
++     return config_cli.run_config(rr, _adversarial_pairing_error)
++ 
++ 
+++def cmd_benchmark(set_root: Path, *, dry_run: bool = False) -> int:
+++    """Dispatch to benchmark.run_benchmark.
+++
+++    Returns the exit code from run_benchmark (0 = complete, 3 = budget abort).
+++    Does NOT touch batch state, _run_pipeline, or create_pr.
+++    """
+++    return benchmark.run_benchmark(set_root, dry_run=dry_run)
+++
+++
+++def cmd_benchmark_report(set_root: Path) -> int:
+++    """Dispatch to benchmark.run_report.
+++
+++    Returns 0 on success, 2 when results.jsonl is missing or empty.
+++    Does NOT touch batch state, _run_pipeline, or create_pr.
+++    """
+++    return benchmark.run_report(set_root)
+++
+++
++ USAGE = (
++     "usage: orchestrator.py decompose <batch-dir>\n"
++     "       orchestrator.py {start|resume|wait-and-resume} <batch-dir>\n"
++@@ -2525,6 +2546,8 @@ USAGE = (
++     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
++     "       orchestrator.py review\n"
++     "       orchestrator.py config\n"
+++    "       orchestrator.py benchmark <set-root> [--dry-run]\n"
+++    "       orchestrator.py benchmark-report <set-root>\n"
++     "  decompose        — generate goal.json + task briefs from goal.md; run the\n"
++     "                     cross-provider decomposition review gate; stop before any\n"
++     "                     task is dispatched (run `start` after to execute the stack)\n"
++@@ -2538,7 +2561,10 @@ USAGE = (
++     "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
++     "  review           — one-shot adversarial review of the current branch diff with the\n"
++     "                     configured reviewer (a different provider than the worker); no batch\n"
++-    "  config           — interactively pick per-role models and write .redteam/config.toml"
+++    "  config           — interactively pick per-role models and write .redteam/config.toml\n"
+++    "  benchmark        — run configs × tasks × repetitions against .redteam/benchmarks/<set>;\n"
+++    "                     [--dry-run] prints the plan + cost estimate without executing\n"
+++    "  benchmark-report — aggregate results.jsonl into a markdown diff table (no Pareto/score)"
++ )
++ 
++ 
++@@ -2577,6 +2603,33 @@ def main(argv: list[str]) -> int:
++             return 2
++         return cmd_status(batch_dir, as_json=bool(extra))
++ 
+++    if command in ("benchmark", "benchmark-report"):
+++        # Chosen --dry-run ordering: benchmark <set-root> [--dry-run].
+++        # A flag in the argv[2] (set-root) position signals wrong ordering → USAGE.
+++        if argv[2].startswith("--"):
+++            print(USAGE, file=sys.stderr)
+++            return 2
+++        set_root = batch_dir  # already Path(argv[2]).resolve()
+++        if not set_root.is_dir():
+++            print(
+++                f"error: set-root does not exist or is not a directory: {argv[2]}",
+++                file=sys.stderr,
+++            )
+++            return 2
+++        extra = argv[3:]
+++        if command == "benchmark":
+++            if extra == ["--dry-run"]:
+++                return cmd_benchmark(set_root, dry_run=True)
+++            if not extra:
+++                return cmd_benchmark(set_root, dry_run=False)
+++            print(f"error: unknown benchmark argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
+++            return 2
+++        # benchmark-report
+++        if extra:
+++            print(f"error: unknown benchmark-report argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
+++            return 2
+++        return cmd_benchmark_report(set_root)
+++
++     print(f"error: unknown command: {command!r}\n\n{USAGE}", file=sys.stderr)
++     return 2
++ 
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
++index a620fe2..cd6878b 100644
++--- a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
++@@ -1,14 +1,15 @@
++ {
++   "task_id": "task-001-benchmark-config-and-store",
++   "mode": "agent-pair",
++-  "phase": "create_pr",
+++  "phase": "done",
++   "phases_completed": [
++     "plan_outcome",
++     "plan_review",
++     "implement",
++-    "review_code"
+++    "review_code",
+++    "create_pr"
++   ],
++-  "next_phase": "create_pr",
+++  "next_phase": "done",
++   "decision": "pending",
++   "owner": "claude",
++   "reviewer": "codex",
++@@ -60,7 +61,7 @@
++   "last_failure_diff": null,
++   "deferred_requirements": [],
++   "branch": "redteam/task-001-benchmark-config-and-store",
++-  "pr_url": null,
+++  "pr_url": "https://github.com/AscendyProject/redteam/pull/154",
++   "phase_telemetry": [
++     {
++       "phase": "plan_outcome",
++@@ -85,10 +86,18 @@
++       "cost_usd": 0.9470895000000003,
++       "duration_sec": 435.263,
++       "outcome": "approved"
+++    },
+++    {
+++      "phase": "create_pr",
+++      "provider": "claude",
+++      "model": null,
+++      "cost_usd": 0.9944235000000001,
+++      "duration_sec": 119.49,
+++      "outcome": "approved"
++     }
++   ],
++   "created_at": "2026-07-15T14:09:31.204373+00:00",
++-  "updated_at": "2026-07-15T14:23:31.041737+00:00",
+++  "updated_at": "2026-07-15T16:22:32.070942+00:00",
++   "base_branch": "main",
++   "phase_started_at": "2026-07-15T14:23:31.041717+00:00",
++   "last_user_response": null,
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
++index 2054d88..7430238 100644
++--- a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
++@@ -1,14 +1,15 @@
++ {
++   "task_id": "task-002-benchmark-runner",
++   "mode": "agent-pair",
++-  "phase": "create_pr",
+++  "phase": "done",
++   "phases_completed": [
++     "plan_outcome",
++     "plan_review",
++     "implement",
++-    "review_code"
+++    "review_code",
+++    "create_pr"
++   ],
++-  "next_phase": "create_pr",
+++  "next_phase": "done",
++   "decision": "pending",
++   "owner": "claude",
++   "reviewer": "codex",
++@@ -100,7 +101,7 @@
++     }
++   ],
++   "branch": "redteam/task-002-benchmark-runner",
++-  "pr_url": null,
+++  "pr_url": "https://github.com/AscendyProject/redteam/pull/155",
++   "phase_telemetry": [
++     {
++       "phase": "plan_outcome",
++@@ -165,10 +166,18 @@
++       "cost_usd": 1.533762,
++       "duration_sec": 659.063,
++       "outcome": "approved"
+++    },
+++    {
+++      "phase": "create_pr",
+++      "provider": "claude",
+++      "model": null,
+++      "cost_usd": 1.424842,
+++      "duration_sec": 239.878,
+++      "outcome": "approved"
++     }
++   ],
++   "created_at": "2026-07-15T14:25:38.418298+00:00",
++-  "updated_at": "2026-07-15T16:15:01.518133+00:00",
+++  "updated_at": "2026-07-15T16:22:32.074156+00:00",
++   "base_branch": "redteam/task-001-benchmark-config-and-store",
++   "base_branch_sha": "b7a59d48b7b8adf7061eeaa45aaaa3fd843d340e",
++   "phase_started_at": "2026-07-15T16:15:01.518100+00:00",
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md
+new file mode 100644
+index 0000000..d509c5b
+--- /dev/null
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md
+@@ -0,0 +1,56 @@
++# Outcome — `benchmark-report` + wire `benchmark` / `benchmark-report` into `orchestrator.main`
++
++## Goal
++Ship the last layer of the #146 Phase 1 MVP benchmark: an aggregation +
++markdown-diff `benchmark-report` on top of task-002's JSONL, plus CLI wiring
++so an operator can run `python3 .redteam/workflows/orchestrator.py benchmark
++<set-root> [--dry-run]` and `... benchmark-report <set-root>` end-to-end
++against `.redteam/benchmarks/<set>` — no Pareto, no hidden score, no plugin
++surface.
++
++## Done-when
++- [ ] `.redteam/workflows/benchmark.py` defines a pure `build_report(config_names: list[str], records: list[dict]) -> str` that returns a markdown table with one column per name in `config_names` (declaration order, kept even when a name has zero records), one row per aggregated metric (sample size + per-outcome counts, approval rate, avg review rounds, retry rate, rescue rate, scope-creep rate, avg wall-clock sec, Claude cost per approved task), followed by a "Notes" section listing the record count, any zero-record configs (derived from `config_names` minus configs present in `records`), and the Codex-cost `n/a` disclaimer.
++- [ ] Formatting in `build_report` output: floats `f"{x:.2f}"`, rates as `%` with two decimals (e.g. `54.17%`), costs as `$0.42` / `n/a`, integers rendered plain — asserted by tests.
++- [ ] Claude-cost cell renders `n/a` (never `$0.00`) whenever `done_count == 0` OR every done-outcome record has `claude_cost_usd is None` — asserted by tests.
++- [ ] `.redteam/workflows/benchmark.py` defines `run_report(set_root: Path) -> int` that reads `set_root / "results.jsonl"` via `load_records`, obtains `config_names` from `load_benchmark_set(set_root).configs` in declaration order, prints `build_report(config_names, records)` to stdout and returns `0`; when the JSONL is missing OR contains zero records it prints a clear message (naming `orchestrator benchmark <set>` as the next step) and returns a non-zero exit code (`2`).
++- [ ] `.redteam/workflows/orchestrator.py`'s module docstring **and** `USAGE` string constant both list `benchmark <set-root> [--dry-run]` and `benchmark-report <set-root>` with one-line summaries — asserted by a substring test over the `USAGE` constant.
++- [ ] `main(argv)` in `orchestrator.py` dispatches `benchmark <set-root> [--dry-run]` to a `cmd_benchmark(set_root, dry_run=...)` helper that calls `benchmark.run_benchmark(set_root, dry_run=...)`, and `benchmark-report <set-root>` to a `cmd_benchmark_report(set_root)` helper that calls `benchmark.run_report(set_root)`; both helpers return the callee's exit code.
++- [ ] `main` accepts exactly one `--dry-run` position for `benchmark` (either `benchmark --dry-run <set>` or `benchmark <set> --dry-run` — pick one, document in `USAGE`, assert in tests); the un-picked ordering plus any other flag returns `2` with `USAGE` on stderr and does NOT call `run_benchmark`.
++- [ ] `main` rejects: (a) a missing `<set-root>` for either subcommand → exit `2` + `USAGE` on stderr, (b) a `<set-root>` path that does not exist or is not a directory → exit `2` + clear message on stderr, (c) any unknown flag on `benchmark` / `benchmark-report` → exit `2` + `USAGE`-or-clear-message on stderr. In none of these cases is `run_benchmark` / `run_report` invoked (verified by monkeypatch-fail-if-called).
++- [ ] Neither new subcommand touches `_run_pipeline`, batch state, `create_pr`, or `gh` — enforced by keeping the dispatch in the `main` `if command == ...` ladder above the batch commands and by tests that monkeypatch `benchmark.run_benchmark` / `benchmark.run_report` and observe only those calls fire.
++- [ ] A new `.redteam/tests/test_benchmark_report_and_cli.py` covers every case listed in input.md's "Tests to add" section — pure `build_report` diff arithmetic (approval rate + avg wall-clock spot-check), the two `n/a` Claude-cost paths, the zero-record-config PR-001 case, `run_report` on empty/missing JSONL, all `orchestrator.main` dispatch and error-handling cases with `benchmark.run_benchmark` / `benchmark.run_report` monkeypatched (no real benchmark execution), and the `USAGE` substring assertion.
++- [ ] `bash .redteam/scripts/verify.sh` is green (ruff + full pytest, including `test_agents_generic_prompts.py`).
++- [ ] Only the three files listed under "Affected files" have been modified/created; nothing under `phase_runners/`, `adapters/`, `config.py`, `install.py`, `.claude/`, or the plugin/marketplace JSON has changed (checked via `git diff --name-only` in review).
++
++## Out of scope
++- Matrix expansion, Pareto frontier, `recommend-models --profile`, LLM-judge scorers, sqlite mirror, external eval-platform export (all Phase 2).
++- A Claude Code plugin command (`.claude/commands/redteam-benchmark.md` / marketplace/plugin JSON): the CLI is Phase 1's operator surface.
++- `install.py` changes to seed a starter benchmark set.
++- Any change to `state.json` / `phase_telemetry` shape, the `benchmark.toml` schema, the `results.jsonl` schema, or the `extract_metrics` / `run_benchmark` / `run_one` behavior fixed by task-001/002.
++- Modifying `.redteam/config.toml` or any batch state.
++- Adding a headline "quality" score column or any single-number ranking.
++
++## Affected files
++- `.redteam/workflows/benchmark.py` — add `build_report` (pure) + `run_report` (I/O wrapper).
++- `.redteam/workflows/orchestrator.py` — extend `USAGE` docstring + `USAGE` constant; add `cmd_benchmark` / `cmd_benchmark_report`; wire both into `main(argv)` with `--dry-run` handling and the standard unknown/missing/bad-arg → exit-2 discipline.
++- `(new) .redteam/tests/test_benchmark_report_and_cli.py` — covers `build_report`, `run_report`, CLI dispatch (monkeypatched), and the `USAGE` substring assertion; created here at the canonical test location by the pipeline's implement phase, NOT under the task dir.
++
++## Verification
++
++### Existing (must continue to pass)
++
++```yaml
++commands:
++  - bash .redteam/scripts/verify.sh
++```
++
++### To be created (the test-writing phase will define exact test names)
++- tests under `.redteam/tests/` covering: `build_report` markdown table shape + arithmetic (approval rate, avg wall-clock, retry / rescue / scope-creep rate), declaration-order column ordering, zero-record-config PR-001 case (column kept + Notes lists it), both `n/a` Claude-cost paths (`done_count == 0`, all `claude_cost_usd is None`), formatting rules (`.2f` floats, `%` rates, `$` costs, plain ints), `run_report` on empty/missing JSONL (non-zero exit + operator-facing message), `orchestrator.main` dispatch for `benchmark` (both with and without `--dry-run` in the chosen ordering), `benchmark-report`, unknown-flag / missing-arg / non-existent-dir all → exit `2` with `USAGE` or clear message, `USAGE` constant substring check for both new subcommands, and a "runner not called on bad args" assertion via monkeypatched `benchmark.run_benchmark` / `benchmark.run_report`.
++- All CLI tests must monkeypatch `benchmark.run_benchmark` and `benchmark.run_report` — no real benchmark execution in the test suite.
++
++## Risks
++- **`--dry-run` flag position.** Input.md leaves the ordering `benchmark --dry-run <set>` vs `benchmark <set> --dry-run` to the implementer ("pick one, document + assert"). The implementer must commit to one ordering, document it in `USAGE`, and assert both the accepted ordering AND the rejected one (exit `2`). Cross-check against `cmd_status`'s handling (`argv[3:] == ["--json"]`) for consistency, but they are independent — this is not a project-wide flag-parsing refactor.
++- **`run_report` exit code on missing JSONL.** Input.md says "e.g. `2`". `2` is already this project's "bad args / usage" code; some readers may prefer a distinct code (e.g. `4`) to distinguish "no data yet" from "unusable invocation". Recommend sticking with `2` for consistency with the surrounding CLI discipline — flag if the reviewer prefers a distinct code.
++- **`USAGE` module docstring vs `USAGE` constant.** The current file carries both (lines 4–12 docstring + lines 2521–2542 constant). Keeping them in sync is a manual chore; the substring test only guards the constant. Adding a docstring-substring test is arguably better hygiene but is outside the Done-when — flag if the reviewer wants both guarded.
++- **Codex-role cost disclaimer wording.** The Notes line about `n/a` Codex cost is prose. If the operator later wants to grep this line, the exact wording matters. The tests should pin at least a stable substring (e.g. `"Codex"` and `"n/a"`).
++- **Zero-record-config detection via set difference.** `set(config_names) - {r["config"] for r in records}` loses declaration order for the Notes list. The implementer must iterate `config_names` and filter — an ordered-list comprehension, not a set diff — so the Notes line is deterministic; call out in the test.
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md
+new file mode 100644
+index 0000000..de1df73
+--- /dev/null
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md
+@@ -0,0 +1,12 @@
++Disagree:
++No blocking disagreements.
++
++Uncertain:
++No unresolved uncertainties. The only operational caveat is that `orchestrator.main` currently binds `argv[2]` to `batch_dir` before batch dispatch ([.redteam/workflows/orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:2558)), so implementation must add `benchmark` handling before that path normalization if it chooses `benchmark --dry-run <set-root>`. The outcome already calls out choosing and testing one flag ordering at lines 18 and 52, so this is covered.
++
++Agree:
++The plan satisfies the task scope. It identifies the three affected files only, preserves the no-score/no-Pareto boundary, keeps CLI calls separate from the batch pipeline, and requires monkeypatched CLI tests rather than real benchmark execution. The `## Verification` section contains a parseable YAML block with exactly `bash .redteam/scripts/verify.sh` at outcome lines 38-45, matching the input requirement at input lines 202-210 and the extractor’s expected `## Verification` fenced YAML format.
++
++No open PR findings.
++
++REVIEW_DECISION: APPROVED
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/pr.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/pr.md
+new file mode 100644
+index 0000000..a203578
+--- /dev/null
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/pr.md
+@@ -0,0 +1,45 @@
++## What
++Ship the last layer of the #146 Phase 1 MVP benchmark: an aggregation +
++markdown-diff `benchmark-report` on top of task-002's JSONL, plus CLI wiring
++so an operator can run `python3 .redteam/workflows/orchestrator.py benchmark
++<set-root> [--dry-run]` and `... benchmark-report <set-root>` end-to-end
++against `.redteam/benchmarks/<set>` — no Pareto, no hidden score, no plugin
++surface.
++
++## Why
++This is the third and final task of the #146 Phase 1 MVP benchmark, stacked
++on `task-002-benchmark-runner` (which added the loop + `run_one` seam + budget
+++ safety) and `task-001-benchmark-config-and-store` (the TOML loader + JSONL
++schema/store). Everything below the operator surface was already in place
++after task-002; this task adds the `benchmark-report` aggregation + markdown
++diff and wires both new subcommands into `orchestrator.main` so the Phase 1
++MVP is operator-usable end-to-end.
++
++## Done-when
++- [ ] `.redteam/workflows/benchmark.py` defines a pure `build_report(config_names: list[str], records: list[dict]) -> str` that returns a markdown table with one column per name in `config_names` (declaration order, kept even when a name has zero records), one row per aggregated metric (sample size + per-outcome counts, approval rate, avg review rounds, retry rate, rescue rate, scope-creep rate, avg wall-clock sec, Claude cost per approved task), followed by a "Notes" section listing the record count, any zero-record configs (derived from `config_names` minus configs present in `records`), and the Codex-cost `n/a` disclaimer.
++- [ ] Formatting in `build_report` output: floats `f"{x:.2f}"`, rates as `%` with two decimals (e.g. `54.17%`), costs as `$0.42` / `n/a`, integers rendered plain — asserted by tests.
++- [ ] Claude-cost cell renders `n/a` (never `$0.00`) whenever `done_count == 0` OR every done-outcome record has `claude_cost_usd is None` — asserted by tests.
++- [ ] `.redteam/workflows/benchmark.py` defines `run_report(set_root: Path) -> int` that reads `set_root / "results.jsonl"` via `load_records`, obtains `config_names` from `load_benchmark_set(set_root).configs` in declaration order, prints `build_report(config_names, records)` to stdout and returns `0`; when the JSONL is missing OR contains zero records it prints a clear message (naming `orchestrator benchmark <set>` as the next step) and returns a non-zero exit code (`2`).
++- [ ] `.redteam/workflows/orchestrator.py`'s module docstring **and** `USAGE` string constant both list `benchmark <set-root> [--dry-run]` and `benchmark-report <set-root>` with one-line summaries — asserted by a substring test over the `USAGE` constant.
++- [ ] `main(argv)` in `orchestrator.py` dispatches `benchmark <set-root> [--dry-run]` to a `cmd_benchmark(set_root, dry_run=...)` helper that calls `benchmark.run_benchmark(set_root, dry_run=...)`, and `benchmark-report <set-root>` to a `cmd_benchmark_report(set_root)` helper that calls `benchmark.run_report(set_root)`; both helpers return the callee's exit code.
++- [ ] `main` accepts exactly one `--dry-run` position for `benchmark` (either `benchmark --dry-run <set>` or `benchmark <set> --dry-run` — pick one, document in `USAGE`, assert in tests); the un-picked ordering plus any other flag returns `2` with `USAGE` on stderr and does NOT call `run_benchmark`.
++- [ ] `main` rejects: (a) a missing `<set-root>` for either subcommand → exit `2` + `USAGE` on stderr, (b) a `<set-root>` path that does not exist or is not a directory → exit `2` + clear message on stderr, (c) any unknown flag on `benchmark` / `benchmark-report` → exit `2` + `USAGE`-or-clear-message on stderr. In none of these cases is `run_benchmark` / `run_report` invoked (verified by monkeypatch-fail-if-called).
++- [ ] Neither new subcommand touches `_run_pipeline`, batch state, `create_pr`, or `gh` — enforced by keeping the dispatch in the `main` `if command == ...` ladder above the batch commands and by tests that monkeypatch `benchmark.run_benchmark` / `benchmark.run_report` and observe only those calls fire.
++- [ ] A new `.redteam/tests/test_benchmark_report_and_cli.py` covers every case listed in input.md's "Tests to add" section — pure `build_report` diff arithmetic (approval rate + avg wall-clock spot-check), the two `n/a` Claude-cost paths, the zero-record-config PR-001 case, `run_report` on empty/missing JSONL, all `orchestrator.main` dispatch and error-handling cases with `benchmark.run_benchmark` / `benchmark.run_report` monkeypatched (no real benchmark execution), and the `USAGE` substring assertion.
++- [ ] `bash .redteam/scripts/verify.sh` is green (ruff + full pytest, including `test_agents_generic_prompts.py`).
++- [ ] Only the three files listed under "Affected files" have been modified/created; nothing under `phase_runners/`, `adapters/`, `config.py`, `install.py`, `.claude/`, or the plugin/marketplace JSON has changed (checked via `git diff --name-only` in review).
++
++## Verification
++- Tests: test_build_report_basic_table_shape, test_build_report_approval_rate_arithmetic, test_build_report_avg_wall_clock_arithmetic, test_build_report_column_declaration_order, test_build_report_claude_cost_na_when_all_approved_have_none_cost, test_build_report_claude_cost_na_when_done_count_zero, test_build_report_zero_record_config_shown_as_column, test_build_report_zero_record_config_in_notes, test_build_report_zero_record_config_notes_declaration_order, test_build_report_rates_formatted_as_percentage, test_build_report_cost_formatted_as_dollar, test_build_report_notes_has_record_count, test_build_report_notes_codex_disclaimer, test_run_report_missing_jsonl, test_run_report_empty_jsonl, test_main_benchmark_calls_run_benchmark, test_main_benchmark_dry_run_flag, test_main_benchmark_wrong_dry_run_ordering_rejected, test_main_benchmark_report_calls_run_report, test_main_benchmark_returns_runner_exit_code, test_main_benchmark_unknown_flag_rejected, test_main_benchmark_missing_set_root, test_main_benchmark_report_missing_set_root, test_main_benchmark_nonexistent_dir, test_main_benchmark_report_nonexistent_dir, test_main_benchmark_runner_not_called_on_bad_args, test_usage_constant_lists_benchmark_subcommands, test_usage_constant_documents_dry_run
++- Verify command: `bash .redteam/scripts/verify.sh` ✅
++
++## Code review summary
++- Diff scoped to the three approved files only: `.redteam/workflows/benchmark.py`, `.redteam/workflows/orchestrator.py`, and `.redteam/tests/test_benchmark_report_and_cli.py`; no adapter, phase-runner, installer, config, plugin, or marketplace boundary was touched.
++- `build_report` keeps declaration-order config columns, keeps zero-record configs, renders `n/a` for zero/unknown cost cases, and avoids Pareto/scores/winner language — produces discriminating output rather than collapsing to constants.
++- New tests would have failed pre-change (the functions didn't exist and the orchestrator had no `benchmark`/`benchmark-report` dispatch); all CLI tests monkeypatch the benchmark runners so no real benchmark runs execute in the suite.
++- Security checklist: no new non-stdlib runtime imports, no `shell=True`, no verifier allowlist/snapshot changes, no installer changes, no reviewer-adapter capability changes, and no `gh`/PR creation path added.
++- `state.json` records `verification.last_exit_code == 0` and `verification.log` shows `847 passed` with `verify.sh OK`.
++- REVIEW_DECISION: APPROVED (no open IR findings).
++
++## Generated by
++redteam / batch benchmark-phase1 / task task-003-benchmark-report-and-cli
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
+new file mode 100644
+index 0000000..1fa76b4
+--- /dev/null
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
+@@ -0,0 +1,103 @@
++{
++  "task_id": "task-003-benchmark-report-and-cli",
++  "mode": "agent-pair",
++  "phase": "create_pr",
++  "phases_completed": [
++    "plan_outcome",
++    "plan_review",
++    "implement",
++    "review_code"
++  ],
++  "next_phase": "create_pr",
++  "decision": "pending",
++  "owner": "claude",
++  "reviewer": "codex",
++  "next_action": null,
++  "review_items": [],
++  "verification": {
++    "commands": [
++      "bash .redteam/scripts/verify.sh"
++    ],
++    "last_exit_code": 0,
++    "last_output_path": "verification.log",
++    "last_run_at": "2026-07-15T16:35:54.782916+00:00",
++    "last_diff_sha256": "dfe6ee046ed88c79c30fddecd21194e4b2f8cc5baebbc1fb18c0053af23c848b",
++    "verify_command": "bash .redteam/scripts/verify.sh",
++    "verify_allowlist": [
++      "pytest",
++      "ruff",
++      "mypy"
++    ]
++  },
++  "models": {
++    "planner": "claude-opus-4-7",
++    "implementer": "claude-sonnet-4-6",
++    "reviewer": "codex",
++    "rescue": "codex"
++  },
++  "escape": {
++    "ask_user": false,
++    "reason": null,
++    "return_phase": null
++  },
++  "implement_round_count": 1,
++  "tdd_test_files": [],
++  "retries": {
++    "implement": 0
++  },
++  "max_retries_per_phase": 2,
++  "last_failure_reason": null,
++  "last_failure_log": null,
++  "last_failure_diff": null,
++  "deferred_requirements": [
++    {
++      "phase": "implement",
++      "backtrack_to": null,
++      "reason": "stalled",
++      "attempts": 2,
++      "feedback": "cross-run trust-root floor: outside-scope paths detected before worker invocation; commit or stash these files and re-run. Offending paths: .redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/pr_url.txt"
++    }
++  ],
++  "branch": "redteam/task-003-benchmark-report-and-cli",
++  "pr_url": null,
++  "phase_telemetry": [
++    {
++      "phase": "plan_outcome",
++      "provider": "claude",
++      "model": null,
++      "cost_usd": 0.7902760000000001,
++      "duration_sec": 91.953,
++      "outcome": "approved"
++    },
++    {
++      "phase": "implement",
++      "provider": "claude",
++      "model": null,
++      "cost_usd": 1.7442413999999995,
++      "duration_sec": 701.762,
++      "outcome": "approved"
++    }
++  ],
++  "created_at": "2026-07-15T16:19:10.222874+00:00",
++  "updated_at": "2026-07-15T16:38:00.879158+00:00",
++  "base_branch": "redteam/task-002-benchmark-runner",
++  "base_branch_sha": "1f8a3603eb0d12977394be5ac66a0e81b226bf52",
++  "phase_started_at": "2026-07-15T16:38:00.879133+00:00",
++  "last_user_response": null,
++  "implement_plan_affected_files": [
++    ".redteam/tests/test_benchmark_report_and_cli.py",
++    ".redteam/workflows/benchmark.py",
++    ".redteam/workflows/orchestrator.py"
++  ],
++  "implement_tracked_baseline": [
++    ".redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json",
++    ".redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json"
++  ],
++  "implement_untracked_baseline": [
++    ".redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md",
++    ".redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md",
++    ".redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json"
++  ],
++  "last_reviewed_rev": "997d806bc3538b6c2f3e8dfd1ca4ec6c06603783",
++  "rescue_entry_count": 0
++}
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log
+new file mode 100644
+index 0000000..2fd7c6c
+--- /dev/null
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log
+@@ -0,0 +1,91 @@
++$ bash .redteam/scripts/verify.sh
++=== ruff check ===
++All checks passed!
++=== ruff format check ===
++83 files already formatted
++=== pytest ===
++============================= test session starts ==============================
++platform darwin -- Python 3.12.8, pytest-9.1.1, pluggy-1.6.0
++rootdir: /Users/kh/Documents/redteam
++configfile: pyproject.toml
++collected 847 items
++
++.redteam/tests/test_adversarial_pairing_guard.py ...........             [  1%]
++.redteam/tests/test_agent_pair_rescue_phase_order.py ...                 [  1%]
++.redteam/tests/test_agent_tool_keys.py ...                               [  2%]
++.redteam/tests/test_agents_generic_prompts.py .........                  [  3%]
++.redteam/tests/test_ask_user_approve_snapshot.py ..                      [  3%]
++.redteam/tests/test_base_branch_pin.py .......                           [  4%]
++.redteam/tests/test_baseline_trust_root_cross_run.py ................... [  6%]
++.                                                                        [  6%]
++.redteam/tests/test_benchmark_config_and_store.py ...................... [  9%]
++...............                                                          [ 10%]
++.redteam/tests/test_benchmark_report_and_cli.py ........................ [ 13%]
++....                                                                     [ 14%]
++.redteam/tests/test_benchmark_runner.py ............................     [ 17%]
++.redteam/tests/test_branch_switch_stash.py ......                        [ 18%]
++.redteam/tests/test_claude_reviewer_adapter.py ..........                [ 19%]
++.redteam/tests/test_codex_main_wiring.py ....                            [ 19%]
++.redteam/tests/test_config.py .............                              [ 21%]
++.redteam/tests/test_config_cli.py ....................                   [ 23%]
++.redteam/tests/test_create_pr_preflight.py ........                      [ 24%]
++.redteam/tests/test_engine_loader.py ..                                  [ 24%]
++.redteam/tests/test_floor_decompose_and_sibling_exemptions.py .......... [ 26%]
++........                                                                 [ 27%]
++.redteam/tests/test_floor_plan_affected_files_exemption.py ............. [ 28%]
++.......................                                                  [ 31%]
++.redteam/tests/test_gateless_default_common_path.py .......              [ 32%]
++.redteam/tests/test_goal_ceilings_enforcement.py ....................... [ 34%]
++............                                                             [ 36%]
++.redteam/tests/test_goal_dag_scheduler.py ............                   [ 37%]
++.redteam/tests/test_goal_decomposer.py ................................  [ 41%]
++.redteam/tests/test_goal_done_criterion.py ............................. [ 44%]
++.                                                                        [ 44%]
++.redteam/tests/test_goal_manifest_validation.py ...........              [ 46%]
++.redteam/tests/test_goal_mode_e2e.py .......                             [ 47%]
++.redteam/tests/test_goal_stacked_branching.py ..........                 [ 48%]
++.redteam/tests/test_implement_untracked_baseline_pin.py ................ [ 50%]
++.....                                                                    [ 50%]
++.redteam/tests/test_implementer_commit.py .............                  [ 52%]
++.redteam/tests/test_install.py .......................                   [ 55%]
++.redteam/tests/test_mode_aware_prompts.py ....                           [ 55%]
++.redteam/tests/test_new_task.py ......                                   [ 56%]
++.redteam/tests/test_orchestrator_config.py ......                        [ 56%]
++.redteam/tests/test_phase_telemetry.py ..................                [ 59%]
++.redteam/tests/test_pinned_base_freeze_guard.py ........                 [ 59%]
++.redteam/tests/test_pipeline_mode.py .......                             [ 60%]
++.redteam/tests/test_plugin_packaging.py .......                          [ 61%]
++.redteam/tests/test_pr_branch.py ..                                      [ 61%]
++.redteam/tests/test_preimplement_snapshot_invariant.py .....             [ 62%]
++.redteam/tests/test_progress_surface.py .....                            [ 63%]
++.redteam/tests/test_rescue_at_two_failures.py .                          [ 63%]
++.redteam/tests/test_rescue_loop_bounded.py ...                           [ 63%]
++.redteam/tests/test_review_code_hard_ceilings.py ....................... [ 66%]
++................................                                         [ 70%]
++.redteam/tests/test_review_code_narrow_context.py .................      [ 72%]
++.redteam/tests/test_review_code_staged_reviewer.py ..................... [ 74%]
++.............................                                            [ 77%]
++.redteam/tests/test_review_command.py ........                           [ 78%]
++.redteam/tests/test_review_output_validity_mandate.py ....               [ 79%]
++.redteam/tests/test_review_round_archive.py ...                          [ 79%]
++.redteam/tests/test_reviewer_adapter.py ............................     [ 82%]
++.redteam/tests/test_reviewer_fallback.py ...............                 [ 84%]
++.redteam/tests/test_run_claude_model.py ............                     [ 86%]
++.redteam/tests/test_run_claude_timeout.py ........                       [ 87%]
++.redteam/tests/test_sibling_task_floor_exemption.py .................... [ 89%]
++                                                                         [ 89%]
++.redteam/tests/test_state_bootstrap.py .....                             [ 90%]
++.redteam/tests/test_status_json.py ............                          [ 91%]
++.redteam/tests/test_tdd_approved_review_routes_to_create_pr.py .         [ 91%]
++.redteam/tests/test_tdd_commit_discipline.py ...........                 [ 92%]
++.redteam/tests/test_tier_routing_config.py ................              [ 94%]
++.redteam/tests/test_tier_routing_orchestrator.py .........               [ 95%]
++.redteam/tests/test_tracked_baseline_attribution.py .................... [ 98%]
++...                                                                      [ 98%]
++.redteam/tests/test_verify_command_config.py ............                [100%]
++
++======================== 847 passed in 90.13s (0:01:30) ========================
++✅ verify.sh OK
++
++[exit 0]
++
+diff --git a/.redteam/tests/test_benchmark_report_and_cli.py b/.redteam/tests/test_benchmark_report_and_cli.py
+new file mode 100644
+index 0000000..2b18d7f
+--- /dev/null
++++ b/.redteam/tests/test_benchmark_report_and_cli.py
+@@ -0,0 +1,418 @@
++"""Tests for build_report, run_report, and orchestrator.main CLI dispatch for benchmark subcommands.
++
++Covers:
++- build_report: table shape, arithmetic (approval rate, avg wall-clock), column ordering,
++  zero-record config (PR-001), n/a Claude cost paths, formatting rules.
++- run_report: missing JSONL, empty JSONL → non-zero exit + operator message.
++- orchestrator.main dispatch: benchmark / benchmark --dry-run / benchmark-report,
++  unknown-flag / missing-arg / non-existent-dir → exit 2, USAGE or clear message.
++- USAGE constant contains both new subcommand names (including --dry-run).
++All CLI tests monkeypatch benchmark.run_benchmark / benchmark.run_report — no real execution.
++"""
++
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++import _engine  # noqa: E402
++import benchmark as bm  # noqa: E402
++from benchmark import build_report, run_report  # noqa: E402
++
++
++# ---------------------------------------------------------------------------
++# Shared helpers
++# ---------------------------------------------------------------------------
++
++
++def _orch():
++    return _engine.orchestrator()
++
++
++def _rec(
++    config: str,
++    outcome: str = "done",
++    *,
++    review_rounds: int = 2,
++    retry_count: int = 0,
++    rescue_count: int = 0,
++    scope_creep_count: int = 0,
++    wall_clock_sec: float = 60.0,
++    claude_cost_usd: float | None = 0.10,
++) -> dict:
++    return {
++        "schema_version": 1,
++        "config": config,
++        "task": "t1",
++        "repetition": 1,
++        "outcome": outcome,
++        "review_rounds": review_rounds,
++        "retry_count": retry_count,
++        "rescue_count": rescue_count,
++        "scope_creep_count": scope_creep_count,
++        "wall_clock_sec": wall_clock_sec,
++        "claude_cost_usd": claude_cost_usd,
++        "started_at": "2024-01-01T00:00:00+00:00",
++        "finished_at": "2024-01-01T00:01:00+00:00",
++    }
++
++
++def _make_set_dir(tmp_path: Path) -> Path:
++    """Create a minimal benchmark set directory (just needs to exist as a dir)."""
++    d = tmp_path / "myset"
++    d.mkdir()
++    return d
++
++
++# ---------------------------------------------------------------------------
++# build_report — table shape and arithmetic
++# ---------------------------------------------------------------------------
++
++
++def test_build_report_basic_table_shape():
++    """2 configs, 3 records each → exactly 2 config columns in declaration order."""
++    records = [
++        _rec("alpha", "done", wall_clock_sec=60.0),
++        _rec("alpha", "done", wall_clock_sec=90.0),
++        _rec("alpha", "deferred", wall_clock_sec=120.0),
++        _rec("beta", "done", wall_clock_sec=100.0),
++        _rec("beta", "deferred", wall_clock_sec=50.0),
++        _rec("beta", "error", wall_clock_sec=75.0),
++    ]
++    report = build_report(["alpha", "beta"], records)
++
++    # Header row has both config names
++    assert "alpha" in report
++    assert "beta" in report
++    header_line = report.splitlines()[0]
++    assert header_line.index("alpha") < header_line.index("beta")
++
++    # All 8 metric rows present
++    for label in (
++        "Sample size",
++        "Approval rate",
++        "Avg review rounds",
++        "Retry rate",
++        "Rescue rate",
++        "Scope-creep rate",
++        "Avg wall-clock sec",
++        "Claude cost / approved task",
++    ):
++        assert label in report, f"metric row missing: {label!r}"
++
++
++def test_build_report_approval_rate_arithmetic():
++    """alpha: 2/3 done → 66.67%; beta: 1/3 done → 33.33%."""
++    records = [
++        _rec("alpha", "done"),
++        _rec("alpha", "done"),
++        _rec("alpha", "deferred"),
++        _rec("beta", "done"),
++        _rec("beta", "deferred"),
++        _rec("beta", "error"),
++    ]
++    report = build_report(["alpha", "beta"], records)
++    assert "66.67%" in report
++    assert "33.33%" in report
++
++
++def test_build_report_avg_wall_clock_arithmetic():
++    """avg wall-clock: (60 + 90 + 120) / 3 = 90.00."""
++    records = [
++        _rec("cfg", "done", wall_clock_sec=60.0),
++        _rec("cfg", "done", wall_clock_sec=90.0),
++        _rec("cfg", "done", wall_clock_sec=120.0),
++    ]
++    report = build_report(["cfg"], records)
++    assert "90.00" in report
++
++
++def test_build_report_column_declaration_order():
++    """Columns follow config_names declaration order, not record arrival order."""
++    records = [_rec("zz"), _rec("aa")]
++    report = build_report(["aa", "zz"], records)
++    header = report.splitlines()[0]
++    assert header.index("aa") < header.index("zz")
++
++
++# ---------------------------------------------------------------------------
++# build_report — n/a Claude cost paths
++# ---------------------------------------------------------------------------
++
++
++def test_build_report_claude_cost_na_when_all_approved_have_none_cost():
++    """All done records have claude_cost_usd=None → cell is 'n/a', never '$0.00'."""
++    records = [
++        _rec("cfg", "done", claude_cost_usd=None),
++        _rec("cfg", "done", claude_cost_usd=None),
++    ]
++    report = build_report(["cfg"], records)
++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
++    assert "n/a" in cost_line
++    assert "$0.00" not in cost_line
++
++
++def test_build_report_claude_cost_na_when_done_count_zero():
++    """Config with only error/deferred records → Claude cost cell is 'n/a'."""
++    records = [
++        _rec("cfg", "error", claude_cost_usd=5.0),
++        _rec("cfg", "deferred", claude_cost_usd=3.0),
++    ]
++    report = build_report(["cfg"], records)
++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
++    assert "n/a" in cost_line
++
++
++# ---------------------------------------------------------------------------
++# build_report — zero-record config (PR-001)
++# ---------------------------------------------------------------------------
++
++
++def test_build_report_zero_record_config_shown_as_column():
++    """Config declared in config_names but absent from records still appears as a column."""
++    records = [_rec("a", "done"), _rec("a", "done"), _rec("a", "deferred")]
++    report = build_report(["a", "b"], records)
++    header = report.splitlines()[0]
++    assert "a" in header
++    assert "b" in header
++
++
++def test_build_report_zero_record_config_in_notes():
++    """Notes section names the zero-record config."""
++    records = [_rec("a")]
++    report = build_report(["a", "b"], records)
++    notes = report[report.index("## Notes") :]
++    assert "b" in notes
++
++
++def test_build_report_zero_record_config_notes_declaration_order():
++    """Notes zero-record list follows config_names order (ordered list comprehension, not set diff)."""
++    records = [_rec("b")]  # only 'b' has records; 'a' and 'c' are zero
++    report = build_report(["a", "b", "c"], records)
++    notes = report[report.index("## Notes") :]
++    # The zero-record line should list 'a' before 'c' in declaration order
++    zero_line = next(ln for ln in notes.splitlines() if "Zero-record" in ln)
++    # "a, c" appears in the line (not "c, a"), confirming declaration order
++    assert "a, c" in zero_line
++
++
++# ---------------------------------------------------------------------------
++# build_report — formatting rules
++# ---------------------------------------------------------------------------
++
++
++def test_build_report_rates_formatted_as_percentage():
++    """Rates appear as 'XX.XX%', not raw decimals."""
++    records = [_rec("cfg", "done"), _rec("cfg", "done"), _rec("cfg", "deferred")]
++    report = build_report(["cfg"], records)
++    # approval_rate = 2/3 ≈ 66.67%
++    assert "66.67%" in report
++
++
++def test_build_report_cost_formatted_as_dollar():
++    """A non-n/a Claude cost appears as '$X.XX'."""
++    records = [_rec("cfg", "done", claude_cost_usd=0.42)]
++    report = build_report(["cfg"], records)
++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
++    assert "$0.42" in cost_line
++
++
++def test_build_report_notes_has_record_count():
++    """Notes section states the total number of records read."""
++    records = [_rec("cfg"), _rec("cfg")]
++    report = build_report(["cfg"], records)
++    notes = report[report.index("## Notes") :]
++    assert "2" in notes  # 2 record(s) read
++
++
++def test_build_report_notes_codex_disclaimer():
++    """Notes section mentions Codex and n/a in the cost disclaimer."""
++    report = build_report(["cfg"], [_rec("cfg")])
++    notes = report[report.index("## Notes") :]
++    assert "Codex" in notes
++    assert "n/a" in notes
++
++
++# ---------------------------------------------------------------------------
++# run_report — error cases
++# ---------------------------------------------------------------------------
++
++
++def test_run_report_missing_jsonl(tmp_path, capsys):
++    """run_report on a dir without results.jsonl returns non-zero + operator message."""
++    set_root = tmp_path / "myset"
++    set_root.mkdir()
++    rc = run_report(set_root)
++    assert rc != 0
++    captured = capsys.readouterr()
++    assert "orchestrator benchmark" in (captured.out + captured.err)
++
++
++def test_run_report_empty_jsonl(tmp_path, capsys):
++    """run_report on a results.jsonl with zero records returns non-zero + operator message."""
++    set_root = tmp_path / "myset"
++    set_root.mkdir()
++    (set_root / "results.jsonl").write_text("", encoding="utf-8")
++    rc = run_report(set_root)
++    assert rc != 0
++    captured = capsys.readouterr()
++    assert "orchestrator benchmark" in (captured.out + captured.err)
++
++
++# ---------------------------------------------------------------------------
++# orchestrator.main — CLI dispatch (all runners monkeypatched)
++# ---------------------------------------------------------------------------
++
++
++def test_main_benchmark_calls_run_benchmark(tmp_path, monkeypatch):
++    """benchmark <set> dispatches to run_benchmark with dry_run=False."""
++    orch = _orch()
++    set_dir = _make_set_dir(tmp_path)
++    calls: list[tuple] = []
++    monkeypatch.setattr(bm, "run_benchmark", lambda path, *, dry_run=False, **kw: calls.append(("call", dry_run)) or 0)
++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir)])
++    assert rc == 0
++    assert calls == [("call", False)]
++
++
++def test_main_benchmark_dry_run_flag(tmp_path, monkeypatch):
++    """benchmark <set> --dry-run calls run_benchmark with dry_run=True."""
++    orch = _orch()
++    set_dir = _make_set_dir(tmp_path)
++    calls: list = []
++    monkeypatch.setattr(bm, "run_benchmark", lambda path, *, dry_run=False, **kw: calls.append(dry_run) or 0)
++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir), "--dry-run"])
++    assert rc == 0
++    assert calls == [True]
++
++
++def test_main_benchmark_wrong_dry_run_ordering_rejected(tmp_path, monkeypatch, capsys):
++    """benchmark --dry-run <set> (wrong ordering) → exit 2, USAGE on stderr, no run_benchmark."""
++    orch = _orch()
++    set_dir = _make_set_dir(tmp_path)
++    calls: list = []
++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
++    rc = orch.main(["orchestrator.py", "benchmark", "--dry-run", str(set_dir)])
++    assert rc == 2
++    assert not calls
++    err = capsys.readouterr().err
++    assert err  # some output on stderr (USAGE or error message)
++
++
++def test_main_benchmark_report_calls_run_report(tmp_path, monkeypatch):
++    """benchmark-report <set> dispatches to run_report."""
++    orch = _orch()
++    set_dir = _make_set_dir(tmp_path)
++    calls: list = []
++    monkeypatch.setattr(bm, "run_report", lambda path: calls.append(str(path)) or 0)
++    rc = orch.main(["orchestrator.py", "benchmark-report", str(set_dir)])
++    assert rc == 0
++    assert len(calls) == 1
++
++
++def test_main_benchmark_returns_runner_exit_code(tmp_path, monkeypatch):
++    """main forwards the exit code from run_benchmark."""
++    orch = _orch()
++    set_dir = _make_set_dir(tmp_path)
++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: 3)
++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir)])
++    assert rc == 3
++
++
++def test_main_benchmark_unknown_flag_rejected(tmp_path, monkeypatch, capsys):
++    """benchmark <set> --unknown → exit 2 + message on stderr, run_benchmark not called."""
++    orch = _orch()
++    set_dir = _make_set_dir(tmp_path)
++    calls: list = []
++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir), "--unknown"])
++    assert rc == 2
++    assert not calls
++    assert capsys.readouterr().err
++
++
++def test_main_benchmark_missing_set_root(capsys):
++    """benchmark with no <set-root> → exit 2 + output on stderr."""
++    orch = _orch()
++    rc = orch.main(["orchestrator.py", "benchmark"])
++    assert rc == 2
++    assert capsys.readouterr().err
++
++
++def test_main_benchmark_report_missing_set_root(capsys):
++    """benchmark-report with no <set-root> → exit 2 + output on stderr."""
++    orch = _orch()
++    rc = orch.main(["orchestrator.py", "benchmark-report"])
++    assert rc == 2
++    assert capsys.readouterr().err
++
++
++def test_main_benchmark_nonexistent_dir(tmp_path, monkeypatch, capsys):
++    """benchmark with non-existent <set-root> → exit 2 + message, run_benchmark not called."""
++    orch = _orch()
++    calls: list = []
++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
++    rc = orch.main(["orchestrator.py", "benchmark", str(tmp_path / "no-such-dir")])
++    assert rc == 2
++    assert not calls
++    assert capsys.readouterr().err
++
++
++def test_main_benchmark_report_nonexistent_dir(tmp_path, monkeypatch, capsys):
++    """benchmark-report with non-existent <set-root> → exit 2 + message, run_report not called."""
++    orch = _orch()
++    calls: list = []
++    monkeypatch.setattr(bm, "run_report", lambda *a, **kw: calls.append(1) or 0)
++    rc = orch.main(["orchestrator.py", "benchmark-report", str(tmp_path / "no-such-dir")])
++    assert rc == 2
++    assert not calls
++    assert capsys.readouterr().err
++
++
++def test_main_benchmark_runner_not_called_on_bad_args(tmp_path, monkeypatch, capsys):
++    """run_benchmark must NOT be called on any bad-arg path — verified by raising sentinel."""
++    orch = _orch()
++
++    def _fail(*a, **kw) -> int:  # pragma: no cover
++        raise AssertionError("run_benchmark must NOT be called on bad args")
++
++    monkeypatch.setattr(bm, "run_benchmark", _fail)
++
++    # Missing set-root
++    assert orch.main(["orchestrator.py", "benchmark"]) == 2
++    capsys.readouterr()
++
++    # Unknown flag
++    set_dir = _make_set_dir(tmp_path)
++    assert orch.main(["orchestrator.py", "benchmark", str(set_dir), "--bad"]) == 2
++    capsys.readouterr()
++
++    # Non-existent directory
++    assert orch.main(["orchestrator.py", "benchmark", str(tmp_path / "no-such")]) == 2
++    capsys.readouterr()
++
++    # Wrong --dry-run ordering
++    assert orch.main(["orchestrator.py", "benchmark", "--dry-run", str(set_dir)]) == 2
++    capsys.readouterr()
++
++
++# ---------------------------------------------------------------------------
++# USAGE constant
++# ---------------------------------------------------------------------------
++
++
++def test_usage_constant_lists_benchmark_subcommands():
++    """USAGE constant in orchestrator.py mentions both new subcommand names."""
++    orch = _orch()
++    assert "benchmark" in orch.USAGE
++    assert "benchmark-report" in orch.USAGE
++
++
++def test_usage_constant_documents_dry_run():
++    """USAGE constant documents the --dry-run flag for the benchmark subcommand."""
++    orch = _orch()
++    assert "--dry-run" in orch.USAGE
+diff --git a/.redteam/workflows/benchmark.py b/.redteam/workflows/benchmark.py
+index f90d17e..6c82a76 100644
+--- a/.redteam/workflows/benchmark.py
++++ b/.redteam/workflows/benchmark.py
+@@ -17,6 +17,8 @@ Exposes:
+ - extract_metrics()     — deterministic metric extractor over state["phase_telemetry"].
+ - run_one()             — isolated subprocess dispatch for one (config, task, rep) triple.
+ - run_benchmark()       — outer loop: configs × tasks × repetitions, resumable + budgeted.
++- build_report()        — pure: markdown diff table from config_names + records list.
++- run_report()          — I/O wrapper: reads results.jsonl, prints report to stdout.
+ """
+ # NOTE: benchmark.py source intentionally contains no "gh ", "git push", "pr create",
+ # "--force", or auto-merge language, and does not import phase_runners.create_pr.
+@@ -651,3 +653,143 @@ def run_benchmark(
+         this_inv_records.append(record)
+ 
+     return 0
++
++
++# ---------------------------------------------------------------------------
++# build_report — pure aggregation + markdown diff table
++# ---------------------------------------------------------------------------
++
++
++def build_report(config_names: list[str], records: list[dict]) -> str:
++    """Build a markdown diff table from declared config names and raw records.
++
++    Pure: no I/O. config_names drives column ordering (declaration order from
++    benchmark.toml), so a zero-record config is still shown as a column (PR-001).
++    Records whose "config" key is not in config_names are silently ignored.
++
++    Formatting rules:
++    - Floats: f"{x:.2f}"
++    - Rates: f"{x:.2f}%" (percentage form)
++    - Costs: f"${x:.2f}" or "n/a" (never "$0.00" when there is no real data)
++    - Integers: plain int str
++    - n/a: any cell that cannot be computed (zero total, zero done, no cost data)
++    """
++    # Group records by config in insertion order; unknown configs skipped
++    by_config: dict[str, list[dict]] = {name: [] for name in config_names}
++    for r in records:
++        cfg = r.get("config", "")
++        if cfg in by_config:
++            by_config[cfg].append(r)
++
++    def _cells(name: str) -> dict[str, str]:
++        recs = by_config[name]
++        total = len(recs)
++        done_count = sum(1 for r in recs if r.get("outcome") == "done")
++        deferred_count = sum(1 for r in recs if r.get("outcome") == "deferred")
++        error_count = sum(1 for r in recs if r.get("outcome") == "error")
++
++        sample = f"{total} (done={done_count}, deferred={deferred_count}, error={error_count})"
++        if total == 0:
++            return {
++                "sample_size": sample,
++                "approval_rate": "n/a",
++                "avg_review_rounds": "n/a",
++                "retry_rate": "n/a",
++                "rescue_rate": "n/a",
++                "scope_creep_rate": "n/a",
++                "avg_wall_clock_sec": "n/a",
++                "claude_cost": "n/a",
++            }
++
++        approval = f"{done_count / total * 100:.2f}%"
++        avg_rounds = f"{sum(r.get('review_rounds', 0) for r in recs) / total:.2f}"
++        retry = f"{sum(r.get('retry_count', 0) for r in recs) / total * 100:.2f}%"
++        rescue = f"{sum(r.get('rescue_count', 0) for r in recs) / total * 100:.2f}%"
++        scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
++        avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
++
++        if done_count == 0:
++            cost_cell = "n/a"
++        else:
++            done_costs = [
++                r["claude_cost_usd"]
++                for r in recs
++                if r.get("outcome") == "done" and r.get("claude_cost_usd") is not None
++            ]
++            cost_cell = f"${sum(done_costs) / done_count:.2f}" if done_costs else "n/a"
++
++        return {
++            "sample_size": sample,
++            "approval_rate": approval,
++            "avg_review_rounds": avg_rounds,
++            "retry_rate": retry,
++            "rescue_rate": rescue,
++            "scope_creep_rate": scope,
++            "avg_wall_clock_sec": avg_wall,
++            "claude_cost": cost_cell,
++        }
++
++    aggs = {name: _cells(name) for name in config_names}
++
++    metric_rows = [
++        ("sample_size", "Sample size"),
++        ("approval_rate", "Approval rate"),
++        ("avg_review_rounds", "Avg review rounds"),
++        ("retry_rate", "Retry rate"),
++        ("rescue_rate", "Rescue rate"),
++        ("scope_creep_rate", "Scope-creep rate"),
++        ("avg_wall_clock_sec", "Avg wall-clock sec"),
++        ("claude_cost", "Claude cost / approved task"),
++    ]
++
++    header = "| Metric | " + " | ".join(config_names) + " |"
++    sep = "| --- |" + " --- |" * len(config_names)
++    lines = [header, sep]
++    for key, label in metric_rows:
++        cells = " | ".join(aggs[n][key] for n in config_names)
++        lines.append(f"| {label} | {cells} |")
++
++    # Notes — ordered list comprehension preserves config_names declaration order
++    total_records = len(records)
++    zero_configs = [name for name in config_names if not by_config[name]]
++
++    notes: list[str] = ["", "## Notes", ""]
++    notes.append(f"- {total_records} record(s) read.")
++    if zero_configs:
++        notes.append(f"- Zero-record config(s): {', '.join(zero_configs)}.")
++    notes.append("- Codex-role phases contribute n/a to the Claude cost column; costs are never fabricated.")
++
++    return "\n".join(lines) + "\n" + "\n".join(notes) + "\n"
++
++
++# ---------------------------------------------------------------------------
++# run_report — I/O wrapper around build_report
++# ---------------------------------------------------------------------------
++
++
++def run_report(set_root: Path) -> int:
++    """Read results.jsonl, build a markdown diff report, and print to stdout.
++
++    Returns 0 on success. Returns 2 when the JSONL is missing or has zero
++    records, naming `orchestrator benchmark <set>` as the next step.
++    """
++    results_path = set_root / "results.jsonl"
++    if not results_path.exists():
++        print(
++            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
++            file=sys.stderr,
++        )
++        return 2
++
++    records = load_records(results_path)
++    if not records:
++        print(
++            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
++            file=sys.stderr,
++        )
++        return 2
++
++    bset = load_benchmark_set(set_root)
++    config_names = list(bset.configs.keys())
++    sys.stdout.write(build_report(config_names, records))
++    return 0
+diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
+index 76dd167..6778dde 100644
+--- a/.redteam/workflows/orchestrator.py
++++ b/.redteam/workflows/orchestrator.py
+@@ -10,6 +10,8 @@ Usage:
+     python3 .redteam/workflows/orchestrator.py new <batch-dir> <slug> [--title <text>]
+     python3 .redteam/workflows/orchestrator.py review
+     python3 .redteam/workflows/orchestrator.py config
++    python3 .redteam/workflows/orchestrator.py benchmark <set-root> [--dry-run]
++    python3 .redteam/workflows/orchestrator.py benchmark-report <set-root>
+ 
+ Walks each task in <batch-dir>/tasks/ through the 8-phase pipeline,
+ persists state.json after every phase, blocks at human gates (sentinel files),
+@@ -70,6 +72,7 @@ from adapters import (  # type: ignore[import-not-found]  # noqa: E402
+ )
+ from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
+ import config_cli  # type: ignore[import-not-found]  # noqa: E402
++import benchmark  # type: ignore[import-not-found]  # noqa: E402
+ 
+ 
+ # ---------- phase order & runner registry ----------
+@@ -2518,6 +2521,24 @@ def cmd_config(repo: Path | None = None) -> int:
+     return config_cli.run_config(rr, _adversarial_pairing_error)
+ 
+ 
++def cmd_benchmark(set_root: Path, *, dry_run: bool = False) -> int:
++    """Dispatch to benchmark.run_benchmark.
++
++    Returns the exit code from run_benchmark (0 = complete, 3 = budget abort).
++    Does NOT touch batch state, _run_pipeline, or create_pr.
++    """
++    return benchmark.run_benchmark(set_root, dry_run=dry_run)
++
++
++def cmd_benchmark_report(set_root: Path) -> int:
++    """Dispatch to benchmark.run_report.
++
++    Returns 0 on success, 2 when results.jsonl is missing or empty.
++    Does NOT touch batch state, _run_pipeline, or create_pr.
++    """
++    return benchmark.run_report(set_root)
++
++
+ USAGE = (
+     "usage: orchestrator.py decompose <batch-dir>\n"
+     "       orchestrator.py {start|resume|wait-and-resume} <batch-dir>\n"
+@@ -2525,6 +2546,8 @@ USAGE = (
+     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
+     "       orchestrator.py review\n"
+     "       orchestrator.py config\n"
++    "       orchestrator.py benchmark <set-root> [--dry-run]\n"
++    "       orchestrator.py benchmark-report <set-root>\n"
+     "  decompose        — generate goal.json + task briefs from goal.md; run the\n"
+     "                     cross-provider decomposition review gate; stop before any\n"
+     "                     task is dispatched (run `start` after to execute the stack)\n"
+@@ -2538,7 +2561,10 @@ USAGE = (
+     "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
+     "  review           — one-shot adversarial review of the current branch diff with the\n"
+     "                     configured reviewer (a different provider than the worker); no batch\n"
+-    "  config           — interactively pick per-role models and write .redteam/config.toml"
++    "  config           — interactively pick per-role models and write .redteam/config.toml\n"
++    "  benchmark        — run configs × tasks × repetitions against .redteam/benchmarks/<set>;\n"
++    "                     [--dry-run] prints the plan + cost estimate without executing\n"
++    "  benchmark-report — aggregate results.jsonl into a markdown diff table (no Pareto/score)"
+ )
+ 
+ 
+@@ -2577,6 +2603,33 @@ def main(argv: list[str]) -> int:
+             return 2
+         return cmd_status(batch_dir, as_json=bool(extra))
+ 
++    if command in ("benchmark", "benchmark-report"):
++        # Chosen --dry-run ordering: benchmark <set-root> [--dry-run].
++        # A flag in the argv[2] (set-root) position signals wrong ordering → USAGE.
++        if argv[2].startswith("--"):
++            print(USAGE, file=sys.stderr)
++            return 2
++        set_root = batch_dir  # already Path(argv[2]).resolve()
++        if not set_root.is_dir():
++            print(
++                f"error: set-root does not exist or is not a directory: {argv[2]}",
++                file=sys.stderr,
++            )
++            return 2
++        extra = argv[3:]
++        if command == "benchmark":
++            if extra == ["--dry-run"]:
++                return cmd_benchmark(set_root, dry_run=True)
++            if not extra:
++                return cmd_benchmark(set_root, dry_run=False)
++            print(f"error: unknown benchmark argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
++            return 2
++        # benchmark-report
++        if extra:
++            print(f"error: unknown benchmark-report argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
++            return 2
++        return cmd_benchmark_report(set_root)
++
+     print(f"error: unknown command: {command!r}\n\n{USAGE}", file=sys.stderr)
+     return 2
+ 
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+index a620fe2..19f09f6 100644
+--- a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
++++ b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+@@ -1,14 +1,15 @@
+ {
+   "task_id": "task-001-benchmark-config-and-store",
+   "mode": "agent-pair",
+-  "phase": "create_pr",
++  "phase": "done",
+   "phases_completed": [
+     "plan_outcome",
+     "plan_review",
+     "implement",
+-    "review_code"
++    "review_code",
++    "create_pr"
+   ],
+-  "next_phase": "create_pr",
++  "next_phase": "done",
+   "decision": "pending",
+   "owner": "claude",
+   "reviewer": "codex",
+@@ -60,7 +61,7 @@
+   "last_failure_diff": null,
+   "deferred_requirements": [],
+   "branch": "redteam/task-001-benchmark-config-and-store",
+-  "pr_url": null,
++  "pr_url": "https://github.com/AscendyProject/redteam/pull/154",
+   "phase_telemetry": [
+     {
+       "phase": "plan_outcome",
+@@ -85,10 +86,18 @@
+       "cost_usd": 0.9470895000000003,
+       "duration_sec": 435.263,
+       "outcome": "approved"
++    },
++    {
++      "phase": "create_pr",
++      "provider": "claude",
++      "model": null,
++      "cost_usd": 0.9944235000000001,
++      "duration_sec": 119.49,
++      "outcome": "approved"
+     }
+   ],
+   "created_at": "2026-07-15T14:09:31.204373+00:00",
+-  "updated_at": "2026-07-15T14:23:31.041737+00:00",
++  "updated_at": "2026-07-15T16:46:27.917364+00:00",
+   "base_branch": "main",
+   "phase_started_at": "2026-07-15T14:23:31.041717+00:00",
+   "last_user_response": null,
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+index 2054d88..47ae389 100644
+--- a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
++++ b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+@@ -1,14 +1,15 @@
+ {
+   "task_id": "task-002-benchmark-runner",
+   "mode": "agent-pair",
+-  "phase": "create_pr",
++  "phase": "done",
+   "phases_completed": [
+     "plan_outcome",
+     "plan_review",
+     "implement",
+-    "review_code"
++    "review_code",
++    "create_pr"
+   ],
+-  "next_phase": "create_pr",
++  "next_phase": "done",
+   "decision": "pending",
+   "owner": "claude",
+   "reviewer": "codex",
+@@ -100,7 +101,7 @@
+     }
+   ],
+   "branch": "redteam/task-002-benchmark-runner",
+-  "pr_url": null,
++  "pr_url": "https://github.com/AscendyProject/redteam/pull/155",
+   "phase_telemetry": [
+     {
+       "phase": "plan_outcome",
+@@ -165,10 +166,18 @@
+       "cost_usd": 1.533762,
+       "duration_sec": 659.063,
+       "outcome": "approved"
++    },
++    {
++      "phase": "create_pr",
++      "provider": "claude",
++      "model": null,
++      "cost_usd": 1.424842,
++      "duration_sec": 239.878,
++      "outcome": "approved"
+     }
+   ],
+   "created_at": "2026-07-15T14:25:38.418298+00:00",
+-  "updated_at": "2026-07-15T16:15:01.518133+00:00",
++  "updated_at": "2026-07-15T16:46:27.920429+00:00",
+   "base_branch": "redteam/task-001-benchmark-config-and-store",
+   "base_branch_sha": "b7a59d48b7b8adf7061eeaa45aaaa3fd843d340e",
+   "phase_started_at": "2026-07-15T16:15:01.518100+00:00",
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
+index f4ba739..2458f55 100644
+--- a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
+@@ -1,16 +1,40 @@
+-Disagree:
+-No open IR findings.
++**Disagree**
+ 
+-Uncertain:
+-No unresolved uncertainties. I did not rerun `bash .redteam/scripts/verify.sh` in this read-only review sandbox; I relied on the required task artifacts. `.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json` records `verification.last_exit_code == 0`, and `verification.log` shows `847 passed` with `verify.sh OK`.
++IR-001 severity:major status:open
+ 
+-Agree:
+-The diff is scoped to the three approved files only: `.redteam/workflows/benchmark.py`, `.redteam/workflows/orchestrator.py`, and `.redteam/tests/test_benchmark_report_and_cli.py`. No adapter, phase-runner, installer, config, plugin, or marketplace boundary was touched.
++`budget_usd` is documented as a hard cost ceiling, but a **cold-start** run can
++exceed it before the runner has any prior cost data. `BenchmarkSet.budget_usd`
++is a "Hard cost ceiling" (`benchmark.py:64`) and `run_benchmark` advertises a
++budget abort before a pending dispatch would exceed it (`benchmark.py:567-569`),
++but the check coerces `estimated_next` to `0.0` when there are no prior
++Claude-cost records (`benchmark.py:591-614`). So a first paid invocation with
++`budget_usd = 0.01` and a Claude-backed triple that costs `$0.50` **dispatches
++anyway** and only considers aborting on the *next* run. The "hard ceiling" is
++non-enforcing for the highest-risk case — the first paid benchmark run. Cost
++overrun is the #1 risk the #146 design flagged; this is a real safety-boundary
++gap.
+ 
+-`build_report` keeps declaration-order config columns, keeps zero-record configs, renders `n/a` for zero/unknown cost cases, avoids Pareto/scores/winner language, and produces discriminating output: realistic records with different done counts, rounds, retries, rescues, scope-creep counts, wall time, and costs produce different cells rather than collapsing to a constant.
++Fix fail-closed: when `budget_usd` is set but there is **no cost estimate**
++(cold start / no prior records to estimate `estimated_next`), the runner must
++NOT silently dispatch. Refuse before the run with an actionable message — e.g.
++"budget_usd is set but there is no prior cost data to estimate against; run once
++with `--dry-run` (which never dispatches) or without a budget cap to gather cost
++data, then set the cap." Add a regression: `budget_usd` set + empty JSONL +
++Claude-backed stub → the runner aborts before the FIRST dispatch (stub called 0
++times), returns non-zero, prints the actionable message. Keep the existing
++per-invocation mid-run abort behavior once an estimate exists.
+ 
+-The new tests would have failed pre-change because `benchmark.build_report` / `benchmark.run_report` did not exist and the orchestrator had no `benchmark` or `benchmark-report` dispatch. CLI tests monkeypatch the benchmark runners, so they do not execute real benchmark runs.
++(Source: cross-model standalone stack review over the #154+#155+#156 diff. The
++per-task review_code gate approved; this round carries the finding back into the
++worker+reviewer loop. The bug is in `run_benchmark`'s budget check in
++`benchmark.py`, which is part of this task's diff.)
+ 
+-Security checklist: no new non-stdlib runtime imports, no `shell=True`, no verifier allowlist/snapshot changes, no installer changes, no reviewer-adapter capability changes, and no `gh`/PR creation path added by these new subcommands.
++**Agree**
+ 
+-REVIEW_DECISION: APPROVED
++The rest of the stack is sound: stdlib-only, arg-list subprocess with utf-8, no
++allowlist/installer/adapter-trust changes; the report's `build_report(config_names,
++records)` correctly shows zero-record configs; the new tests discriminate against
++pre-change (benchmark.py + the CLI dispatch did not exist). Only the cold-start
++budget path needs the fail-closed fix.
++
++REVIEW_DECISION: CHANGES_REQUESTED
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch
+index aa6f8ec..623d84c 100644
+--- a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch
+@@ -1,3 +1,1154 @@
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
++new file mode 100644
++index 0000000..f4ba739
++--- /dev/null
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
++@@ -0,0 +1,16 @@
+++Disagree:
+++No open IR findings.
+++
+++Uncertain:
+++No unresolved uncertainties. I did not rerun `bash .redteam/scripts/verify.sh` in this read-only review sandbox; I relied on the required task artifacts. `.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json` records `verification.last_exit_code == 0`, and `verification.log` shows `847 passed` with `verify.sh OK`.
+++
+++Agree:
+++The diff is scoped to the three approved files only: `.redteam/workflows/benchmark.py`, `.redteam/workflows/orchestrator.py`, and `.redteam/tests/test_benchmark_report_and_cli.py`. No adapter, phase-runner, installer, config, plugin, or marketplace boundary was touched.
+++
+++`build_report` keeps declaration-order config columns, keeps zero-record configs, renders `n/a` for zero/unknown cost cases, avoids Pareto/scores/winner language, and produces discriminating output: realistic records with different done counts, rounds, retries, rescues, scope-creep counts, wall time, and costs produce different cells rather than collapsing to a constant.
+++
+++The new tests would have failed pre-change because `benchmark.build_report` / `benchmark.run_report` did not exist and the orchestrator had no `benchmark` or `benchmark-report` dispatch. CLI tests monkeypatch the benchmark runners, so they do not execute real benchmark runs.
+++
+++Security checklist: no new non-stdlib runtime imports, no `shell=True`, no verifier allowlist/snapshot changes, no installer changes, no reviewer-adapter capability changes, and no `gh`/PR creation path added by these new subcommands.
+++
+++REVIEW_DECISION: APPROVED
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch
++new file mode 100644
++index 0000000..aa6f8ec
++--- /dev/null
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/impl_diff.patch
++@@ -0,0 +1,786 @@
+++diff --git a/.redteam/tests/test_benchmark_report_and_cli.py b/.redteam/tests/test_benchmark_report_and_cli.py
+++new file mode 100644
+++index 0000000..2b18d7f
+++--- /dev/null
++++++ b/.redteam/tests/test_benchmark_report_and_cli.py
+++@@ -0,0 +1,418 @@
++++"""Tests for build_report, run_report, and orchestrator.main CLI dispatch for benchmark subcommands.
++++
++++Covers:
++++- build_report: table shape, arithmetic (approval rate, avg wall-clock), column ordering,
++++  zero-record config (PR-001), n/a Claude cost paths, formatting rules.
++++- run_report: missing JSONL, empty JSONL → non-zero exit + operator message.
++++- orchestrator.main dispatch: benchmark / benchmark --dry-run / benchmark-report,
++++  unknown-flag / missing-arg / non-existent-dir → exit 2, USAGE or clear message.
++++- USAGE constant contains both new subcommand names (including --dry-run).
++++All CLI tests monkeypatch benchmark.run_benchmark / benchmark.run_report — no real execution.
++++"""
++++
++++from __future__ import annotations
++++
++++import sys
++++from pathlib import Path
++++
++++_WF = Path(__file__).resolve().parents[1] / "workflows"
++++if str(_WF) not in sys.path:
++++    sys.path.insert(0, str(_WF))
++++
++++import _engine  # noqa: E402
++++import benchmark as bm  # noqa: E402
++++from benchmark import build_report, run_report  # noqa: E402
++++
++++
++++# ---------------------------------------------------------------------------
++++# Shared helpers
++++# ---------------------------------------------------------------------------
++++
++++
++++def _orch():
++++    return _engine.orchestrator()
++++
++++
++++def _rec(
++++    config: str,
++++    outcome: str = "done",
++++    *,
++++    review_rounds: int = 2,
++++    retry_count: int = 0,
++++    rescue_count: int = 0,
++++    scope_creep_count: int = 0,
++++    wall_clock_sec: float = 60.0,
++++    claude_cost_usd: float | None = 0.10,
++++) -> dict:
++++    return {
++++        "schema_version": 1,
++++        "config": config,
++++        "task": "t1",
++++        "repetition": 1,
++++        "outcome": outcome,
++++        "review_rounds": review_rounds,
++++        "retry_count": retry_count,
++++        "rescue_count": rescue_count,
++++        "scope_creep_count": scope_creep_count,
++++        "wall_clock_sec": wall_clock_sec,
++++        "claude_cost_usd": claude_cost_usd,
++++        "started_at": "2024-01-01T00:00:00+00:00",
++++        "finished_at": "2024-01-01T00:01:00+00:00",
++++    }
++++
++++
++++def _make_set_dir(tmp_path: Path) -> Path:
++++    """Create a minimal benchmark set directory (just needs to exist as a dir)."""
++++    d = tmp_path / "myset"
++++    d.mkdir()
++++    return d
++++
++++
++++# ---------------------------------------------------------------------------
++++# build_report — table shape and arithmetic
++++# ---------------------------------------------------------------------------
++++
++++
++++def test_build_report_basic_table_shape():
++++    """2 configs, 3 records each → exactly 2 config columns in declaration order."""
++++    records = [
++++        _rec("alpha", "done", wall_clock_sec=60.0),
++++        _rec("alpha", "done", wall_clock_sec=90.0),
++++        _rec("alpha", "deferred", wall_clock_sec=120.0),
++++        _rec("beta", "done", wall_clock_sec=100.0),
++++        _rec("beta", "deferred", wall_clock_sec=50.0),
++++        _rec("beta", "error", wall_clock_sec=75.0),
++++    ]
++++    report = build_report(["alpha", "beta"], records)
++++
++++    # Header row has both config names
++++    assert "alpha" in report
++++    assert "beta" in report
++++    header_line = report.splitlines()[0]
++++    assert header_line.index("alpha") < header_line.index("beta")
++++
++++    # All 8 metric rows present
++++    for label in (
++++        "Sample size",
++++        "Approval rate",
++++        "Avg review rounds",
++++        "Retry rate",
++++        "Rescue rate",
++++        "Scope-creep rate",
++++        "Avg wall-clock sec",
++++        "Claude cost / approved task",
++++    ):
++++        assert label in report, f"metric row missing: {label!r}"
++++
++++
++++def test_build_report_approval_rate_arithmetic():
++++    """alpha: 2/3 done → 66.67%; beta: 1/3 done → 33.33%."""
++++    records = [
++++        _rec("alpha", "done"),
++++        _rec("alpha", "done"),
++++        _rec("alpha", "deferred"),
++++        _rec("beta", "done"),
++++        _rec("beta", "deferred"),
++++        _rec("beta", "error"),
++++    ]
++++    report = build_report(["alpha", "beta"], records)
++++    assert "66.67%" in report
++++    assert "33.33%" in report
++++
++++
++++def test_build_report_avg_wall_clock_arithmetic():
++++    """avg wall-clock: (60 + 90 + 120) / 3 = 90.00."""
++++    records = [
++++        _rec("cfg", "done", wall_clock_sec=60.0),
++++        _rec("cfg", "done", wall_clock_sec=90.0),
++++        _rec("cfg", "done", wall_clock_sec=120.0),
++++    ]
++++    report = build_report(["cfg"], records)
++++    assert "90.00" in report
++++
++++
++++def test_build_report_column_declaration_order():
++++    """Columns follow config_names declaration order, not record arrival order."""
++++    records = [_rec("zz"), _rec("aa")]
++++    report = build_report(["aa", "zz"], records)
++++    header = report.splitlines()[0]
++++    assert header.index("aa") < header.index("zz")
++++
++++
++++# ---------------------------------------------------------------------------
++++# build_report — n/a Claude cost paths
++++# ---------------------------------------------------------------------------
++++
++++
++++def test_build_report_claude_cost_na_when_all_approved_have_none_cost():
++++    """All done records have claude_cost_usd=None → cell is 'n/a', never '$0.00'."""
++++    records = [
++++        _rec("cfg", "done", claude_cost_usd=None),
++++        _rec("cfg", "done", claude_cost_usd=None),
++++    ]
++++    report = build_report(["cfg"], records)
++++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
++++    assert "n/a" in cost_line
++++    assert "$0.00" not in cost_line
++++
++++
++++def test_build_report_claude_cost_na_when_done_count_zero():
++++    """Config with only error/deferred records → Claude cost cell is 'n/a'."""
++++    records = [
++++        _rec("cfg", "error", claude_cost_usd=5.0),
++++        _rec("cfg", "deferred", claude_cost_usd=3.0),
++++    ]
++++    report = build_report(["cfg"], records)
++++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
++++    assert "n/a" in cost_line
++++
++++
++++# ---------------------------------------------------------------------------
++++# build_report — zero-record config (PR-001)
++++# ---------------------------------------------------------------------------
++++
++++
++++def test_build_report_zero_record_config_shown_as_column():
++++    """Config declared in config_names but absent from records still appears as a column."""
++++    records = [_rec("a", "done"), _rec("a", "done"), _rec("a", "deferred")]
++++    report = build_report(["a", "b"], records)
++++    header = report.splitlines()[0]
++++    assert "a" in header
++++    assert "b" in header
++++
++++
++++def test_build_report_zero_record_config_in_notes():
++++    """Notes section names the zero-record config."""
++++    records = [_rec("a")]
++++    report = build_report(["a", "b"], records)
++++    notes = report[report.index("## Notes") :]
++++    assert "b" in notes
++++
++++
++++def test_build_report_zero_record_config_notes_declaration_order():
++++    """Notes zero-record list follows config_names order (ordered list comprehension, not set diff)."""
++++    records = [_rec("b")]  # only 'b' has records; 'a' and 'c' are zero
++++    report = build_report(["a", "b", "c"], records)
++++    notes = report[report.index("## Notes") :]
++++    # The zero-record line should list 'a' before 'c' in declaration order
++++    zero_line = next(ln for ln in notes.splitlines() if "Zero-record" in ln)
++++    # "a, c" appears in the line (not "c, a"), confirming declaration order
++++    assert "a, c" in zero_line
++++
++++
++++# ---------------------------------------------------------------------------
++++# build_report — formatting rules
++++# ---------------------------------------------------------------------------
++++
++++
++++def test_build_report_rates_formatted_as_percentage():
++++    """Rates appear as 'XX.XX%', not raw decimals."""
++++    records = [_rec("cfg", "done"), _rec("cfg", "done"), _rec("cfg", "deferred")]
++++    report = build_report(["cfg"], records)
++++    # approval_rate = 2/3 ≈ 66.67%
++++    assert "66.67%" in report
++++
++++
++++def test_build_report_cost_formatted_as_dollar():
++++    """A non-n/a Claude cost appears as '$X.XX'."""
++++    records = [_rec("cfg", "done", claude_cost_usd=0.42)]
++++    report = build_report(["cfg"], records)
++++    cost_line = next(ln for ln in report.splitlines() if "Claude cost" in ln)
++++    assert "$0.42" in cost_line
++++
++++
++++def test_build_report_notes_has_record_count():
++++    """Notes section states the total number of records read."""
++++    records = [_rec("cfg"), _rec("cfg")]
++++    report = build_report(["cfg"], records)
++++    notes = report[report.index("## Notes") :]
++++    assert "2" in notes  # 2 record(s) read
++++
++++
++++def test_build_report_notes_codex_disclaimer():
++++    """Notes section mentions Codex and n/a in the cost disclaimer."""
++++    report = build_report(["cfg"], [_rec("cfg")])
++++    notes = report[report.index("## Notes") :]
++++    assert "Codex" in notes
++++    assert "n/a" in notes
++++
++++
++++# ---------------------------------------------------------------------------
++++# run_report — error cases
++++# ---------------------------------------------------------------------------
++++
++++
++++def test_run_report_missing_jsonl(tmp_path, capsys):
++++    """run_report on a dir without results.jsonl returns non-zero + operator message."""
++++    set_root = tmp_path / "myset"
++++    set_root.mkdir()
++++    rc = run_report(set_root)
++++    assert rc != 0
++++    captured = capsys.readouterr()
++++    assert "orchestrator benchmark" in (captured.out + captured.err)
++++
++++
++++def test_run_report_empty_jsonl(tmp_path, capsys):
++++    """run_report on a results.jsonl with zero records returns non-zero + operator message."""
++++    set_root = tmp_path / "myset"
++++    set_root.mkdir()
++++    (set_root / "results.jsonl").write_text("", encoding="utf-8")
++++    rc = run_report(set_root)
++++    assert rc != 0
++++    captured = capsys.readouterr()
++++    assert "orchestrator benchmark" in (captured.out + captured.err)
++++
++++
++++# ---------------------------------------------------------------------------
++++# orchestrator.main — CLI dispatch (all runners monkeypatched)
++++# ---------------------------------------------------------------------------
++++
++++
++++def test_main_benchmark_calls_run_benchmark(tmp_path, monkeypatch):
++++    """benchmark <set> dispatches to run_benchmark with dry_run=False."""
++++    orch = _orch()
++++    set_dir = _make_set_dir(tmp_path)
++++    calls: list[tuple] = []
++++    monkeypatch.setattr(bm, "run_benchmark", lambda path, *, dry_run=False, **kw: calls.append(("call", dry_run)) or 0)
++++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir)])
++++    assert rc == 0
++++    assert calls == [("call", False)]
++++
++++
++++def test_main_benchmark_dry_run_flag(tmp_path, monkeypatch):
++++    """benchmark <set> --dry-run calls run_benchmark with dry_run=True."""
++++    orch = _orch()
++++    set_dir = _make_set_dir(tmp_path)
++++    calls: list = []
++++    monkeypatch.setattr(bm, "run_benchmark", lambda path, *, dry_run=False, **kw: calls.append(dry_run) or 0)
++++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir), "--dry-run"])
++++    assert rc == 0
++++    assert calls == [True]
++++
++++
++++def test_main_benchmark_wrong_dry_run_ordering_rejected(tmp_path, monkeypatch, capsys):
++++    """benchmark --dry-run <set> (wrong ordering) → exit 2, USAGE on stderr, no run_benchmark."""
++++    orch = _orch()
++++    set_dir = _make_set_dir(tmp_path)
++++    calls: list = []
++++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
++++    rc = orch.main(["orchestrator.py", "benchmark", "--dry-run", str(set_dir)])
++++    assert rc == 2
++++    assert not calls
++++    err = capsys.readouterr().err
++++    assert err  # some output on stderr (USAGE or error message)
++++
++++
++++def test_main_benchmark_report_calls_run_report(tmp_path, monkeypatch):
++++    """benchmark-report <set> dispatches to run_report."""
++++    orch = _orch()
++++    set_dir = _make_set_dir(tmp_path)
++++    calls: list = []
++++    monkeypatch.setattr(bm, "run_report", lambda path: calls.append(str(path)) or 0)
++++    rc = orch.main(["orchestrator.py", "benchmark-report", str(set_dir)])
++++    assert rc == 0
++++    assert len(calls) == 1
++++
++++
++++def test_main_benchmark_returns_runner_exit_code(tmp_path, monkeypatch):
++++    """main forwards the exit code from run_benchmark."""
++++    orch = _orch()
++++    set_dir = _make_set_dir(tmp_path)
++++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: 3)
++++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir)])
++++    assert rc == 3
++++
++++
++++def test_main_benchmark_unknown_flag_rejected(tmp_path, monkeypatch, capsys):
++++    """benchmark <set> --unknown → exit 2 + message on stderr, run_benchmark not called."""
++++    orch = _orch()
++++    set_dir = _make_set_dir(tmp_path)
++++    calls: list = []
++++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
++++    rc = orch.main(["orchestrator.py", "benchmark", str(set_dir), "--unknown"])
++++    assert rc == 2
++++    assert not calls
++++    assert capsys.readouterr().err
++++
++++
++++def test_main_benchmark_missing_set_root(capsys):
++++    """benchmark with no <set-root> → exit 2 + output on stderr."""
++++    orch = _orch()
++++    rc = orch.main(["orchestrator.py", "benchmark"])
++++    assert rc == 2
++++    assert capsys.readouterr().err
++++
++++
++++def test_main_benchmark_report_missing_set_root(capsys):
++++    """benchmark-report with no <set-root> → exit 2 + output on stderr."""
++++    orch = _orch()
++++    rc = orch.main(["orchestrator.py", "benchmark-report"])
++++    assert rc == 2
++++    assert capsys.readouterr().err
++++
++++
++++def test_main_benchmark_nonexistent_dir(tmp_path, monkeypatch, capsys):
++++    """benchmark with non-existent <set-root> → exit 2 + message, run_benchmark not called."""
++++    orch = _orch()
++++    calls: list = []
++++    monkeypatch.setattr(bm, "run_benchmark", lambda *a, **kw: calls.append(1) or 0)
++++    rc = orch.main(["orchestrator.py", "benchmark", str(tmp_path / "no-such-dir")])
++++    assert rc == 2
++++    assert not calls
++++    assert capsys.readouterr().err
++++
++++
++++def test_main_benchmark_report_nonexistent_dir(tmp_path, monkeypatch, capsys):
++++    """benchmark-report with non-existent <set-root> → exit 2 + message, run_report not called."""
++++    orch = _orch()
++++    calls: list = []
++++    monkeypatch.setattr(bm, "run_report", lambda *a, **kw: calls.append(1) or 0)
++++    rc = orch.main(["orchestrator.py", "benchmark-report", str(tmp_path / "no-such-dir")])
++++    assert rc == 2
++++    assert not calls
++++    assert capsys.readouterr().err
++++
++++
++++def test_main_benchmark_runner_not_called_on_bad_args(tmp_path, monkeypatch, capsys):
++++    """run_benchmark must NOT be called on any bad-arg path — verified by raising sentinel."""
++++    orch = _orch()
++++
++++    def _fail(*a, **kw) -> int:  # pragma: no cover
++++        raise AssertionError("run_benchmark must NOT be called on bad args")
++++
++++    monkeypatch.setattr(bm, "run_benchmark", _fail)
++++
++++    # Missing set-root
++++    assert orch.main(["orchestrator.py", "benchmark"]) == 2
++++    capsys.readouterr()
++++
++++    # Unknown flag
++++    set_dir = _make_set_dir(tmp_path)
++++    assert orch.main(["orchestrator.py", "benchmark", str(set_dir), "--bad"]) == 2
++++    capsys.readouterr()
++++
++++    # Non-existent directory
++++    assert orch.main(["orchestrator.py", "benchmark", str(tmp_path / "no-such")]) == 2
++++    capsys.readouterr()
++++
++++    # Wrong --dry-run ordering
++++    assert orch.main(["orchestrator.py", "benchmark", "--dry-run", str(set_dir)]) == 2
++++    capsys.readouterr()
++++
++++
++++# ---------------------------------------------------------------------------
++++# USAGE constant
++++# ---------------------------------------------------------------------------
++++
++++
++++def test_usage_constant_lists_benchmark_subcommands():
++++    """USAGE constant in orchestrator.py mentions both new subcommand names."""
++++    orch = _orch()
++++    assert "benchmark" in orch.USAGE
++++    assert "benchmark-report" in orch.USAGE
++++
++++
++++def test_usage_constant_documents_dry_run():
++++    """USAGE constant documents the --dry-run flag for the benchmark subcommand."""
++++    orch = _orch()
++++    assert "--dry-run" in orch.USAGE
+++diff --git a/.redteam/workflows/benchmark.py b/.redteam/workflows/benchmark.py
+++index f90d17e..6c82a76 100644
+++--- a/.redteam/workflows/benchmark.py
++++++ b/.redteam/workflows/benchmark.py
+++@@ -17,6 +17,8 @@ Exposes:
+++ - extract_metrics()     — deterministic metric extractor over state["phase_telemetry"].
+++ - run_one()             — isolated subprocess dispatch for one (config, task, rep) triple.
+++ - run_benchmark()       — outer loop: configs × tasks × repetitions, resumable + budgeted.
++++- build_report()        — pure: markdown diff table from config_names + records list.
++++- run_report()          — I/O wrapper: reads results.jsonl, prints report to stdout.
+++ """
+++ # NOTE: benchmark.py source intentionally contains no "gh ", "git push", "pr create",
+++ # "--force", or auto-merge language, and does not import phase_runners.create_pr.
+++@@ -651,3 +653,143 @@ def run_benchmark(
+++         this_inv_records.append(record)
+++ 
+++     return 0
++++
++++
++++# ---------------------------------------------------------------------------
++++# build_report — pure aggregation + markdown diff table
++++# ---------------------------------------------------------------------------
++++
++++
++++def build_report(config_names: list[str], records: list[dict]) -> str:
++++    """Build a markdown diff table from declared config names and raw records.
++++
++++    Pure: no I/O. config_names drives column ordering (declaration order from
++++    benchmark.toml), so a zero-record config is still shown as a column (PR-001).
++++    Records whose "config" key is not in config_names are silently ignored.
++++
++++    Formatting rules:
++++    - Floats: f"{x:.2f}"
++++    - Rates: f"{x:.2f}%" (percentage form)
++++    - Costs: f"${x:.2f}" or "n/a" (never "$0.00" when there is no real data)
++++    - Integers: plain int str
++++    - n/a: any cell that cannot be computed (zero total, zero done, no cost data)
++++    """
++++    # Group records by config in insertion order; unknown configs skipped
++++    by_config: dict[str, list[dict]] = {name: [] for name in config_names}
++++    for r in records:
++++        cfg = r.get("config", "")
++++        if cfg in by_config:
++++            by_config[cfg].append(r)
++++
++++    def _cells(name: str) -> dict[str, str]:
++++        recs = by_config[name]
++++        total = len(recs)
++++        done_count = sum(1 for r in recs if r.get("outcome") == "done")
++++        deferred_count = sum(1 for r in recs if r.get("outcome") == "deferred")
++++        error_count = sum(1 for r in recs if r.get("outcome") == "error")
++++
++++        sample = f"{total} (done={done_count}, deferred={deferred_count}, error={error_count})"
++++        if total == 0:
++++            return {
++++                "sample_size": sample,
++++                "approval_rate": "n/a",
++++                "avg_review_rounds": "n/a",
++++                "retry_rate": "n/a",
++++                "rescue_rate": "n/a",
++++                "scope_creep_rate": "n/a",
++++                "avg_wall_clock_sec": "n/a",
++++                "claude_cost": "n/a",
++++            }
++++
++++        approval = f"{done_count / total * 100:.2f}%"
++++        avg_rounds = f"{sum(r.get('review_rounds', 0) for r in recs) / total:.2f}"
++++        retry = f"{sum(r.get('retry_count', 0) for r in recs) / total * 100:.2f}%"
++++        rescue = f"{sum(r.get('rescue_count', 0) for r in recs) / total * 100:.2f}%"
++++        scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
++++        avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
++++
++++        if done_count == 0:
++++            cost_cell = "n/a"
++++        else:
++++            done_costs = [
++++                r["claude_cost_usd"]
++++                for r in recs
++++                if r.get("outcome") == "done" and r.get("claude_cost_usd") is not None
++++            ]
++++            cost_cell = f"${sum(done_costs) / done_count:.2f}" if done_costs else "n/a"
++++
++++        return {
++++            "sample_size": sample,
++++            "approval_rate": approval,
++++            "avg_review_rounds": avg_rounds,
++++            "retry_rate": retry,
++++            "rescue_rate": rescue,
++++            "scope_creep_rate": scope,
++++            "avg_wall_clock_sec": avg_wall,
++++            "claude_cost": cost_cell,
++++        }
++++
++++    aggs = {name: _cells(name) for name in config_names}
++++
++++    metric_rows = [
++++        ("sample_size", "Sample size"),
++++        ("approval_rate", "Approval rate"),
++++        ("avg_review_rounds", "Avg review rounds"),
++++        ("retry_rate", "Retry rate"),
++++        ("rescue_rate", "Rescue rate"),
++++        ("scope_creep_rate", "Scope-creep rate"),
++++        ("avg_wall_clock_sec", "Avg wall-clock sec"),
++++        ("claude_cost", "Claude cost / approved task"),
++++    ]
++++
++++    header = "| Metric | " + " | ".join(config_names) + " |"
++++    sep = "| --- |" + " --- |" * len(config_names)
++++    lines = [header, sep]
++++    for key, label in metric_rows:
++++        cells = " | ".join(aggs[n][key] for n in config_names)
++++        lines.append(f"| {label} | {cells} |")
++++
++++    # Notes — ordered list comprehension preserves config_names declaration order
++++    total_records = len(records)
++++    zero_configs = [name for name in config_names if not by_config[name]]
++++
++++    notes: list[str] = ["", "## Notes", ""]
++++    notes.append(f"- {total_records} record(s) read.")
++++    if zero_configs:
++++        notes.append(f"- Zero-record config(s): {', '.join(zero_configs)}.")
++++    notes.append("- Codex-role phases contribute n/a to the Claude cost column; costs are never fabricated.")
++++
++++    return "\n".join(lines) + "\n" + "\n".join(notes) + "\n"
++++
++++
++++# ---------------------------------------------------------------------------
++++# run_report — I/O wrapper around build_report
++++# ---------------------------------------------------------------------------
++++
++++
++++def run_report(set_root: Path) -> int:
++++    """Read results.jsonl, build a markdown diff report, and print to stdout.
++++
++++    Returns 0 on success. Returns 2 when the JSONL is missing or has zero
++++    records, naming `orchestrator benchmark <set>` as the next step.
++++    """
++++    results_path = set_root / "results.jsonl"
++++    if not results_path.exists():
++++        print(
++++            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
++++            file=sys.stderr,
++++        )
++++        return 2
++++
++++    records = load_records(results_path)
++++    if not records:
++++        print(
++++            f"no benchmark results yet — run `orchestrator benchmark {set_root}` first",
++++            file=sys.stderr,
++++        )
++++        return 2
++++
++++    bset = load_benchmark_set(set_root)
++++    config_names = list(bset.configs.keys())
++++    sys.stdout.write(build_report(config_names, records))
++++    return 0
+++diff --git a/.redteam/workflows/orchestrator.py b/.redteam/workflows/orchestrator.py
+++index 76dd167..6778dde 100644
+++--- a/.redteam/workflows/orchestrator.py
++++++ b/.redteam/workflows/orchestrator.py
+++@@ -10,6 +10,8 @@ Usage:
+++     python3 .redteam/workflows/orchestrator.py new <batch-dir> <slug> [--title <text>]
+++     python3 .redteam/workflows/orchestrator.py review
+++     python3 .redteam/workflows/orchestrator.py config
++++    python3 .redteam/workflows/orchestrator.py benchmark <set-root> [--dry-run]
++++    python3 .redteam/workflows/orchestrator.py benchmark-report <set-root>
+++ 
+++ Walks each task in <batch-dir>/tasks/ through the 8-phase pipeline,
+++ persists state.json after every phase, blocks at human gates (sentinel files),
+++@@ -70,6 +72,7 @@ from adapters import (  # type: ignore[import-not-found]  # noqa: E402
+++ )
+++ from config import load_config, resolve_tier  # type: ignore[import-not-found]  # noqa: E402
+++ import config_cli  # type: ignore[import-not-found]  # noqa: E402
++++import benchmark  # type: ignore[import-not-found]  # noqa: E402
+++ 
+++ 
+++ # ---------- phase order & runner registry ----------
+++@@ -2518,6 +2521,24 @@ def cmd_config(repo: Path | None = None) -> int:
+++     return config_cli.run_config(rr, _adversarial_pairing_error)
+++ 
+++ 
++++def cmd_benchmark(set_root: Path, *, dry_run: bool = False) -> int:
++++    """Dispatch to benchmark.run_benchmark.
++++
++++    Returns the exit code from run_benchmark (0 = complete, 3 = budget abort).
++++    Does NOT touch batch state, _run_pipeline, or create_pr.
++++    """
++++    return benchmark.run_benchmark(set_root, dry_run=dry_run)
++++
++++
++++def cmd_benchmark_report(set_root: Path) -> int:
++++    """Dispatch to benchmark.run_report.
++++
++++    Returns 0 on success, 2 when results.jsonl is missing or empty.
++++    Does NOT touch batch state, _run_pipeline, or create_pr.
++++    """
++++    return benchmark.run_report(set_root)
++++
++++
+++ USAGE = (
+++     "usage: orchestrator.py decompose <batch-dir>\n"
+++     "       orchestrator.py {start|resume|wait-and-resume} <batch-dir>\n"
+++@@ -2525,6 +2546,8 @@ USAGE = (
+++     "       orchestrator.py new <batch-dir> <slug> [--title <text>]\n"
+++     "       orchestrator.py review\n"
+++     "       orchestrator.py config\n"
++++    "       orchestrator.py benchmark <set-root> [--dry-run]\n"
++++    "       orchestrator.py benchmark-report <set-root>\n"
+++     "  decompose        — generate goal.json + task briefs from goal.md; run the\n"
+++     "                     cross-provider decomposition review gate; stop before any\n"
+++     "                     task is dispatched (run `start` after to execute the stack)\n"
+++@@ -2538,7 +2561,10 @@ USAGE = (
+++     "  new              — scaffold a task dir + input.md from the template (next task-NNN)\n"
+++     "  review           — one-shot adversarial review of the current branch diff with the\n"
+++     "                     configured reviewer (a different provider than the worker); no batch\n"
+++-    "  config           — interactively pick per-role models and write .redteam/config.toml"
++++    "  config           — interactively pick per-role models and write .redteam/config.toml\n"
++++    "  benchmark        — run configs × tasks × repetitions against .redteam/benchmarks/<set>;\n"
++++    "                     [--dry-run] prints the plan + cost estimate without executing\n"
++++    "  benchmark-report — aggregate results.jsonl into a markdown diff table (no Pareto/score)"
+++ )
+++ 
+++ 
+++@@ -2577,6 +2603,33 @@ def main(argv: list[str]) -> int:
+++             return 2
+++         return cmd_status(batch_dir, as_json=bool(extra))
+++ 
++++    if command in ("benchmark", "benchmark-report"):
++++        # Chosen --dry-run ordering: benchmark <set-root> [--dry-run].
++++        # A flag in the argv[2] (set-root) position signals wrong ordering → USAGE.
++++        if argv[2].startswith("--"):
++++            print(USAGE, file=sys.stderr)
++++            return 2
++++        set_root = batch_dir  # already Path(argv[2]).resolve()
++++        if not set_root.is_dir():
++++            print(
++++                f"error: set-root does not exist or is not a directory: {argv[2]}",
++++                file=sys.stderr,
++++            )
++++            return 2
++++        extra = argv[3:]
++++        if command == "benchmark":
++++            if extra == ["--dry-run"]:
++++                return cmd_benchmark(set_root, dry_run=True)
++++            if not extra:
++++                return cmd_benchmark(set_root, dry_run=False)
++++            print(f"error: unknown benchmark argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
++++            return 2
++++        # benchmark-report
++++        if extra:
++++            print(f"error: unknown benchmark-report argument(s): {' '.join(extra)}\n\n{USAGE}", file=sys.stderr)
++++            return 2
++++        return cmd_benchmark_report(set_root)
++++
+++     print(f"error: unknown command: {command!r}\n\n{USAGE}", file=sys.stderr)
+++     return 2
+++ 
+++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+++index a620fe2..cd6878b 100644
+++--- a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
++++++ b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+++@@ -1,14 +1,15 @@
+++ {
+++   "task_id": "task-001-benchmark-config-and-store",
+++   "mode": "agent-pair",
+++-  "phase": "create_pr",
++++  "phase": "done",
+++   "phases_completed": [
+++     "plan_outcome",
+++     "plan_review",
+++     "implement",
+++-    "review_code"
++++    "review_code",
++++    "create_pr"
+++   ],
+++-  "next_phase": "create_pr",
++++  "next_phase": "done",
+++   "decision": "pending",
+++   "owner": "claude",
+++   "reviewer": "codex",
+++@@ -60,7 +61,7 @@
+++   "last_failure_diff": null,
+++   "deferred_requirements": [],
+++   "branch": "redteam/task-001-benchmark-config-and-store",
+++-  "pr_url": null,
++++  "pr_url": "https://github.com/AscendyProject/redteam/pull/154",
+++   "phase_telemetry": [
+++     {
+++       "phase": "plan_outcome",
+++@@ -85,10 +86,18 @@
+++       "cost_usd": 0.9470895000000003,
+++       "duration_sec": 435.263,
+++       "outcome": "approved"
++++    },
++++    {
++++      "phase": "create_pr",
++++      "provider": "claude",
++++      "model": null,
++++      "cost_usd": 0.9944235000000001,
++++      "duration_sec": 119.49,
++++      "outcome": "approved"
+++     }
+++   ],
+++   "created_at": "2026-07-15T14:09:31.204373+00:00",
+++-  "updated_at": "2026-07-15T14:23:31.041737+00:00",
++++  "updated_at": "2026-07-15T16:22:32.070942+00:00",
+++   "base_branch": "main",
+++   "phase_started_at": "2026-07-15T14:23:31.041717+00:00",
+++   "last_user_response": null,
+++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+++index 2054d88..7430238 100644
+++--- a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
++++++ b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+++@@ -1,14 +1,15 @@
+++ {
+++   "task_id": "task-002-benchmark-runner",
+++   "mode": "agent-pair",
+++-  "phase": "create_pr",
++++  "phase": "done",
+++   "phases_completed": [
+++     "plan_outcome",
+++     "plan_review",
+++     "implement",
+++-    "review_code"
++++    "review_code",
++++    "create_pr"
+++   ],
+++-  "next_phase": "create_pr",
++++  "next_phase": "done",
+++   "decision": "pending",
+++   "owner": "claude",
+++   "reviewer": "codex",
+++@@ -100,7 +101,7 @@
+++     }
+++   ],
+++   "branch": "redteam/task-002-benchmark-runner",
+++-  "pr_url": null,
++++  "pr_url": "https://github.com/AscendyProject/redteam/pull/155",
+++   "phase_telemetry": [
+++     {
+++       "phase": "plan_outcome",
+++@@ -165,10 +166,18 @@
+++       "cost_usd": 1.533762,
+++       "duration_sec": 659.063,
+++       "outcome": "approved"
++++    },
++++    {
++++      "phase": "create_pr",
++++      "provider": "claude",
++++      "model": null,
++++      "cost_usd": 1.424842,
++++      "duration_sec": 239.878,
++++      "outcome": "approved"
+++     }
+++   ],
+++   "created_at": "2026-07-15T14:25:38.418298+00:00",
+++-  "updated_at": "2026-07-15T16:15:01.518133+00:00",
++++  "updated_at": "2026-07-15T16:22:32.074156+00:00",
+++   "base_branch": "redteam/task-001-benchmark-config-and-store",
+++   "base_branch_sha": "b7a59d48b7b8adf7061eeaa45aaaa3fd843d340e",
+++   "phase_started_at": "2026-07-15T16:15:01.518100+00:00",
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md
++new file mode 100644
++index 0000000..d509c5b
++--- /dev/null
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md
++@@ -0,0 +1,56 @@
+++# Outcome — `benchmark-report` + wire `benchmark` / `benchmark-report` into `orchestrator.main`
+++
+++## Goal
+++Ship the last layer of the #146 Phase 1 MVP benchmark: an aggregation +
+++markdown-diff `benchmark-report` on top of task-002's JSONL, plus CLI wiring
+++so an operator can run `python3 .redteam/workflows/orchestrator.py benchmark
+++<set-root> [--dry-run]` and `... benchmark-report <set-root>` end-to-end
+++against `.redteam/benchmarks/<set>` — no Pareto, no hidden score, no plugin
+++surface.
+++
+++## Done-when
+++- [ ] `.redteam/workflows/benchmark.py` defines a pure `build_report(config_names: list[str], records: list[dict]) -> str` that returns a markdown table with one column per name in `config_names` (declaration order, kept even when a name has zero records), one row per aggregated metric (sample size + per-outcome counts, approval rate, avg review rounds, retry rate, rescue rate, scope-creep rate, avg wall-clock sec, Claude cost per approved task), followed by a "Notes" section listing the record count, any zero-record configs (derived from `config_names` minus configs present in `records`), and the Codex-cost `n/a` disclaimer.
+++- [ ] Formatting in `build_report` output: floats `f"{x:.2f}"`, rates as `%` with two decimals (e.g. `54.17%`), costs as `$0.42` / `n/a`, integers rendered plain — asserted by tests.
+++- [ ] Claude-cost cell renders `n/a` (never `$0.00`) whenever `done_count == 0` OR every done-outcome record has `claude_cost_usd is None` — asserted by tests.
+++- [ ] `.redteam/workflows/benchmark.py` defines `run_report(set_root: Path) -> int` that reads `set_root / "results.jsonl"` via `load_records`, obtains `config_names` from `load_benchmark_set(set_root).configs` in declaration order, prints `build_report(config_names, records)` to stdout and returns `0`; when the JSONL is missing OR contains zero records it prints a clear message (naming `orchestrator benchmark <set>` as the next step) and returns a non-zero exit code (`2`).
+++- [ ] `.redteam/workflows/orchestrator.py`'s module docstring **and** `USAGE` string constant both list `benchmark <set-root> [--dry-run]` and `benchmark-report <set-root>` with one-line summaries — asserted by a substring test over the `USAGE` constant.
+++- [ ] `main(argv)` in `orchestrator.py` dispatches `benchmark <set-root> [--dry-run]` to a `cmd_benchmark(set_root, dry_run=...)` helper that calls `benchmark.run_benchmark(set_root, dry_run=...)`, and `benchmark-report <set-root>` to a `cmd_benchmark_report(set_root)` helper that calls `benchmark.run_report(set_root)`; both helpers return the callee's exit code.
+++- [ ] `main` accepts exactly one `--dry-run` position for `benchmark` (either `benchmark --dry-run <set>` or `benchmark <set> --dry-run` — pick one, document in `USAGE`, assert in tests); the un-picked ordering plus any other flag returns `2` with `USAGE` on stderr and does NOT call `run_benchmark`.
+++- [ ] `main` rejects: (a) a missing `<set-root>` for either subcommand → exit `2` + `USAGE` on stderr, (b) a `<set-root>` path that does not exist or is not a directory → exit `2` + clear message on stderr, (c) any unknown flag on `benchmark` / `benchmark-report` → exit `2` + `USAGE`-or-clear-message on stderr. In none of these cases is `run_benchmark` / `run_report` invoked (verified by monkeypatch-fail-if-called).
+++- [ ] Neither new subcommand touches `_run_pipeline`, batch state, `create_pr`, or `gh` — enforced by keeping the dispatch in the `main` `if command == ...` ladder above the batch commands and by tests that monkeypatch `benchmark.run_benchmark` / `benchmark.run_report` and observe only those calls fire.
+++- [ ] A new `.redteam/tests/test_benchmark_report_and_cli.py` covers every case listed in input.md's "Tests to add" section — pure `build_report` diff arithmetic (approval rate + avg wall-clock spot-check), the two `n/a` Claude-cost paths, the zero-record-config PR-001 case, `run_report` on empty/missing JSONL, all `orchestrator.main` dispatch and error-handling cases with `benchmark.run_benchmark` / `benchmark.run_report` monkeypatched (no real benchmark execution), and the `USAGE` substring assertion.
+++- [ ] `bash .redteam/scripts/verify.sh` is green (ruff + full pytest, including `test_agents_generic_prompts.py`).
+++- [ ] Only the three files listed under "Affected files" have been modified/created; nothing under `phase_runners/`, `adapters/`, `config.py`, `install.py`, `.claude/`, or the plugin/marketplace JSON has changed (checked via `git diff --name-only` in review).
+++
+++## Out of scope
+++- Matrix expansion, Pareto frontier, `recommend-models --profile`, LLM-judge scorers, sqlite mirror, external eval-platform export (all Phase 2).
+++- A Claude Code plugin command (`.claude/commands/redteam-benchmark.md` / marketplace/plugin JSON): the CLI is Phase 1's operator surface.
+++- `install.py` changes to seed a starter benchmark set.
+++- Any change to `state.json` / `phase_telemetry` shape, the `benchmark.toml` schema, the `results.jsonl` schema, or the `extract_metrics` / `run_benchmark` / `run_one` behavior fixed by task-001/002.
+++- Modifying `.redteam/config.toml` or any batch state.
+++- Adding a headline "quality" score column or any single-number ranking.
+++
+++## Affected files
+++- `.redteam/workflows/benchmark.py` — add `build_report` (pure) + `run_report` (I/O wrapper).
+++- `.redteam/workflows/orchestrator.py` — extend `USAGE` docstring + `USAGE` constant; add `cmd_benchmark` / `cmd_benchmark_report`; wire both into `main(argv)` with `--dry-run` handling and the standard unknown/missing/bad-arg → exit-2 discipline.
+++- `(new) .redteam/tests/test_benchmark_report_and_cli.py` — covers `build_report`, `run_report`, CLI dispatch (monkeypatched), and the `USAGE` substring assertion; created here at the canonical test location by the pipeline's implement phase, NOT under the task dir.
+++
+++## Verification
+++
+++### Existing (must continue to pass)
+++
+++```yaml
+++commands:
+++  - bash .redteam/scripts/verify.sh
+++```
+++
+++### To be created (the test-writing phase will define exact test names)
+++- tests under `.redteam/tests/` covering: `build_report` markdown table shape + arithmetic (approval rate, avg wall-clock, retry / rescue / scope-creep rate), declaration-order column ordering, zero-record-config PR-001 case (column kept + Notes lists it), both `n/a` Claude-cost paths (`done_count == 0`, all `claude_cost_usd is None`), formatting rules (`.2f` floats, `%` rates, `$` costs, plain ints), `run_report` on empty/missing JSONL (non-zero exit + operator-facing message), `orchestrator.main` dispatch for `benchmark` (both with and without `--dry-run` in the chosen ordering), `benchmark-report`, unknown-flag / missing-arg / non-existent-dir all → exit `2` with `USAGE` or clear message, `USAGE` constant substring check for both new subcommands, and a "runner not called on bad args" assertion via monkeypatched `benchmark.run_benchmark` / `benchmark.run_report`.
+++- All CLI tests must monkeypatch `benchmark.run_benchmark` and `benchmark.run_report` — no real benchmark execution in the test suite.
+++
+++## Risks
+++- **`--dry-run` flag position.** Input.md leaves the ordering `benchmark --dry-run <set>` vs `benchmark <set> --dry-run` to the implementer ("pick one, document + assert"). The implementer must commit to one ordering, document it in `USAGE`, and assert both the accepted ordering AND the rejected one (exit `2`). Cross-check against `cmd_status`'s handling (`argv[3:] == ["--json"]`) for consistency, but they are independent — this is not a project-wide flag-parsing refactor.
+++- **`run_report` exit code on missing JSONL.** Input.md says "e.g. `2`". `2` is already this project's "bad args / usage" code; some readers may prefer a distinct code (e.g. `4`) to distinguish "no data yet" from "unusable invocation". Recommend sticking with `2` for consistency with the surrounding CLI discipline — flag if the reviewer prefers a distinct code.
+++- **`USAGE` module docstring vs `USAGE` constant.** The current file carries both (lines 4–12 docstring + lines 2521–2542 constant). Keeping them in sync is a manual chore; the substring test only guards the constant. Adding a docstring-substring test is arguably better hygiene but is outside the Done-when — flag if the reviewer wants both guarded.
+++- **Codex-role cost disclaimer wording.** The Notes line about `n/a` Codex cost is prose. If the operator later wants to grep this line, the exact wording matters. The tests should pin at least a stable substring (e.g. `"Codex"` and `"n/a"`).
+++- **Zero-record-config detection via set difference.** `set(config_names) - {r["config"] for r in records}` loses declaration order for the Notes list. The implementer must iterate `config_names` and filter — an ordered-list comprehension, not a set diff — so the Notes line is deterministic; call out in the test.
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md
++new file mode 100644
++index 0000000..de1df73
++--- /dev/null
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md
++@@ -0,0 +1,12 @@
+++Disagree:
+++No blocking disagreements.
+++
+++Uncertain:
+++No unresolved uncertainties. The only operational caveat is that `orchestrator.main` currently binds `argv[2]` to `batch_dir` before batch dispatch ([.redteam/workflows/orchestrator.py](/Users/kh/Documents/redteam/.redteam/workflows/orchestrator.py:2558)), so implementation must add `benchmark` handling before that path normalization if it chooses `benchmark --dry-run <set-root>`. The outcome already calls out choosing and testing one flag ordering at lines 18 and 52, so this is covered.
+++
+++Agree:
+++The plan satisfies the task scope. It identifies the three affected files only, preserves the no-score/no-Pareto boundary, keeps CLI calls separate from the batch pipeline, and requires monkeypatched CLI tests rather than real benchmark execution. The `## Verification` section contains a parseable YAML block with exactly `bash .redteam/scripts/verify.sh` at outcome lines 38-45, matching the input requirement at input lines 202-210 and the extractor’s expected `## Verification` fenced YAML format.
+++
+++No open PR findings.
+++
+++REVIEW_DECISION: APPROVED
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/pr.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/pr.md
++new file mode 100644
++index 0000000..a203578
++--- /dev/null
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/pr.md
++@@ -0,0 +1,45 @@
+++## What
+++Ship the last layer of the #146 Phase 1 MVP benchmark: an aggregation +
+++markdown-diff `benchmark-report` on top of task-002's JSONL, plus CLI wiring
+++so an operator can run `python3 .redteam/workflows/orchestrator.py benchmark
+++<set-root> [--dry-run]` and `... benchmark-report <set-root>` end-to-end
+++against `.redteam/benchmarks/<set>` — no Pareto, no hidden score, no plugin
+++surface.
+++
+++## Why
+++This is the third and final task of the #146 Phase 1 MVP benchmark, stacked
+++on `task-002-benchmark-runner` (which added the loop + `run_one` seam + budget
++++ safety) and `task-001-benchmark-config-and-store` (the TOML loader + JSONL
+++schema/store). Everything below the operator surface was already in place
+++after task-002; this task adds the `benchmark-report` aggregation + markdown
+++diff and wires both new subcommands into `orchestrator.main` so the Phase 1
+++MVP is operator-usable end-to-end.
+++
+++## Done-when
+++- [ ] `.redteam/workflows/benchmark.py` defines a pure `build_report(config_names: list[str], records: list[dict]) -> str` that returns a markdown table with one column per name in `config_names` (declaration order, kept even when a name has zero records), one row per aggregated metric (sample size + per-outcome counts, approval rate, avg review rounds, retry rate, rescue rate, scope-creep rate, avg wall-clock sec, Claude cost per approved task), followed by a "Notes" section listing the record count, any zero-record configs (derived from `config_names` minus configs present in `records`), and the Codex-cost `n/a` disclaimer.
+++- [ ] Formatting in `build_report` output: floats `f"{x:.2f}"`, rates as `%` with two decimals (e.g. `54.17%`), costs as `$0.42` / `n/a`, integers rendered plain — asserted by tests.
+++- [ ] Claude-cost cell renders `n/a` (never `$0.00`) whenever `done_count == 0` OR every done-outcome record has `claude_cost_usd is None` — asserted by tests.
+++- [ ] `.redteam/workflows/benchmark.py` defines `run_report(set_root: Path) -> int` that reads `set_root / "results.jsonl"` via `load_records`, obtains `config_names` from `load_benchmark_set(set_root).configs` in declaration order, prints `build_report(config_names, records)` to stdout and returns `0`; when the JSONL is missing OR contains zero records it prints a clear message (naming `orchestrator benchmark <set>` as the next step) and returns a non-zero exit code (`2`).
+++- [ ] `.redteam/workflows/orchestrator.py`'s module docstring **and** `USAGE` string constant both list `benchmark <set-root> [--dry-run]` and `benchmark-report <set-root>` with one-line summaries — asserted by a substring test over the `USAGE` constant.
+++- [ ] `main(argv)` in `orchestrator.py` dispatches `benchmark <set-root> [--dry-run]` to a `cmd_benchmark(set_root, dry_run=...)` helper that calls `benchmark.run_benchmark(set_root, dry_run=...)`, and `benchmark-report <set-root>` to a `cmd_benchmark_report(set_root)` helper that calls `benchmark.run_report(set_root)`; both helpers return the callee's exit code.
+++- [ ] `main` accepts exactly one `--dry-run` position for `benchmark` (either `benchmark --dry-run <set>` or `benchmark <set> --dry-run` — pick one, document in `USAGE`, assert in tests); the un-picked ordering plus any other flag returns `2` with `USAGE` on stderr and does NOT call `run_benchmark`.
+++- [ ] `main` rejects: (a) a missing `<set-root>` for either subcommand → exit `2` + `USAGE` on stderr, (b) a `<set-root>` path that does not exist or is not a directory → exit `2` + clear message on stderr, (c) any unknown flag on `benchmark` / `benchmark-report` → exit `2` + `USAGE`-or-clear-message on stderr. In none of these cases is `run_benchmark` / `run_report` invoked (verified by monkeypatch-fail-if-called).
+++- [ ] Neither new subcommand touches `_run_pipeline`, batch state, `create_pr`, or `gh` — enforced by keeping the dispatch in the `main` `if command == ...` ladder above the batch commands and by tests that monkeypatch `benchmark.run_benchmark` / `benchmark.run_report` and observe only those calls fire.
+++- [ ] A new `.redteam/tests/test_benchmark_report_and_cli.py` covers every case listed in input.md's "Tests to add" section — pure `build_report` diff arithmetic (approval rate + avg wall-clock spot-check), the two `n/a` Claude-cost paths, the zero-record-config PR-001 case, `run_report` on empty/missing JSONL, all `orchestrator.main` dispatch and error-handling cases with `benchmark.run_benchmark` / `benchmark.run_report` monkeypatched (no real benchmark execution), and the `USAGE` substring assertion.
+++- [ ] `bash .redteam/scripts/verify.sh` is green (ruff + full pytest, including `test_agents_generic_prompts.py`).
+++- [ ] Only the three files listed under "Affected files" have been modified/created; nothing under `phase_runners/`, `adapters/`, `config.py`, `install.py`, `.claude/`, or the plugin/marketplace JSON has changed (checked via `git diff --name-only` in review).
+++
+++## Verification
+++- Tests: test_build_report_basic_table_shape, test_build_report_approval_rate_arithmetic, test_build_report_avg_wall_clock_arithmetic, test_build_report_column_declaration_order, test_build_report_claude_cost_na_when_all_approved_have_none_cost, test_build_report_claude_cost_na_when_done_count_zero, test_build_report_zero_record_config_shown_as_column, test_build_report_zero_record_config_in_notes, test_build_report_zero_record_config_notes_declaration_order, test_build_report_rates_formatted_as_percentage, test_build_report_cost_formatted_as_dollar, test_build_report_notes_has_record_count, test_build_report_notes_codex_disclaimer, test_run_report_missing_jsonl, test_run_report_empty_jsonl, test_main_benchmark_calls_run_benchmark, test_main_benchmark_dry_run_flag, test_main_benchmark_wrong_dry_run_ordering_rejected, test_main_benchmark_report_calls_run_report, test_main_benchmark_returns_runner_exit_code, test_main_benchmark_unknown_flag_rejected, test_main_benchmark_missing_set_root, test_main_benchmark_report_missing_set_root, test_main_benchmark_nonexistent_dir, test_main_benchmark_report_nonexistent_dir, test_main_benchmark_runner_not_called_on_bad_args, test_usage_constant_lists_benchmark_subcommands, test_usage_constant_documents_dry_run
+++- Verify command: `bash .redteam/scripts/verify.sh` ✅
+++
+++## Code review summary
+++- Diff scoped to the three approved files only: `.redteam/workflows/benchmark.py`, `.redteam/workflows/orchestrator.py`, and `.redteam/tests/test_benchmark_report_and_cli.py`; no adapter, phase-runner, installer, config, plugin, or marketplace boundary was touched.
+++- `build_report` keeps declaration-order config columns, keeps zero-record configs, renders `n/a` for zero/unknown cost cases, and avoids Pareto/scores/winner language — produces discriminating output rather than collapsing to constants.
+++- New tests would have failed pre-change (the functions didn't exist and the orchestrator had no `benchmark`/`benchmark-report` dispatch); all CLI tests monkeypatch the benchmark runners so no real benchmark runs execute in the suite.
+++- Security checklist: no new non-stdlib runtime imports, no `shell=True`, no verifier allowlist/snapshot changes, no installer changes, no reviewer-adapter capability changes, and no `gh`/PR creation path added.
+++- `state.json` records `verification.last_exit_code == 0` and `verification.log` shows `847 passed` with `verify.sh OK`.
+++- REVIEW_DECISION: APPROVED (no open IR findings).
+++
+++## Generated by
+++redteam / batch benchmark-phase1 / task task-003-benchmark-report-and-cli
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
++new file mode 100644
++index 0000000..1fa76b4
++--- /dev/null
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
++@@ -0,0 +1,103 @@
+++{
+++  "task_id": "task-003-benchmark-report-and-cli",
+++  "mode": "agent-pair",
+++  "phase": "create_pr",
+++  "phases_completed": [
+++    "plan_outcome",
+++    "plan_review",
+++    "implement",
+++    "review_code"
+++  ],
+++  "next_phase": "create_pr",
+++  "decision": "pending",
+++  "owner": "claude",
+++  "reviewer": "codex",
+++  "next_action": null,
+++  "review_items": [],
+++  "verification": {
+++    "commands": [
+++      "bash .redteam/scripts/verify.sh"
+++    ],
+++    "last_exit_code": 0,
+++    "last_output_path": "verification.log",
+++    "last_run_at": "2026-07-15T16:35:54.782916+00:00",
+++    "last_diff_sha256": "dfe6ee046ed88c79c30fddecd21194e4b2f8cc5baebbc1fb18c0053af23c848b",
+++    "verify_command": "bash .redteam/scripts/verify.sh",
+++    "verify_allowlist": [
+++      "pytest",
+++      "ruff",
+++      "mypy"
+++    ]
+++  },
+++  "models": {
+++    "planner": "claude-opus-4-7",
+++    "implementer": "claude-sonnet-4-6",
+++    "reviewer": "codex",
+++    "rescue": "codex"
+++  },
+++  "escape": {
+++    "ask_user": false,
+++    "reason": null,
+++    "return_phase": null
+++  },
+++  "implement_round_count": 1,
+++  "tdd_test_files": [],
+++  "retries": {
+++    "implement": 0
+++  },
+++  "max_retries_per_phase": 2,
+++  "last_failure_reason": null,
+++  "last_failure_log": null,
+++  "last_failure_diff": null,
+++  "deferred_requirements": [
+++    {
+++      "phase": "implement",
+++      "backtrack_to": null,
+++      "reason": "stalled",
+++      "attempts": 2,
+++      "feedback": "cross-run trust-root floor: outside-scope paths detected before worker invocation; commit or stash these files and re-run. Offending paths: .redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/pr_url.txt"
+++    }
+++  ],
+++  "branch": "redteam/task-003-benchmark-report-and-cli",
+++  "pr_url": null,
+++  "phase_telemetry": [
+++    {
+++      "phase": "plan_outcome",
+++      "provider": "claude",
+++      "model": null,
+++      "cost_usd": 0.7902760000000001,
+++      "duration_sec": 91.953,
+++      "outcome": "approved"
+++    },
+++    {
+++      "phase": "implement",
+++      "provider": "claude",
+++      "model": null,
+++      "cost_usd": 1.7442413999999995,
+++      "duration_sec": 701.762,
+++      "outcome": "approved"
+++    }
+++  ],
+++  "created_at": "2026-07-15T16:19:10.222874+00:00",
+++  "updated_at": "2026-07-15T16:38:00.879158+00:00",
+++  "base_branch": "redteam/task-002-benchmark-runner",
+++  "base_branch_sha": "1f8a3603eb0d12977394be5ac66a0e81b226bf52",
+++  "phase_started_at": "2026-07-15T16:38:00.879133+00:00",
+++  "last_user_response": null,
+++  "implement_plan_affected_files": [
+++    ".redteam/tests/test_benchmark_report_and_cli.py",
+++    ".redteam/workflows/benchmark.py",
+++    ".redteam/workflows/orchestrator.py"
+++  ],
+++  "implement_tracked_baseline": [
+++    ".redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json",
+++    ".redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json"
+++  ],
+++  "implement_untracked_baseline": [
+++    ".redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/outcome.md",
+++    ".redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/plan_review.md",
+++    ".redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json"
+++  ],
+++  "last_reviewed_rev": "997d806bc3538b6c2f3e8dfd1ca4ec6c06603783",
+++  "rescue_entry_count": 0
+++}
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log
++new file mode 100644
++index 0000000..2fd7c6c
++--- /dev/null
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log
++@@ -0,0 +1,91 @@
+++$ bash .redteam/scripts/verify.sh
+++=== ruff check ===
+++All checks passed!
+++=== ruff format check ===
+++83 files already formatted
+++=== pytest ===
+++============================= test session starts ==============================
+++platform darwin -- Python 3.12.8, pytest-9.1.1, pluggy-1.6.0
+++rootdir: /Users/kh/Documents/redteam
+++configfile: pyproject.toml
+++collected 847 items
+++
+++.redteam/tests/test_adversarial_pairing_guard.py ...........             [  1%]
+++.redteam/tests/test_agent_pair_rescue_phase_order.py ...                 [  1%]
+++.redteam/tests/test_agent_tool_keys.py ...                               [  2%]
+++.redteam/tests/test_agents_generic_prompts.py .........                  [  3%]
+++.redteam/tests/test_ask_user_approve_snapshot.py ..                      [  3%]
+++.redteam/tests/test_base_branch_pin.py .......                           [  4%]
+++.redteam/tests/test_baseline_trust_root_cross_run.py ................... [  6%]
+++.                                                                        [  6%]
+++.redteam/tests/test_benchmark_config_and_store.py ...................... [  9%]
+++...............                                                          [ 10%]
+++.redteam/tests/test_benchmark_report_and_cli.py ........................ [ 13%]
+++....                                                                     [ 14%]
+++.redteam/tests/test_benchmark_runner.py ............................     [ 17%]
+++.redteam/tests/test_branch_switch_stash.py ......                        [ 18%]
+++.redteam/tests/test_claude_reviewer_adapter.py ..........                [ 19%]
+++.redteam/tests/test_codex_main_wiring.py ....                            [ 19%]
+++.redteam/tests/test_config.py .............                              [ 21%]
+++.redteam/tests/test_config_cli.py ....................                   [ 23%]
+++.redteam/tests/test_create_pr_preflight.py ........                      [ 24%]
+++.redteam/tests/test_engine_loader.py ..                                  [ 24%]
+++.redteam/tests/test_floor_decompose_and_sibling_exemptions.py .......... [ 26%]
+++........                                                                 [ 27%]
+++.redteam/tests/test_floor_plan_affected_files_exemption.py ............. [ 28%]
+++.......................                                                  [ 31%]
+++.redteam/tests/test_gateless_default_common_path.py .......              [ 32%]
+++.redteam/tests/test_goal_ceilings_enforcement.py ....................... [ 34%]
+++............                                                             [ 36%]
+++.redteam/tests/test_goal_dag_scheduler.py ............                   [ 37%]
+++.redteam/tests/test_goal_decomposer.py ................................  [ 41%]
+++.redteam/tests/test_goal_done_criterion.py ............................. [ 44%]
+++.                                                                        [ 44%]
+++.redteam/tests/test_goal_manifest_validation.py ...........              [ 46%]
+++.redteam/tests/test_goal_mode_e2e.py .......                             [ 47%]
+++.redteam/tests/test_goal_stacked_branching.py ..........                 [ 48%]
+++.redteam/tests/test_implement_untracked_baseline_pin.py ................ [ 50%]
+++.....                                                                    [ 50%]
+++.redteam/tests/test_implementer_commit.py .............                  [ 52%]
+++.redteam/tests/test_install.py .......................                   [ 55%]
+++.redteam/tests/test_mode_aware_prompts.py ....                           [ 55%]
+++.redteam/tests/test_new_task.py ......                                   [ 56%]
+++.redteam/tests/test_orchestrator_config.py ......                        [ 56%]
+++.redteam/tests/test_phase_telemetry.py ..................                [ 59%]
+++.redteam/tests/test_pinned_base_freeze_guard.py ........                 [ 59%]
+++.redteam/tests/test_pipeline_mode.py .......                             [ 60%]
+++.redteam/tests/test_plugin_packaging.py .......                          [ 61%]
+++.redteam/tests/test_pr_branch.py ..                                      [ 61%]
+++.redteam/tests/test_preimplement_snapshot_invariant.py .....             [ 62%]
+++.redteam/tests/test_progress_surface.py .....                            [ 63%]
+++.redteam/tests/test_rescue_at_two_failures.py .                          [ 63%]
+++.redteam/tests/test_rescue_loop_bounded.py ...                           [ 63%]
+++.redteam/tests/test_review_code_hard_ceilings.py ....................... [ 66%]
+++................................                                         [ 70%]
+++.redteam/tests/test_review_code_narrow_context.py .................      [ 72%]
+++.redteam/tests/test_review_code_staged_reviewer.py ..................... [ 74%]
+++.............................                                            [ 77%]
+++.redteam/tests/test_review_command.py ........                           [ 78%]
+++.redteam/tests/test_review_output_validity_mandate.py ....               [ 79%]
+++.redteam/tests/test_review_round_archive.py ...                          [ 79%]
+++.redteam/tests/test_reviewer_adapter.py ............................     [ 82%]
+++.redteam/tests/test_reviewer_fallback.py ...............                 [ 84%]
+++.redteam/tests/test_run_claude_model.py ............                     [ 86%]
+++.redteam/tests/test_run_claude_timeout.py ........                       [ 87%]
+++.redteam/tests/test_sibling_task_floor_exemption.py .................... [ 89%]
+++                                                                         [ 89%]
+++.redteam/tests/test_state_bootstrap.py .....                             [ 90%]
+++.redteam/tests/test_status_json.py ............                          [ 91%]
+++.redteam/tests/test_tdd_approved_review_routes_to_create_pr.py .         [ 91%]
+++.redteam/tests/test_tdd_commit_discipline.py ...........                 [ 92%]
+++.redteam/tests/test_tier_routing_config.py ................              [ 94%]
+++.redteam/tests/test_tier_routing_orchestrator.py .........               [ 95%]
+++.redteam/tests/test_tracked_baseline_attribution.py .................... [ 98%]
+++...                                                                      [ 98%]
+++.redteam/tests/test_verify_command_config.py ............                [100%]
+++
+++======================== 847 passed in 90.13s (0:01:30) ========================
+++✅ verify.sh OK
+++
+++[exit 0]
+++
+ diff --git a/.redteam/tests/test_benchmark_report_and_cli.py b/.redteam/tests/test_benchmark_report_and_cli.py
+ new file mode 100644
+ index 0000000..2b18d7f
+@@ -681,7 +1832,7 @@ index 76dd167..6778dde 100644
+      return 2
+  
+ diff --git a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+-index a620fe2..cd6878b 100644
++index a620fe2..19f09f6 100644
+ --- a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+ +++ b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+ @@ -1,14 +1,15 @@
+@@ -728,12 +1879,12 @@ index a620fe2..cd6878b 100644
+    ],
+    "created_at": "2026-07-15T14:09:31.204373+00:00",
+ -  "updated_at": "2026-07-15T14:23:31.041737+00:00",
+-+  "updated_at": "2026-07-15T16:22:32.070942+00:00",
+++  "updated_at": "2026-07-15T16:46:27.917364+00:00",
+    "base_branch": "main",
+    "phase_started_at": "2026-07-15T14:23:31.041717+00:00",
+    "last_user_response": null,
+ diff --git a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+-index 2054d88..7430238 100644
++index 2054d88..47ae389 100644
+ --- a/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+ +++ b/.redteam/batches/benchmark-phase1/tasks/task-002-benchmark-runner/state.json
+ @@ -1,14 +1,15 @@
+@@ -780,7 +1931,116 @@ index 2054d88..7430238 100644
+    ],
+    "created_at": "2026-07-15T14:25:38.418298+00:00",
+ -  "updated_at": "2026-07-15T16:15:01.518133+00:00",
+-+  "updated_at": "2026-07-15T16:22:32.074156+00:00",
+++  "updated_at": "2026-07-15T16:46:27.920429+00:00",
+    "base_branch": "redteam/task-001-benchmark-config-and-store",
+    "base_branch_sha": "b7a59d48b7b8adf7061eeaa45aaaa3fd843d340e",
+    "phase_started_at": "2026-07-15T16:15:01.518100+00:00",
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
++index f4ba739..2458f55 100644
++--- a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/code_review.md
++@@ -1,16 +1,40 @@
++-Disagree:
++-No open IR findings.
+++**Disagree**
++ 
++-Uncertain:
++-No unresolved uncertainties. I did not rerun `bash .redteam/scripts/verify.sh` in this read-only review sandbox; I relied on the required task artifacts. `.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json` records `verification.last_exit_code == 0`, and `verification.log` shows `847 passed` with `verify.sh OK`.
+++IR-001 severity:major status:open
++ 
++-Agree:
++-The diff is scoped to the three approved files only: `.redteam/workflows/benchmark.py`, `.redteam/workflows/orchestrator.py`, and `.redteam/tests/test_benchmark_report_and_cli.py`. No adapter, phase-runner, installer, config, plugin, or marketplace boundary was touched.
+++`budget_usd` is documented as a hard cost ceiling, but a **cold-start** run can
+++exceed it before the runner has any prior cost data. `BenchmarkSet.budget_usd`
+++is a "Hard cost ceiling" (`benchmark.py:64`) and `run_benchmark` advertises a
+++budget abort before a pending dispatch would exceed it (`benchmark.py:567-569`),
+++but the check coerces `estimated_next` to `0.0` when there are no prior
+++Claude-cost records (`benchmark.py:591-614`). So a first paid invocation with
+++`budget_usd = 0.01` and a Claude-backed triple that costs `$0.50` **dispatches
+++anyway** and only considers aborting on the *next* run. The "hard ceiling" is
+++non-enforcing for the highest-risk case — the first paid benchmark run. Cost
+++overrun is the #1 risk the #146 design flagged; this is a real safety-boundary
+++gap.
++ 
++-`build_report` keeps declaration-order config columns, keeps zero-record configs, renders `n/a` for zero/unknown cost cases, avoids Pareto/scores/winner language, and produces discriminating output: realistic records with different done counts, rounds, retries, rescues, scope-creep counts, wall time, and costs produce different cells rather than collapsing to a constant.
+++Fix fail-closed: when `budget_usd` is set but there is **no cost estimate**
+++(cold start / no prior records to estimate `estimated_next`), the runner must
+++NOT silently dispatch. Refuse before the run with an actionable message — e.g.
+++"budget_usd is set but there is no prior cost data to estimate against; run once
+++with `--dry-run` (which never dispatches) or without a budget cap to gather cost
+++data, then set the cap." Add a regression: `budget_usd` set + empty JSONL +
+++Claude-backed stub → the runner aborts before the FIRST dispatch (stub called 0
+++times), returns non-zero, prints the actionable message. Keep the existing
+++per-invocation mid-run abort behavior once an estimate exists.
++ 
++-The new tests would have failed pre-change because `benchmark.build_report` / `benchmark.run_report` did not exist and the orchestrator had no `benchmark` or `benchmark-report` dispatch. CLI tests monkeypatch the benchmark runners, so they do not execute real benchmark runs.
+++(Source: cross-model standalone stack review over the #154+#155+#156 diff. The
+++per-task review_code gate approved; this round carries the finding back into the
+++worker+reviewer loop. The bug is in `run_benchmark`'s budget check in
+++`benchmark.py`, which is part of this task's diff.)
++ 
++-Security checklist: no new non-stdlib runtime imports, no `shell=True`, no verifier allowlist/snapshot changes, no installer changes, no reviewer-adapter capability changes, and no `gh`/PR creation path added by these new subcommands.
+++**Agree**
++ 
++-REVIEW_DECISION: APPROVED
+++The rest of the stack is sound: stdlib-only, arg-list subprocess with utf-8, no
+++allowlist/installer/adapter-trust changes; the report's `build_report(config_names,
+++records)` correctly shows zero-record configs; the new tests discriminate against
+++pre-change (benchmark.py + the CLI dispatch did not exist). Only the cold-start
+++budget path needs the fail-closed fix.
+++
+++REVIEW_DECISION: CHANGES_REQUESTED
++diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
++index 1fa76b4..74cfbb9 100644
++--- a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
+++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
++@@ -1,14 +1,13 @@
++ {
++   "task_id": "task-003-benchmark-report-and-cli",
++   "mode": "agent-pair",
++-  "phase": "create_pr",
+++  "phase": "implement",
++   "phases_completed": [
++     "plan_outcome",
++     "plan_review",
++-    "implement",
++-    "review_code"
+++    "implement"
++   ],
++-  "next_phase": "create_pr",
+++  "next_phase": "implement",
++   "decision": "pending",
++   "owner": "claude",
++   "reviewer": "codex",
++@@ -59,7 +58,6 @@
++     }
++   ],
++   "branch": "redteam/task-003-benchmark-report-and-cli",
++-  "pr_url": null,
++   "phase_telemetry": [
++     {
++       "phase": "plan_outcome",
++@@ -76,13 +74,21 @@
++       "cost_usd": 1.7442413999999995,
++       "duration_sec": 701.762,
++       "outcome": "approved"
+++    },
+++    {
+++      "phase": "create_pr",
+++      "provider": "claude",
+++      "model": null,
+++      "cost_usd": 1.210403,
+++      "duration_sec": 197.198,
+++      "outcome": "approved"
++     }
++   ],
++   "created_at": "2026-07-15T16:19:10.222874+00:00",
++-  "updated_at": "2026-07-15T16:38:00.879158+00:00",
+++  "updated_at": "2026-07-15T16:46:28.731385+00:00",
++   "base_branch": "redteam/task-002-benchmark-runner",
++   "base_branch_sha": "1f8a3603eb0d12977394be5ac66a0e81b226bf52",
++-  "phase_started_at": "2026-07-15T16:38:00.879133+00:00",
+++  "phase_started_at": "2026-07-15T16:46:28.495052+00:00",
++   "last_user_response": null,
++   "implement_plan_affected_files": [
++     ".redteam/tests/test_benchmark_report_and_cli.py",
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
+index 1fa76b4..74cfbb9 100644
+--- a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/state.json
+@@ -1,14 +1,13 @@
+ {
+   "task_id": "task-003-benchmark-report-and-cli",
+   "mode": "agent-pair",
+-  "phase": "create_pr",
++  "phase": "implement",
+   "phases_completed": [
+     "plan_outcome",
+     "plan_review",
+-    "implement",
+-    "review_code"
++    "implement"
+   ],
+-  "next_phase": "create_pr",
++  "next_phase": "implement",
+   "decision": "pending",
+   "owner": "claude",
+   "reviewer": "codex",
+@@ -59,7 +58,6 @@
+     }
+   ],
+   "branch": "redteam/task-003-benchmark-report-and-cli",
+-  "pr_url": null,
+   "phase_telemetry": [
+     {
+       "phase": "plan_outcome",
+@@ -76,13 +74,21 @@
+       "cost_usd": 1.7442413999999995,
+       "duration_sec": 701.762,
+       "outcome": "approved"
++    },
++    {
++      "phase": "create_pr",
++      "provider": "claude",
++      "model": null,
++      "cost_usd": 1.210403,
++      "duration_sec": 197.198,
++      "outcome": "approved"
+     }
+   ],
+   "created_at": "2026-07-15T16:19:10.222874+00:00",
+-  "updated_at": "2026-07-15T16:38:00.879158+00:00",
++  "updated_at": "2026-07-15T16:46:28.731385+00:00",
+   "base_branch": "redteam/task-002-benchmark-runner",
+   "base_branch_sha": "1f8a3603eb0d12977394be5ac66a0e81b226bf52",
+-  "phase_started_at": "2026-07-15T16:38:00.879133+00:00",
++  "phase_started_at": "2026-07-15T16:46:28.495052+00:00",
+   "last_user_response": null,
+   "implement_plan_affected_files": [
+     ".redteam/tests/test_benchmark_report_and_cli.py",
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log
+index 2fd7c6c..6d5f3d0 100644
+--- a/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log
++++ b/.redteam/batches/benchmark-phase1/tasks/task-003-benchmark-report-and-cli/verification.log
+@@ -84,7 +84,7 @@ collected 847 items
+ ...                                                                      [ 98%]
+ .redteam/tests/test_verify_command_config.py ............                [100%]
+ 
+-======================== 847 passed in 90.13s (0:01:30) ========================
++======================== 847 passed in 87.30s (0:01:27) ========================
+ ✅ verify.sh OK
+ 
+ [exit 0]

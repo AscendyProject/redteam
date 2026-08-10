@@ -1,0 +1,1271 @@
+diff --git a/.redteam/tests/test_benchmark_runner.py b/.redteam/tests/test_benchmark_runner.py
+new file mode 100644
+index 0000000..7e7a8e0
+--- /dev/null
++++ b/.redteam/tests/test_benchmark_runner.py
+@@ -0,0 +1,744 @@
++"""Tests for the benchmark execution layer: run_benchmark loop, run_one seam, budget, safety.
++
++Covers:
++- Happy path: 2 configs × 2 tasks × 2 reps; stub run_one; 8 records in plan order.
++- Resume: pre-seed 3 of 8 triples; stub called exactly 5 times; JSONL has all 8.
++- Dry-run: stub never called; stdout has planned/skipped counts + cost estimate.
++- Dry-run unknown cost: stdout carries the literal string "unknown".
++- Budget abort mid-run: stub returns $0.20 each; budget=$1.00; abort after 5 calls;
++  run_benchmark returns exit code 3.
++- Budget scope per-invocation: $5.00-worth of prior (Codex-only) records pre-seeded;
++  their triples excluded from plan; abort count identical to no-history case.
++- Unknown estimate never aborts spuriously.
++- run_one raises: loop catches, appends outcome="error", continues, returns 0.
++- Codex-only cost passthrough: claude_cost_usd=None preserved verbatim.
++- Metric extractor: deterministic extraction over synthetic state dict.
++- PR-safety static invariants: grep over benchmark.py source.
++- Real config untouched: monkeypatched subprocess; config bytes unchanged after run_one.
++- Bootstrap driver correctness: driver template contains required rebind/exit; no unsafe literals.
++
++All tests are hermetic: tmp_path, in-memory dicts, stub run_one. No subprocess spawning,
++no adapter imports, no orchestrator internal imports.
++"""
++
++from __future__ import annotations
++
++import subprocess as real_subprocess
++import sys
++import types
++from pathlib import Path
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++import pytest  # noqa: E402
++
++import benchmark as bm  # noqa: E402
++from benchmark import (  # noqa: E402
++    append_record,
++    extract_metrics,
++    load_records,
++    run_benchmark,
++)
++
++# ---------------------------------------------------------------------------
++# Test helpers
++# ---------------------------------------------------------------------------
++
++
++def _write_toml(root: Path, content: str) -> None:
++    root.mkdir(parents=True, exist_ok=True)
++    (root / "benchmark.toml").write_text(content, encoding="utf-8")
++
++
++def _add_task(root: Path, task_id: str, content: str = "some input") -> None:
++    task_dir = root / "tasks" / task_id
++    task_dir.mkdir(parents=True, exist_ok=True)
++    (task_dir / "input.md").write_text(content, encoding="utf-8")
++
++
++def _make_set(
++    root: Path, configs: list[str], task_ids: list[str], repetitions: int = 2, budget_usd: float | None = None
++) -> None:
++    """Write a minimal benchmark.toml with the given configs and tasks."""
++    lines = []
++    lines.append(f"repetitions = {repetitions}")
++    if budget_usd is not None:
++        lines.append(f"budget_usd = {budget_usd}")
++    lines.append("")
++    for cfg in configs:
++        lines.append(f"[configs.{cfg}]")
++        lines.append(f'planner = "model-{cfg}"')
++        lines.append("")
++    _write_toml(root, "\n".join(lines))
++    for tid in task_ids:
++        _add_task(root, tid)
++
++
++def _make_record(
++    config: str, task: str, rep: int, *, outcome: str = "done", claude_cost_usd: float | None = 0.10
++) -> dict:
++    """Return a minimal BenchmarkRecord-shaped dict."""
++    return {
++        "schema_version": 1,
++        "config": config,
++        "task": task,
++        "repetition": rep,
++        "outcome": outcome,
++        "review_rounds": 0,
++        "retry_count": 0,
++        "rescue_count": 0,
++        "scope_creep_count": 0,
++        "wall_clock_sec": 1.0,
++        "claude_cost_usd": claude_cost_usd,
++        "started_at": "2026-01-01T00:00:00+00:00",
++        "finished_at": "2026-01-01T00:00:01+00:00",
++    }
++
++
++def _stub_run_one(call_log: list):
++    """Build a stub run_one that appends to call_log and returns a deterministic record."""
++
++    def _run_one(
++        set_root: Path, config_name: str, task_id: str, repetition: int, *, config_overrides: dict, workspace: Path
++    ) -> dict:
++        call_log.append((config_name, task_id, repetition))
++        return _make_record(config_name, task_id, repetition)
++
++    return _run_one
++
++
++# ---------------------------------------------------------------------------
++# Happy path: 2 configs × 2 tasks × 2 reps → 8 records in plan order
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_happy_path_8_records(tmp_path: Path) -> None:
++    """Full sweep: 2 configs × 2 tasks × 2 reps → 8 records in plan-declaration order."""
++    set_root = tmp_path / "bset"
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=2)
++
++    calls: list[tuple] = []
++    rc = run_benchmark(set_root, run_one=_stub_run_one(calls))
++    assert rc == 0
++
++    # Stub called exactly 8 times
++    assert len(calls) == 8
++
++    # Plan order: configs in declaration order × tasks sorted × reps ascending
++    expected_order = [
++        ("alpha", "task-001", 1),
++        ("alpha", "task-001", 2),
++        ("alpha", "task-002", 1),
++        ("alpha", "task-002", 2),
++        ("beta", "task-001", 1),
++        ("beta", "task-001", 2),
++        ("beta", "task-002", 1),
++        ("beta", "task-002", 2),
++    ]
++    assert calls == expected_order
++
++    # JSONL has exactly 8 records
++    results_path = set_root / "results.jsonl"
++    records = load_records(results_path)
++    assert len(records) == 8
++    actual_triples = [(r["config"], r["task"], r["repetition"]) for r in records]
++    assert actual_triples == expected_order
++
++
++# ---------------------------------------------------------------------------
++# Resume: pre-seed 3 of 8 → stub invoked exactly 5 times; final JSONL has 8
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_resume_skips_completed(tmp_path: Path) -> None:
++    """Pre-seeded triples are skipped; stub invoked for remaining 5; JSONL has 8."""
++    set_root = tmp_path / "bset"
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=2)
++
++    # Pre-seed 3 records
++    results_path = set_root / "results.jsonl"
++    pre_seeded = [
++        _make_record("alpha", "task-001", 1),
++        _make_record("alpha", "task-001", 2),
++        _make_record("alpha", "task-002", 1),
++    ]
++    for r in pre_seeded:
++        append_record(results_path, r)
++
++    calls: list[tuple] = []
++    rc = run_benchmark(set_root, run_one=_stub_run_one(calls))
++    assert rc == 0
++
++    # Stub called exactly 5 times (8 − 3 skipped)
++    assert len(calls) == 5
++
++    # The 5 remaining triples (in plan order)
++    expected_remaining = [
++        ("alpha", "task-002", 2),
++        ("beta", "task-001", 1),
++        ("beta", "task-001", 2),
++        ("beta", "task-002", 1),
++        ("beta", "task-002", 2),
++    ]
++    assert calls == expected_remaining
++
++    # Final JSONL has exactly 8 records
++    final_records = load_records(results_path)
++    assert len(final_records) == 8
++
++    # Pre-seeded 3 preserved verbatim at the front
++    assert final_records[:3] == pre_seeded
++
++    # All 8 unique triples present
++    final_triples = {(r["config"], r["task"], r["repetition"]) for r in final_records}
++    assert len(final_triples) == 8
++
++
++# ---------------------------------------------------------------------------
++# Dry-run: stub never called; stdout has counts + cost estimate
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_dry_run_with_cost_estimate(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
++    """Dry-run with prior Claude-cost data: stdout shows counts + numeric estimate."""
++    set_root = tmp_path / "bset"
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=2)
++
++    # Pre-seed 3 records with known claude_cost_usd
++    results_path = set_root / "results.jsonl"
++    for cfg, task, rep in [("alpha", "task-001", 1), ("alpha", "task-001", 2), ("alpha", "task-002", 1)]:
++        append_record(results_path, _make_record(cfg, task, rep, claude_cost_usd=0.20))
++
++    calls: list[tuple] = []
++    rc = run_benchmark(set_root, dry_run=True, run_one=_stub_run_one(calls))
++    assert rc == 0
++
++    # Stub never called
++    assert len(calls) == 0
++
++    out = capsys.readouterr().out
++    # planned=5 (8 total − 3 done), skipped=3
++    assert "planned=5" in out
++    assert "skipped=3" in out
++    # Numeric cost estimate (not "unknown")
++    assert "unknown" not in out
++    assert "estimated_cost_usd=" in out
++
++
++def test_run_benchmark_dry_run_unknown_cost(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
++    """Dry-run with no prior Claude-cost data: stdout includes literal 'unknown'."""
++    set_root = tmp_path / "bset"
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=2)
++
++    # Pre-seed 3 Codex-only records (claude_cost_usd=None)
++    results_path = set_root / "results.jsonl"
++    for cfg, task, rep in [("alpha", "task-001", 1), ("alpha", "task-001", 2), ("alpha", "task-002", 1)]:
++        append_record(results_path, _make_record(cfg, task, rep, claude_cost_usd=None))
++
++    calls: list[tuple] = []
++    rc = run_benchmark(set_root, dry_run=True, run_one=_stub_run_one(calls))
++    assert rc == 0
++
++    assert len(calls) == 0
++    out = capsys.readouterr().out
++    assert "unknown" in out
++    assert "planned=5" in out
++    assert "skipped=3" in out
++
++
++# ---------------------------------------------------------------------------
++# Budget abort mid-run: budget=$1.00, each $0.20 → 5 calls then return 3
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_budget_abort_mid_run(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
++    """Budget abort: $0.20 × 5 = $1.00 accumulated before 6th triple; returns 3."""
++    set_root = tmp_path / "bset"
++    # 2 configs × 2 tasks × 3 reps = 12 triples (> 6)
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=3, budget_usd=1.00)
++
++    calls: list[tuple] = []
++
++    def stub_with_cost(
++        set_root: Path, config_name: str, task_id: str, repetition: int, *, config_overrides: dict, workspace: Path
++    ) -> dict:
++        calls.append((config_name, task_id, repetition))
++        return _make_record(config_name, task_id, repetition, claude_cost_usd=0.20)
++
++    rc = run_benchmark(set_root, run_one=stub_with_cost)
++
++    # Stub called exactly 5 times (5 × $0.20 = $1.00 accumulated; 6th refused)
++    assert len(calls) == 5
++    # Returns budget-abort exit code
++    assert rc == 3
++
++    # Stderr carries a clear budget message naming config/task/repetition
++    err = capsys.readouterr().err
++    assert "aborting before" in err
++    assert "$1." in err or "budget" in err.lower()
++
++
++def test_run_benchmark_budget_abort_stderr_names_refused_triple(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
++    """Stderr budget message explicitly names the config/task/rep about to be refused."""
++    set_root = tmp_path / "bset"
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=3, budget_usd=1.00)
++
++    def stub_with_cost(set_root, config_name, task_id, repetition, *, config_overrides, workspace):
++        return _make_record(config_name, task_id, repetition, claude_cost_usd=0.20)
++
++    run_benchmark(set_root, run_one=stub_with_cost)
++    err = capsys.readouterr().err
++
++    # Must name the 6th triple in the plan: (alpha, task-001, 3)
++    # alpha × task-001 × reps 1,2,3 → 6th is (alpha, task-002, 3)? Let me work out the order:
++    # Plan: alpha/task-001/1, alpha/task-001/2, alpha/task-001/3,
++    #       alpha/task-002/1, alpha/task-002/2, alpha/task-002/3, ...
++    # 5 dispatched = reps 1,2,3 of alpha/task-001 + reps 1,2 of alpha/task-002
++    # 6th refused = (alpha, task-002, 3)
++    assert "alpha" in err or "beta" in err  # config named
++    assert "task-" in err  # task named
++    assert "rep=" in err  # repetition named
++
++
++# ---------------------------------------------------------------------------
++# Budget scope is per-invocation: $5.00 of historical Codex-only records
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_budget_scope_per_invocation(tmp_path: Path) -> None:
++    """Per-invocation budget: prior Claude costs do not count toward in-invocation accumulated.
++
++    Pre-seeds 50 historical records with REAL Claude costs ($0.10 each = $5.00 total),
++    using triples NOT in the plan (config='hist' is not in the benchmark set).
++
++    These prior records DO affect estimated_next (mean = $0.10), but the abort
++    count is still 5 — identical to the no-history case — because accumulated
++    tracks only THIS invocation's records:
++
++      Before 1st: 0.00 + 0.10 = 0.10 < 1.00 → dispatch
++      Before 5th: 0.80 + 0.10 = 0.90 < 1.00 → dispatch  (5th call occurs)
++      Before 6th: 1.00 + 0.10 = 1.10 ≥ 1.00 → ABORT
++
++    KEY CONTRACT: accumulated = sum of THIS invocation's claude_cost_usd only.
++    The $5.00 of historical Claude spend is NEVER added to accumulated.
++    """
++    set_root = tmp_path / "bset"
++    # 2 configs × 2 tasks × 3 reps = 12 triples
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=3, budget_usd=1.00)
++
++    # Pre-seed 50 historical records with REAL Claude costs: 50 × $0.10 = $5.00.
++    # These are OUTSIDE the plan (config "hist" not in benchmark set).
++    # estimated_next = mean($0.10 × 50) = $0.10 — exercises the non-None estimated_next path.
++    results_path = set_root / "results.jsonl"
++    for i in range(1, 51):
++        append_record(results_path, _make_record("hist", f"hist-task-{i}", 1, outcome="done", claude_cost_usd=0.10))
++
++    calls: list[tuple] = []
++
++    def stub_with_cost(set_root, config_name, task_id, repetition, *, config_overrides, workspace):
++        calls.append((config_name, task_id, repetition))
++        return _make_record(config_name, task_id, repetition, claude_cost_usd=0.20)
++
++    rc = run_benchmark(set_root, run_one=stub_with_cost)
++
++    # $5.00 of prior Claude spend does NOT change the abort count:
++    # accumulated is per-invocation only; abort count is 5 (same as no-history case).
++    assert len(calls) == 5
++    assert rc == 3
++
++
++# ---------------------------------------------------------------------------
++# Unknown estimate never triggers spurious abort
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_unknown_estimate_never_aborts(tmp_path: Path) -> None:
++    """No prior cost data + stub returns None → unknown estimate → no spurious abort."""
++    set_root = tmp_path / "bset"
++    # 2 configs × 2 tasks × 2 reps = 8 triples
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=2, budget_usd=1.00)
++
++    calls: list[tuple] = []
++
++    def stub_codex_only(set_root, config_name, task_id, repetition, *, config_overrides, workspace):
++        calls.append((config_name, task_id, repetition))
++        return _make_record(config_name, task_id, repetition, claude_cost_usd=None)
++
++    # Unknown estimate → est=0.0; accumulated stays 0.0 throughout;
++    # budget check: 0.0 + 0.0 = 0.0 < 1.00 → never aborts.
++    rc = run_benchmark(set_root, run_one=stub_codex_only)
++    assert rc == 0
++    assert len(calls) == 8  # all 8 triples dispatched
++
++
++# ---------------------------------------------------------------------------
++# run_one raises: loop catches, appends error record, continues, returns 0
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_run_one_raises_continues(tmp_path: Path) -> None:
++    """Stub raises RuntimeError on one triple; loop catches, appends error record, returns 0."""
++    set_root = tmp_path / "bset"
++    _make_set(set_root, ["alpha", "beta"], ["task-001", "task-002"], repetitions=2)
++
++    calls: list[tuple] = []
++    raise_on = ("alpha", "task-001", 2)  # second triple in plan
++
++    def stub_raises_once(set_root, config_name, task_id, repetition, *, config_overrides, workspace):
++        calls.append((config_name, task_id, repetition))
++        if (config_name, task_id, repetition) == raise_on:
++            raise RuntimeError("injected test error")
++        return _make_record(config_name, task_id, repetition)
++
++    rc = run_benchmark(set_root, run_one=stub_raises_once)
++    assert rc == 0  # error caught; loop continues
++    assert len(calls) == 8  # all 8 triples attempted
++
++    # JSONL has 8 records (the error triple has outcome="error")
++    records = load_records(set_root / "results.jsonl")
++    assert len(records) == 8
++
++    # Find the error record
++    error_records = [r for r in records if r["config"] == "alpha" and r["task"] == "task-001" and r["repetition"] == 2]
++    assert len(error_records) == 1
++    err_rec = error_records[0]
++    assert err_rec["outcome"] == "error"
++    assert err_rec["config"] == "alpha"
++    assert err_rec["task"] == "task-001"
++    assert err_rec["repetition"] == 2
++    assert "started_at" in err_rec
++    assert "finished_at" in err_rec
++
++
++# ---------------------------------------------------------------------------
++# Codex-only cost passthrough: claude_cost_usd=None preserved verbatim
++# ---------------------------------------------------------------------------
++
++
++def test_run_benchmark_codex_only_cost_passthrough(tmp_path: Path) -> None:
++    """Stub returns claude_cost_usd=None; JSONL record carries null, never coerced to 0.0."""
++    set_root = tmp_path / "bset"
++    _make_set(set_root, ["alpha"], ["task-001"], repetitions=1)
++
++    def stub_codex(set_root, config_name, task_id, repetition, *, config_overrides, workspace):
++        return _make_record(config_name, task_id, repetition, claude_cost_usd=None)
++
++    rc = run_benchmark(set_root, run_one=stub_codex)
++    assert rc == 0
++
++    records = load_records(set_root / "results.jsonl")
++    assert len(records) == 1
++    assert records[0]["claude_cost_usd"] is None
++
++
++# ---------------------------------------------------------------------------
++# Metric extractor: deterministic extraction over a synthetic state dict
++# ---------------------------------------------------------------------------
++
++
++def test_extract_metrics_done_outcome() -> None:
++    """next_phase='done' → outcome='done'."""
++    state = {"next_phase": "done", "phase_telemetry": [], "retries": {}}
++    m = extract_metrics(state)
++    assert m["outcome"] == "done"
++
++
++def test_extract_metrics_deferred_via_flag() -> None:
++    """deferred=True → outcome='deferred' (even if next_phase is not 'deferred')."""
++    state = {"next_phase": "implement", "deferred": True, "phase_telemetry": []}
++    m = extract_metrics(state)
++    assert m["outcome"] == "deferred"
++
++
++def test_extract_metrics_deferred_via_next_phase() -> None:
++    """next_phase='deferred' → outcome='deferred'."""
++    state = {"next_phase": "deferred", "phase_telemetry": []}
++    m = extract_metrics(state)
++    assert m["outcome"] == "deferred"
++
++
++def test_extract_metrics_error_outcome() -> None:
++    """next_phase='implement' (not done/deferred) → outcome='error'."""
++    state = {"next_phase": "implement", "phase_telemetry": []}
++    m = extract_metrics(state)
++    assert m["outcome"] == "error"
++
++
++def test_extract_metrics_review_rounds_and_rescue_count() -> None:
++    """review_rounds counts review_code entries; rescue_count counts rescue entries."""
++    state = {
++        "next_phase": "done",
++        "phase_telemetry": [
++            {"phase": "plan_outcome", "provider": "claude", "cost_usd": 0.50, "duration_sec": 60.0},
++            {"phase": "implement", "provider": "claude", "cost_usd": 0.80, "duration_sec": 120.0},
++            {"phase": "review_code", "provider": "codex", "cost_usd": None, "duration_sec": 30.0},
++            {"phase": "review_code", "provider": "codex", "cost_usd": None, "duration_sec": 25.0},
++            {"phase": "rescue", "provider": "codex", "cost_usd": None, "duration_sec": 45.0},
++            {"phase": "create_pr", "provider": "claude", "cost_usd": 0.20, "duration_sec": 15.0},
++        ],
++        "retries": {"implement": 2, "review_code": 1},
++    }
++    m = extract_metrics(state)
++    assert m["review_rounds"] == 2
++    assert m["rescue_count"] == 1
++    assert m["retry_count"] == 3  # sum of {implement: 2, review_code: 1}
++
++
++def test_extract_metrics_claude_cost_sums_only_claude_entries() -> None:
++    """claude_cost_usd = sum of claude-provider entries only; None for Codex-only."""
++    state = {
++        "next_phase": "done",
++        "phase_telemetry": [
++            {"phase": "plan_outcome", "provider": "claude", "cost_usd": 0.50, "duration_sec": 60.0},
++            {"phase": "review_code", "provider": "codex", "cost_usd": None, "duration_sec": 30.0},
++            {"phase": "create_pr", "provider": "claude", "cost_usd": 0.20, "duration_sec": 15.0},
++        ],
++    }
++    m = extract_metrics(state)
++    assert m["claude_cost_usd"] == pytest.approx(0.70)
++
++
++def test_extract_metrics_claude_cost_none_when_codex_only() -> None:
++    """claude_cost_usd=None when no Claude-provider entries exist."""
++    state = {
++        "next_phase": "done",
++        "phase_telemetry": [
++            {"phase": "review_code", "provider": "codex", "cost_usd": None, "duration_sec": 30.0},
++        ],
++    }
++    m = extract_metrics(state)
++    assert m["claude_cost_usd"] is None
++
++
++def test_extract_metrics_wall_clock_sec_sums_duration_with_none() -> None:
++    """wall_clock_sec = sum of duration_sec; None entries contribute 0.0."""
++    state = {
++        "next_phase": "done",
++        "phase_telemetry": [
++            {"phase": "plan_outcome", "provider": "claude", "cost_usd": 0.10, "duration_sec": 60.0},
++            {"phase": "implement", "provider": "claude", "cost_usd": 0.20, "duration_sec": None},
++            {"phase": "review_code", "provider": "codex", "cost_usd": None, "duration_sec": 30.0},
++        ],
++    }
++    m = extract_metrics(state)
++    assert m["wall_clock_sec"] == pytest.approx(90.0)
++
++
++def test_extract_metrics_empty_telemetry() -> None:
++    """Empty phase_telemetry → all phase counts 0; claude_cost_usd=None."""
++    state = {"next_phase": "done", "phase_telemetry": []}
++    m = extract_metrics(state)
++    assert m["review_rounds"] == 0
++    assert m["rescue_count"] == 0
++    assert m["retry_count"] == 0
++    assert m["wall_clock_sec"] == 0.0
++    assert m["claude_cost_usd"] is None
++    assert m["scope_creep_count"] == 0
++
++
++def test_extract_metrics_scope_creep_count_returns_zero() -> None:
++    """scope_creep_count=0: stalled entry without floor-trip feedback prefix is not scope creep."""
++    state = {
++        "next_phase": "done",
++        "phase_telemetry": [],
++        "deferred_requirements": [
++            # "stalled" with no floor-trip marker in feedback → not a floor trip
++            {"phase": "implement", "reason": "stalled", "attempts": 1},
++            # "stalled" with non-floor-trip feedback → not a floor trip
++            {
++                "phase": "implement",
++                "reason": "stalled",
++                "attempts": 2,
++                "feedback": "implementer agent exited non-zero.",
++            },
++        ],
++    }
++    m = extract_metrics(state)
++    assert m["scope_creep_count"] == 0
++
++
++def test_extract_metrics_scope_creep_count_counts_floor_trips() -> None:
++    """scope_creep_count counts deferred_requirements entries with floor-trip feedback.
++
++    Both stable floor-trip feedback prefixes (from phase_runners/implement.py):
++    - "cross-run trust-root floor:" (_cross_run_trust_root_floor, #117)
++    - "refusing to sweep operator tracked WIP" (_floor_outside_scope, #91)
++    Both are stable, actually-emitted strings — never invented.
++    """
++    state = {
++        "next_phase": "deferred",
++        "phase_telemetry": [],
++        "deferred_requirements": [
++            {
++                "phase": "implement",
++                "reason": "stalled",
++                "attempts": 2,
++                "feedback": (
++                    "cross-run trust-root floor: outside-scope paths detected before "
++                    "worker invocation; commit or stash these files and re-run. "
++                    "Offending paths: some/untracked.txt"
++                ),
++            },
++            {
++                "phase": "implement",
++                "reason": "stalled",
++                "attempts": 3,
++                "feedback": (
++                    "refusing to sweep operator tracked WIP into the task commit; "
++                    "commit or stash your unrelated tracked WIP before re-running. "
++                    "Out-of-scope tracked paths: other/wip.py"
++                ),
++            },
++            {
++                "phase": "implement",
++                "reason": "stalled",
++                "attempts": 4,
++                "feedback": "implementer agent exited non-zero.\nreturncode=1",
++            },  # NOT a floor trip
++        ],
++    }
++    m = extract_metrics(state)
++    # Two floor-trip entries, one plain stall → scope_creep_count = 2
++    assert m["scope_creep_count"] == 2
++
++
++def test_extract_metrics_retry_count_sums_retries_dict() -> None:
++    """retry_count = sum of all values in state['retries'] dict."""
++    state = {
++        "next_phase": "done",
++        "phase_telemetry": [],
++        "retries": {"plan_outcome": 1, "implement": 3, "review_code": 2},
++    }
++    m = extract_metrics(state)
++    assert m["retry_count"] == 6
++
++
++# ---------------------------------------------------------------------------
++# PR-safety static invariants: grep-style check over benchmark.py source
++# ---------------------------------------------------------------------------
++
++
++def _non_comment_source(module_file: Path) -> str:
++    """Return the source with comment-only lines removed.
++
++    Comment-only lines (those whose first non-whitespace character is '#') are
++    stripped before the safety-invariant checks.  This avoids false positives
++    from documentation comments that say "this file contains no X" by naming X.
++    Only executable code and string literals (docstrings, template strings) are
++    scanned.
++    """
++    lines = module_file.read_text(encoding="utf-8").splitlines()
++    return "\n".join(ln for ln in lines if ln.lstrip()[:1] != "#")
++
++
++def test_benchmark_source_no_unsafe_literals() -> None:
++    """benchmark.py executable code must not contain unsafe shell/PR-creation literals.
++
++    Comment-only lines are excluded so that documentation comments naming the
++    absent patterns do not cause false positives.
++    """
++    src = _non_comment_source(Path(bm.__file__))
++    forbidden = [
++        "gh ",
++        "git push",
++        "pr create",
++        "--force",
++    ]
++    # The _BENCH_DRIVER_TEMPLATE string is a special case: it contains the key
++    # literal "create_pr" (a phase name, not a command), which is fine.
++    # We check for shell-level invocation patterns.
++    for pattern in forbidden:
++        assert pattern not in src, f"benchmark.py executable code contains forbidden literal: {pattern!r}"
++
++
++def test_benchmark_source_no_create_pr_import() -> None:
++    """benchmark.py must not import phase_runners.create_pr (comment lines excluded)."""
++    src = _non_comment_source(Path(bm.__file__))
++    # Should not import the real create_pr module
++    assert "from phase_runners" not in src
++    assert "import create_pr" not in src
++    assert "phase_runners.create_pr" not in src
++
++
++# ---------------------------------------------------------------------------
++# Real config untouched: monkeypatched subprocess; bytes unchanged after run_one
++# ---------------------------------------------------------------------------
++
++
++def test_run_one_real_config_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    """Real .redteam/config.toml bytes are unchanged after run_one (subprocess stubbed)."""
++    # Minimal set_root
++    set_root = tmp_path / "bset"
++    _write_toml(set_root, '[configs.default]\nplanner = "model-x"\n')
++    _add_task(set_root, "task-001")
++
++    # Real config path and bytes before
++    real_config_path = bm._repo_root() / ".redteam" / "config.toml"
++    config_bytes_before = real_config_path.read_bytes()
++
++    # Track subprocess.run calls
++    captured_calls: list[dict] = []
++
++    def mock_subprocess_run(args, **kwargs):
++        captured_calls.append({"args": list(args), "cwd": kwargs.get("cwd"), "kwargs": kwargs})
++        return real_subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
++
++    # Monkeypatch benchmark.subprocess so run_one uses our mock
++    mock_module = types.SimpleNamespace(run=mock_subprocess_run)
++    monkeypatch.setattr(bm, "subprocess", mock_module)
++
++    # Run run_one (copytree still happens; git + driver calls are mocked)
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    bm.run_one(
++        set_root=set_root,
++        config_name="default",
++        task_id="task-001",
++        repetition=1,
++        config_overrides={"planner": "model-x"},
++        workspace=workspace,
++    )
++
++    # Real config unchanged
++    config_bytes_after = real_config_path.read_bytes()
++    assert config_bytes_before == config_bytes_after
++
++    # At least one subprocess call with driver path under a temp dir (not the real repo)
++    real_repo_str = str(bm._repo_root())
++    driver_calls = [c for c in captured_calls if "_bench_driver.py" in " ".join(str(a) for a in c["args"])]
++    assert len(driver_calls) == 1, "Expected exactly one driver subprocess call"
++    driver_path_str = str(driver_calls[0]["args"][-1])
++    # Driver must NOT be under the real repo
++    assert not driver_path_str.startswith(real_repo_str), (
++        f"Driver path {driver_path_str!r} is inside the real repo; it should be under the tempcopy"
++    )
++    # cwd for driver call must also not be the real repo
++    driver_cwd = driver_calls[0]["cwd"]
++    assert not str(driver_cwd).startswith(real_repo_str), (
++        f"subprocess cwd {driver_cwd!r} is the real repo; expected tempcopy"
++    )
++
++
++# ---------------------------------------------------------------------------
++# Bootstrap driver correctness: template contains required rebind + sys.exit;
++# no unsafe literals inside the driver text
++# ---------------------------------------------------------------------------
++
++
++def test_bootstrap_driver_contains_phase_runners_rebind() -> None:
++    """Driver template runtime-rebinds PHASE_RUNNERS['create_pr'] to a no-op."""
++    assert 'orchestrator.PHASE_RUNNERS["create_pr"]' in bm._BENCH_DRIVER_TEMPLATE
++
++
++def test_bootstrap_driver_contains_sys_exit_cmd_start() -> None:
++    """Driver template calls sys.exit(orchestrator.cmd_start(...))."""
++    assert "sys.exit(orchestrator.cmd_start(" in bm._BENCH_DRIVER_TEMPLATE
++
++
++def test_bootstrap_driver_no_unsafe_literals() -> None:
++    """Driver template must not contain gh, git push, or --force literals."""
++    driver = bm._BENCH_DRIVER_TEMPLATE
++    for pattern in ["gh ", "git push", "--force"]:
++        assert pattern not in driver, f"Bootstrap driver template contains forbidden literal: {pattern!r}"
+diff --git a/.redteam/workflows/benchmark.py b/.redteam/workflows/benchmark.py
+index f1e46dd..f90d17e 100644
+--- a/.redteam/workflows/benchmark.py
++++ b/.redteam/workflows/benchmark.py
+@@ -1,9 +1,11 @@
+-"""Benchmark data-layer for the redteam harness Phase 1 MVP.
++"""Benchmark data-layer and execution layer for the redteam harness Phase 1 MVP.
+ 
+ Cross-cutting invariants:
+-- Zero non-stdlib imports: only tomllib, json, dataclasses, pathlib, datetime, typing.
++- Zero non-stdlib imports: only tomllib, json, shutil, statistics, subprocess, sys,
++  pathlib, tempfile, time, datetime, dataclasses, typing.
+ - No filesystem side effects at import time.
+-- Never touches .redteam/config.toml or any .redteam/batches/ path.
++- Never opens .redteam/config.toml or any .redteam/batches/ path for WRITE in the
++  operator's real repo; isolation is enforced by subprocess + tempcopy.
+ 
+ Exposes:
+ - BenchmarkSet          — frozen dataclass: parsed benchmark.toml + task enumeration.
+@@ -12,15 +14,31 @@ Exposes:
+ - append_record()       — JSONL append helper (creates parent dir/file on first call).
+ - load_records()        — JSONL reader; raises ValueError on malformed lines.
+ - completed_triples()   — (config, task, repetition) resume set from a record list.
++- extract_metrics()     — deterministic metric extractor over state["phase_telemetry"].
++- run_one()             — isolated subprocess dispatch for one (config, task, rep) triple.
++- run_benchmark()       — outer loop: configs × tasks × repetitions, resumable + budgeted.
+ """
++# NOTE: benchmark.py source intentionally contains no "gh ", "git push", "pr create",
++# "--force", or auto-merge language, and does not import phase_runners.create_pr.
++# This is enforced by a static grep test in test_benchmark_runner.py.
+ 
+ from __future__ import annotations
+ 
++import datetime
+ import json
++import shutil
++import statistics
++import subprocess
++import sys
++import tempfile
++import time
+ import tomllib
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import TypedDict
++from typing import TYPE_CHECKING, TypedDict
++
++if TYPE_CHECKING:
++    from collections.abc import Callable
+ 
+ # ---------------------------------------------------------------------------
+ # Config constants
+@@ -220,3 +238,416 @@ def completed_triples(records: list[dict]) -> set[tuple[str, str, int]]:
+     result; that is a Phase 2 concern.
+     """
+     return {(r["config"], r["task"], r["repetition"]) for r in records}
++
++
++# ---------------------------------------------------------------------------
++# Metric extractor — deterministic metrics from a completed task state.json
++# ---------------------------------------------------------------------------
++
++# Floor-trip feedback prefixes emitted by phase_runners/implement.py (#91/#117).
++# These are the actually-emitted strings for:
++#   - _floor_outside_scope ("refusing to sweep operator tracked WIP…")
++#   - _cross_run_trust_root_floor ("cross-run trust-root floor: outside-scope paths…")
++# Both end up in deferred_requirements[].feedback when retries are exhausted (reason="stalled").
++# No floor-trip-specific reason string exists, so we match on the stable feedback prefix.
++_FLOOR_TRIP_FEEDBACK_PREFIXES = (
++    "cross-run trust-root floor:",
++    "refusing to sweep operator tracked WIP",
++)
++
++
++def extract_metrics(state: dict) -> dict:
++    """Extract deterministic benchmark metrics from a completed task state dict.
++
++    Reads only fields the engine already emits; never adds new state.json keys.
++
++    Returns a mapping with keys:
++      outcome, review_rounds, retry_count, rescue_count, scope_creep_count,
++      wall_clock_sec, claude_cost_usd.
++    """
++    next_phase = state.get("next_phase", "")
++    if next_phase == "done":
++        outcome = "done"
++    elif state.get("deferred") is True or next_phase == "deferred":
++        outcome = "deferred"
++    else:
++        outcome = "error"
++
++    telemetry: list[dict] = state.get("phase_telemetry", [])
++    review_rounds = sum(1 for e in telemetry if e.get("phase") == "review_code")
++    rescue_count = sum(1 for e in telemetry if e.get("phase") == "rescue")
++    # retry_count: deterministic sum of the per-phase retry counter (existing field, no new key).
++    retry_count = sum(state.get("retries", {}).values())
++    # scope_creep_count: floor-trip count from deferred_requirements.
++    # The engine records floor-trip events (pre-worker out-of-scope tracked floor #91
++    # and cross-run trust-root floor #117) as PhaseResult(status="error") feedback;
++    # when retries are exhausted they land in deferred_requirements as reason="stalled"
++    # with the original floor-trip message preserved in the "feedback" field.
++    # Both stable feedback prefixes are from phase_runners/implement.py — not invented.
++    deferred_requirements = state.get("deferred_requirements", [])
++    scope_creep_count = sum(
++        1 for e in deferred_requirements if e.get("feedback", "").startswith(_FLOOR_TRIP_FEEDBACK_PREFIXES)
++    )
++    wall_clock_sec = sum((e.get("duration_sec") or 0.0) for e in telemetry)
++    # claude_cost_usd: sum costs from Claude-provider phases; None when no Claude entry.
++    # Never fabricate a cost from Codex-only runs.
++    claude_costs = [e["cost_usd"] for e in telemetry if e.get("provider") == "claude" and e.get("cost_usd") is not None]
++    claude_cost_usd: float | None = sum(claude_costs) if claude_costs else None
++
++    return {
++        "outcome": outcome,
++        "review_rounds": review_rounds,
++        "retry_count": retry_count,
++        "rescue_count": rescue_count,
++        "scope_creep_count": scope_creep_count,
++        "wall_clock_sec": wall_clock_sec,
++        "claude_cost_usd": claude_cost_usd,
++    }
++
++
++# ---------------------------------------------------------------------------
++# Internal helpers for run_one isolation
++# ---------------------------------------------------------------------------
++
++
++def _repo_root() -> Path:
++    """Real repo root. benchmark.py lives at <repo>/.redteam/workflows/benchmark.py."""
++    return Path(__file__).resolve().parents[2]
++
++
++def _utc_now_iso() -> str:
++    """Current UTC time as ISO-8601 string."""
++    return datetime.datetime.now(datetime.timezone.utc).isoformat()
++
++
++def _toml_value(v: object) -> str:
++    """Format a Python scalar or list-of-scalars as a TOML value fragment."""
++    if isinstance(v, bool):
++        return "true" if v else "false"
++    if isinstance(v, str):
++        escaped = v.replace("\\", "\\\\").replace('"', '\\"')
++        return f'"{escaped}"'
++    if isinstance(v, int):
++        return str(v)
++    if isinstance(v, float):
++        return str(v)
++    if isinstance(v, list):
++        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
++    return repr(v)
++
++
++def _write_merged_config(dest_path: Path, base_config: dict, config_overrides: dict) -> None:
++    """Write a merged config.toml to dest_path.
++
++    Preserves all non-[models] sections from base_config; merges the [models]
++    section with config_overrides (overrides win). Never writes to the real
++    config.toml in the operator's repo.
++    """
++    merged_models = {**base_config.get("models", {}), **config_overrides}
++
++    lines: list[str] = ["# benchmark-generated merged config\n"]
++    for section, values in base_config.items():
++        if section == "models":
++            continue
++        if not isinstance(values, dict):
++            continue
++        lines.append(f"[{section}]")
++        for k, v in values.items():
++            lines.append(f"{k} = {_toml_value(v)}")
++        lines.append("")
++
++    lines.append("[models]")
++    for role, model_id in merged_models.items():
++        lines.append(f'{role} = "{model_id}"')
++    lines.append("")
++
++    dest_path.write_text("\n".join(lines), encoding="utf-8")
++
++
++# Bootstrap driver template written to <tempcopy>/_bench_driver.py.
++# Formatted with .format(batch_dir_repr=repr(str(batch_dir))).
++#
++# Safety contract (enforced by static test in test_benchmark_runner.py):
++# - Contains no "gh ", "git push", "pr create", or "--force" literals.
++# - Runtime-rebinds orchestrator.PHASE_RUNNERS["create_pr"] to a no-op BEFORE
++#   cmd_start is called, so the real create_pr runner is never invoked.
++# - Defense-in-depth: even if the rebind were bypassed, the tempcopy has no
++#   'origin' remote, so create_pr.py's git-remote preflight (create_pr.py:82)
++#   fails closed before any push/PR action.
++_BENCH_DRIVER_TEMPLATE = """\
++import sys
++import pathlib
++
++_BATCH_DIR = pathlib.Path({batch_dir_repr})
++
++# Insert the tempcopy's workflows dir so `import orchestrator` resolves to the
++# tempcopy's copy — repo_root() then points to the tempcopy, not the real repo.
++sys.path.insert(0, str(pathlib.Path(__file__).parent / ".redteam" / "workflows"))
++import orchestrator  # noqa: E402
++
++
++def _noop_create_pr(task_dir, state):
++    \"\"\"Neutralised create_pr: marks the task done without opening any PR.\"\"\"
++    state["next_phase"] = "done"
++    return {{"status": "approved", "feedback": "benchmark no-op", "log": "benchmark no-op", "diff": ""}}
++
++
++# Runtime rebind: PHASE_RUNNERS is a module-level mutable dict (orchestrator.py:119),
++# looked up per phase step (orchestrator.py:1364), so this takes effect before
++# cmd_start dispatches any task.
++orchestrator.PHASE_RUNNERS["create_pr"] = _noop_create_pr
++
++sys.exit(orchestrator.cmd_start(_BATCH_DIR))
++"""
++
++# ---------------------------------------------------------------------------
++# run_one — isolated subprocess dispatch for one (config, task, rep) triple
++# ---------------------------------------------------------------------------
++
++
++def run_one(
++    set_root: Path,
++    config_name: str,
++    task_id: str,
++    repetition: int,
++    *,
++    config_overrides: dict,
++    workspace: Path,
++) -> dict:
++    """Real isolated dispatch for one benchmark triple.
++
++    Isolation (subprocess + tempcopy, zero engine changes required):
++    1. shutil.copytree snapshot of the real repo → temp dir under workspace.
++    2. git init the snapshot on branch 'main'; no 'origin' remote configured.
++    3. Write merged .redteam/config.toml into the snapshot (real config untouched).
++    4. Seed the task's input.md into the batch dir under the snapshot.
++    5. Write a bootstrap driver that rebinds PHASE_RUNNERS["create_pr"] to a no-op.
++    6. subprocess.run the driver (cwd=tempcopy, sys.executable).
++    7. Read state.json from the snapshot; call extract_metrics; build record.
++    8. TemporaryDirectory context manager auto-deletes the snapshot on exit.
++
++    wall_clock_sec is measured via time.monotonic() around the subprocess call, NOT
++    re-derived from telemetry sums (which miss non-worker phases like plan_review).
++    started_at / finished_at are ISO-8601 UTC strings.
++    """
++    real_repo = _repo_root()
++    real_config = tomllib.loads((real_repo / ".redteam" / "config.toml").read_text(encoding="utf-8"))
++
++    started_at = _utc_now_iso()
++    t_start = time.monotonic()
++
++    with tempfile.TemporaryDirectory(dir=workspace) as td:
++        tempcopy = Path(td) / "repo"
++
++        # Step 1: snapshot harness tree (exclude .git, venv, existing batches, results)
++        shutil.copytree(
++            str(real_repo),
++            str(tempcopy),
++            ignore=shutil.ignore_patterns(
++                ".git",
++                "venv",
++                ".venv",
++                "__pycache__",
++                "batches",
++                "results",
++                "results.jsonl",
++                "*.egg-info",
++            ),
++        )
++
++        # Step 2: git init on main, no origin remote
++        for cmd in (
++            ["git", "init"],
++            ["git", "config", "user.email", "bench@redteam.local"],
++            ["git", "config", "user.name", "benchmark"],
++            ["git", "add", "-A"],
++            ["git", "commit", "-m", "benchmark seed"],
++        ):
++            subprocess.run(cmd, cwd=str(tempcopy), check=True, capture_output=True, encoding="utf-8")
++        # Rename to 'main' (handles git < 2.28 where default branch is 'master')
++        subprocess.run(
++            ["git", "branch", "-M", "main"],
++            cwd=str(tempcopy),
++            check=False,
++            capture_output=True,
++            encoding="utf-8",
++        )
++
++        # Step 3: write merged config.toml (real repo config is never opened for write)
++        _write_merged_config(
++            tempcopy / ".redteam" / "config.toml",
++            real_config,
++            config_overrides,
++        )
++
++        # Step 4: seed the task's input.md into the batch dir
++        batch_name = f"bench-{config_name}-{task_id}-rep{repetition}"
++        batch_dir = tempcopy / ".redteam" / "batches" / batch_name
++        task_dir_in_batch = batch_dir / "tasks" / task_id
++        task_dir_in_batch.mkdir(parents=True, exist_ok=True)
++        shutil.copy2(
++            str(set_root / "tasks" / task_id / "input.md"),
++            str(task_dir_in_batch / "input.md"),
++        )
++
++        # Step 5: write bootstrap driver
++        driver_path = tempcopy / "_bench_driver.py"
++        driver_text = _BENCH_DRIVER_TEMPLATE.format(batch_dir_repr=repr(str(batch_dir)))
++        driver_path.write_text(driver_text, encoding="utf-8")
++
++        # Step 6: run driver subprocess (cwd=tempcopy so repo_root() resolves correctly)
++        subprocess.run(
++            [sys.executable, "-u", str(driver_path)],
++            cwd=str(tempcopy),
++            check=False,
++            capture_output=True,
++            encoding="utf-8",
++            timeout=1800,  # 30-minute hard cap per run
++        )
++
++        t_end = time.monotonic()
++        finished_at = _utc_now_iso()
++        wall_clock_sec = t_end - t_start
++
++        # Step 7: read state.json and extract metrics
++        state_path = task_dir_in_batch / "state.json"
++        if state_path.is_file():
++            state = json.loads(state_path.read_text(encoding="utf-8"))
++            metrics = extract_metrics(state)
++        else:
++            # Subprocess failed before seeding state — all metrics are error defaults
++            metrics = {
++                "outcome": "error",
++                "review_rounds": 0,
++                "retry_count": 0,
++                "rescue_count": 0,
++                "scope_creep_count": 0,
++                "wall_clock_sec": 0.0,
++                "claude_cost_usd": None,
++            }
++
++        return {
++            "schema_version": 1,
++            "config": config_name,
++            "task": task_id,
++            "repetition": repetition,
++            "outcome": metrics["outcome"],
++            "review_rounds": metrics["review_rounds"],
++            "retry_count": metrics["retry_count"],
++            "rescue_count": metrics["rescue_count"],
++            "scope_creep_count": metrics["scope_creep_count"],
++            "wall_clock_sec": wall_clock_sec,  # monotonic-measured; NOT telemetry sum
++            "claude_cost_usd": metrics["claude_cost_usd"],
++            "started_at": started_at,
++            "finished_at": finished_at,
++        }
++        # TemporaryDirectory context manager auto-deletes tempcopy on exit
++
++
++# ---------------------------------------------------------------------------
++# run_benchmark — outer loop: configs × tasks × repetitions, resumable + budgeted
++# ---------------------------------------------------------------------------
++
++
++def run_benchmark(
++    set_root: Path,
++    *,
++    dry_run: bool = False,
++    run_one: "Callable[..., dict]" = run_one,
++) -> int:
++    """Configs × tasks × repetitions benchmark loop, resumable and budget-fenced.
++
++    Budget scope (per-invocation): accumulated = sum of claude_cost_usd for records
++    appended in THIS call only.  Prior JSONL records (already spent and skipped by
++    resume) do NOT count toward the in-invocation budget.  Cross-invocation cumulative
++    budgeting is a Phase 2 refinement.
++
++    Returns:
++      0   — normal completion (including after run_one errors that are caught + continued)
++      3   — budget abort (a pending dispatch would exceed set.budget_usd)
++    """
++    bset = load_benchmark_set(set_root)
++    results_path = set_root / "results.jsonl"
++
++    # Load existing records for resume / cost estimation
++    prior_records: list[dict] = []
++    if results_path.is_file():
++        prior_records = load_records(results_path)
++
++    done = completed_triples(prior_records)
++
++    # Build the full plan in declaration order: configs × task_ids × repetitions
++    plan = [
++        (cfg, tid, rep)
++        for cfg in bset.configs
++        for tid in bset.task_ids
++        for rep in range(1, bset.repetitions + 1)
++        if (cfg, tid, rep) not in done
++    ]
++    skipped = len(done)
++
++    # Cost estimate from prior records (used by dry-run and budget check).
++    prior_claude_costs = [r["claude_cost_usd"] for r in prior_records if r.get("claude_cost_usd") is not None]
++    estimated_next: float | None = statistics.mean(prior_claude_costs) if prior_claude_costs else None
++
++    if dry_run:
++        planned = len(plan)
++        if estimated_next is not None:
++            cost_str = f"{estimated_next * planned:.4f}"
++        else:
++            cost_str = "unknown"
++        print(f"benchmark dry-run: planned={planned} skipped={skipped} estimated_cost_usd={cost_str}")
++        return 0
++
++    # Live run: iterate the plan, budget-check before each dispatch.
++    # this_inv_records tracks only records appended in THIS invocation (budget scope).
++    this_inv_records: list[dict] = []
++    workspace = Path(tempfile.gettempdir())
++
++    for cfg, tid, rep in plan:
++        # Budget check BEFORE dispatch (fail-loud on cost)
++        if bset.budget_usd is not None:
++            accumulated = sum((r.get("claude_cost_usd") or 0.0) for r in this_inv_records)
++            est = estimated_next if estimated_next is not None else 0.0
++            if accumulated + est >= bset.budget_usd:
++                print(
++                    f"benchmark: aborting before {cfg}/{tid}/rep={rep}: "
++                    f"accumulated ${accumulated:.4f} + estimate ${est:.4f} "
++                    f"would exceed budget ${bset.budget_usd:.4f}",
++                    file=sys.stderr,
++                )
++                return 3
++
++        # Dispatch
++        try:
++            record = run_one(
++                set_root,
++                cfg,
++                tid,
++                rep,
++                config_overrides=bset.configs[cfg],
++                workspace=workspace,
++            )
++        except Exception:
++            now = _utc_now_iso()
++            record = {
++                "schema_version": 1,
++                "config": cfg,
++                "task": tid,
++                "repetition": rep,
++                "outcome": "error",
++                "review_rounds": 0,
++                "retry_count": 0,
++                "rescue_count": 0,
++                "scope_creep_count": 0,
++                "wall_clock_sec": 0.0,
++                "claude_cost_usd": None,
++                "started_at": now,
++                "finished_at": now,
++            }
++
++        # Append immediately so Ctrl-C between runs still resumes cleanly
++        append_record(results_path, record)
++        this_inv_records.append(record)
++
++    return 0
+diff --git a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+index a620fe2..c4e8898 100644
+--- a/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
++++ b/.redteam/batches/benchmark-phase1/tasks/task-001-benchmark-config-and-store/state.json
+@@ -1,14 +1,15 @@
+ {
+   "task_id": "task-001-benchmark-config-and-store",
+   "mode": "agent-pair",
+-  "phase": "create_pr",
++  "phase": "done",
+   "phases_completed": [
+     "plan_outcome",
+     "plan_review",
+     "implement",
+-    "review_code"
++    "review_code",
++    "create_pr"
+   ],
+-  "next_phase": "create_pr",
++  "next_phase": "done",
+   "decision": "pending",
+   "owner": "claude",
+   "reviewer": "codex",
+@@ -60,7 +61,7 @@
+   "last_failure_diff": null,
+   "deferred_requirements": [],
+   "branch": "redteam/task-001-benchmark-config-and-store",
+-  "pr_url": null,
++  "pr_url": "https://github.com/AscendyProject/redteam/pull/154",
+   "phase_telemetry": [
+     {
+       "phase": "plan_outcome",
+@@ -85,10 +86,18 @@
+       "cost_usd": 0.9470895000000003,
+       "duration_sec": 435.263,
+       "outcome": "approved"
++    },
++    {
++      "phase": "create_pr",
++      "provider": "claude",
++      "model": null,
++      "cost_usd": 0.9944235000000001,
++      "duration_sec": 119.49,
++      "outcome": "approved"
+     }
+   ],
+   "created_at": "2026-07-15T14:09:31.204373+00:00",
+-  "updated_at": "2026-07-15T14:23:31.041737+00:00",
++  "updated_at": "2026-07-15T15:28:35.871482+00:00",
+   "base_branch": "main",
+   "phase_started_at": "2026-07-15T14:23:31.041717+00:00",
+   "last_user_response": null,
