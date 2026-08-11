@@ -29,8 +29,15 @@ jobs:
       # The engine is zero-runtime-dep (stdlib only); ruff + pytest are the only
       # dev tools (pyproject [project.optional-dependencies] dev). No buildable
       # package here, so install the two tools directly rather than `pip install .`.
+      #
+      # PINNED ON PURPOSE — keep these versions in sync with pyproject's `dev`
+      # extra. `pip install ruff pytest` resolves to the latest release at run
+      # time, so a single upstream ruff release reds every branch at once on code
+      # nobody touched: ruff 0.16 turned main red with 158 style findings (unused
+      # noqa, import order) while the pinned local venv on 0.15 stayed green.
+      # A linter bump must be a reviewed commit, not an invisible CI-time event.
       - name: Install dev tools (ruff + pytest)
-        run: pip install ruff pytest
+        run: pip install "ruff==0.15.20" "pytest==9.1.1"
 
       - name: Verify (ruff + pytest over .redteam/)
         run: bash .redteam/scripts/verify.sh
