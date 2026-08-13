@@ -46,6 +46,13 @@ Close both halves without weakening the gate.
   failure it claims to detect — a deliberately broken fixture, in the same file
   and through the same code path, asserted to fail).
 
+  The fixture criterion must be worded so the negative control breaks **the
+  behaviour the suite claims to protect**. A fixture that merely fails for some
+  unrelated contrived reason proves only that the harness can detect an
+  artificial error, which is the same vacuousness in a new costume — the exact
+  trap #159 documents. "Same code path" is the load-bearing phrase; make the
+  prompt say what it is for.
+
   Note #161 also records that encoding the exception in project-owned
   `project-context.md` did **not** work: the reviewer correctly held that a
   prompt-level Required Check outranks a project-level exception. That is why
@@ -131,8 +138,14 @@ Two decisions are **not** delegated and must stop the run:
   allowlist is `{state.json, outcome.md, pr.md, input.md}` and does **not**
   include `pr_url.txt`, so once task 1 opens a PR, task 2's pre-worker floor
   can fail closed on the sibling's `pr_url.txt`. This bit the `benchmark-phase1`
-  run. If it fires, that is the known gap and not a task defect — commit or
-  stash the file and resume rather than "fixing" it inside a task.
+  run. If it fires, that is the known gap and not a task defect.
+
+  Recover by **stashing that one generated artifact** and resuming. Do **not**
+  commit it and do **not** "fix" it inside a task: `pr_url.txt` is `create_pr`
+  output, not product work, so committing it would carry unrelated batch state
+  into the stacked branch and its PR — which the Hard constraint above forbids.
+  If stashing does not clear it, stop and treat #158 on its own rather than
+  working around it here.
 
 - Prefer testing #160 the way the existing prompt-wiring tests do (assert the
   conventions path appears in the built prompt for agent-pair mode, and that
