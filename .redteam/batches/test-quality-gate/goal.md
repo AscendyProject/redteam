@@ -69,9 +69,16 @@ Close both halves without weakening the gate.
   This is scoping, not a loosening, and it carries its own obligations — both
   must appear in the rewritten rule so it cannot be used as #159's hole
   reopened:
-  - the artifact must have **no importable or executable path in the repo** (a
-    module that *could* be exercised is never eligible, however declarative it
-    looks); and
+  - there must be **no in-repo path by which the changed semantic clause can be
+    exercised**. Note this is a test about the *clause*, not about the file's
+    type: "not importable" is far too weak, because configuration, templates,
+    manifests and workflow definitions are all non-importable yet are loaded and
+    acted on by code, so their semantics *are* reachable behaviourally. If any
+    in-repo path can exercise the clause, that path must be tested and the
+    exemption does not apply — that class of file is where #159's loophole
+    would otherwise reopen. The prompt qualifies only because `review_code.py`
+    passes the file's *path* and never parses or interprets its contents, so
+    nothing in the repo can be made to act on "what the rule says"; and
   - the assertion must pin a **semantic clause the change requires**, never
     incidental wording or formatting.
 
