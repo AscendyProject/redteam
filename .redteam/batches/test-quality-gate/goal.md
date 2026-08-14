@@ -53,6 +53,40 @@ Close both halves without weakening the gate.
   trap #159 documents. "Same code path" is the load-bearing phrase; make the
   prompt say what it is for.
 
+  **Locate the vacuity correctly — in the bypass, not in the assertion.** A
+  source-text assertion is vacuous when the thing under test *has an execution
+  path and the test goes around it*. State this as the reason, because the rule
+  is otherwise unsatisfiable for the very artifact this goal edits: a prompt has
+  no execution path in the repo — the runner hands an external model the file's
+  path to read, and nothing in the repo executes it — so there is no execution
+  for a test to bypass, and pinning its text is the only assertion available.
+  (How completely the model then attends to that text is outside the repo's
+  control and is not what the exemption rests on; it rests on the absence of an
+  in-repo execution path.) Without this, task 2 cannot produce an approvable outcome: it
+  rewrites the rule that reviews it, and any test it can write for a markdown
+  prompt would be condemned by its own new wording.
+
+  This is scoping, not a loosening, and it carries its own obligations — both
+  must appear in the rewritten rule so it cannot be used as #159's hole
+  reopened:
+  - there must be **no in-repo path by which the changed semantic clause can be
+    exercised**. Note this is a test about the *clause*, not about the file's
+    type: "not importable" is far too weak, because configuration, templates,
+    manifests and workflow definitions are all non-importable yet are loaded and
+    acted on by code, so their semantics *are* reachable behaviourally. If any
+    in-repo path can exercise the clause, that path must be tested and the
+    exemption does not apply — that class of file is where #159's loophole
+    would otherwise reopen. The prompt qualifies only because `review_code.py`
+    passes the file's *path* and never parses or interprets its contents, so
+    nothing in the repo can be made to act on "what the rule says"; and
+  - the assertion must pin a **semantic clause the change requires**, never
+    incidental wording or formatting.
+
+  Where an execution path *does* exist, it must be preferred. For this task that
+  means testing the **built prompt** — the string `review_code.py` actually
+  assembles and hands to the reviewer — rather than grepping the markdown,
+  wherever the claim can be expressed that way.
+
   Note #161 also records that encoding the exception in project-owned
   `project-context.md` did **not** work: the reviewer correctly held that a
   prompt-level Required Check outranks a project-level exception. That is why
@@ -151,3 +185,18 @@ Two decisions are **not** delegated and must stop the run:
   conventions path appears in the built prompt for agent-pair mode, and that
   TDD-mode injection is unchanged) rather than asserting on whole prompt
   strings, which are brittle.
+
+- **Task 2's brief must not tell the implementer to assert an exemption it has
+  not been given.** The first decomposition of this goal failed review on
+  exactly that: it required string assertions on the prompt file's text while
+  the same brief declared such assertions non-satisfying, then instructed the
+  implementer to document in a docstring that its tests "are not source-text
+  guards" — a claim with no stated grounds. Since task 2 rewrites the rule that
+  reviews task 2, that left no approvable outcome.
+
+  The brief must instead (a) route the eligibility through the rewritten rule's
+  own no-execution-path clause, so the tests are legitimate *because the rule
+  says so*, not because a docstring asserts it; and (b) test the **built
+  prompt** wherever the claim can be expressed against `review_code.py`'s
+  assembled string, falling back to pinning the markdown only for the semantic
+  clauses that exist nowhere but the file.
