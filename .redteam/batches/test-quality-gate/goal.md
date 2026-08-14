@@ -57,9 +57,12 @@ Close both halves without weakening the gate.
   source-text assertion is vacuous when the thing under test *has an execution
   path and the test goes around it*. State this as the reason, because the rule
   is otherwise unsatisfiable for the very artifact this goal edits: a prompt has
-  no execution path in the repo — an external model consumes its text verbatim —
-  so there is nothing to bypass, and pinning its text is the only assertion
-  available. Without this, task 2 cannot produce an approvable outcome: it
+  no execution path in the repo — the runner hands an external model the file's
+  path to read, and nothing in the repo executes it — so there is no execution
+  for a test to bypass, and pinning its text is the only assertion available.
+  (How completely the model then attends to that text is outside the repo's
+  control and is not what the exemption rests on; it rests on the absence of an
+  in-repo execution path.) Without this, task 2 cannot produce an approvable outcome: it
   rewrites the rule that reviews it, and any test it can write for a markdown
   prompt would be condemned by its own new wording.
 
