@@ -82,6 +82,23 @@ Close both halves without weakening the gate.
   - the assertion must pin a **semantic clause the change requires**, never
     incidental wording or formatting.
 
+  **Eligibility is established per artifact, never by file class.** It is shown
+  by naming that artifact's actual in-repo consumers and demonstrating none of
+  them act on its contents. A glob, a directory, or a file extension is not an
+  argument — `.redteam/prompts/codex/*` is not eligible as a class, because each
+  prompt has different consumers and each would have to be checked on its own.
+  Only `.redteam/prompts/codex/code_review.md` has been checked here, and the
+  rewritten rule must not imply otherwise.
+
+  When checking a consumer, **match on the full path, not the basename.** In
+  this repo `code_review.md` names two unrelated files: the criteria prompt at
+  `.redteam/prompts/codex/code_review.md`, and the per-task review artifact at
+  `<task_dir>/code_review.md`. A bare `grep code_review.md` returns
+  `implement.py`, `create_pr.py` and `review_code.py` and invites the conclusion
+  that three runners consume the prompt. They do not: the only references to the
+  *prompt* are `review_code.py:42` and `:116`, both of which pass its path.
+  Everything else is the task artifact.
+
   Where an execution path *does* exist, it must be preferred. For this task that
   means testing the **built prompt** — the string `review_code.py` actually
   assembles and hands to the reviewer — rather than grepping the markdown,
@@ -185,6 +202,18 @@ Two decisions are **not** delegated and must stop the run:
   conventions path appears in the built prompt for agent-pair mode, and that
   TDD-mode injection is unchanged) rather than asserting on whole prompt
   strings, which are brittle.
+
+- **Both prior decompositions failed the review gate the same way: claiming the
+  exemption instead of establishing it.** The first asserted it in a docstring
+  ("these tests are not source-text guards", no grounds given). The second
+  asserted it by file class (every `.redteam/prompts/codex/*` qualifies "because
+  `review_code.py` passes it by path" — false; each prompt has different
+  consumers, and that glob was never checked). Same error, different costume.
+
+  The brief must **derive** eligibility for the one artifact it edits, by naming
+  that artifact's consumers and showing none parse its contents — and must not
+  generalise past it. If a broader claim seems warranted, it is out of scope for
+  this task.
 
 - **Task 2's brief must not tell the implementer to assert an exemption it has
   not been given.** The first decomposition of this goal failed review on
