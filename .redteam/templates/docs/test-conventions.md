@@ -39,3 +39,12 @@ Name the missing fixtures / un-stubbed systems so a sub-agent patches callsites
 directly instead of inventing fragile global setup. If a needed fixture is
 missing, the convention is to add it centrally and update this file in the same
 PR rather than inlining ad-hoc setup.
+
+## Runtime coverage
+
+Tests must exercise the code path they claim to protect — importing, mounting,
+or executing the thing under test — not just open its source file and assert on
+its text. A test that opens a file and checks substrings against its contents
+(a source-text guard) does not satisfy the "would have failed against the
+pre-change code" criterion when an execution path exists; the check belongs to
+the code's *behaviour*, not its *text*.
