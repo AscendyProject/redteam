@@ -2247,13 +2247,23 @@ def _persist_standalone_review(rr: Path, raw: str, head_sha: str) -> str:
     written: Path | None = None
     try:
         reviews_dir.mkdir(parents=True, exist_ok=True)
-        candidate = reviews_dir / f"{stamp}-{short}.md"
-        n = 2
-        while candidate.exists():
-            candidate = reviews_dir / f"{stamp}-{short}.{n}.md"
-            n += 1
-        candidate.write_text(raw, encoding="utf-8")
-        written = candidate
+        # Reserve the name by EXCLUSIVE CREATE, not exists()-then-write. The latter
+        # is a TOCTOU: two reviews of the same commit finishing in the same second
+        # — parallel CI jobs, or two local invocations — can both see the name as
+        # free and the second write then destroys the first verdict, recreating the
+        # audit loss this whole change exists to remove. "x" fails atomically if
+        # another process won the race, so we simply take the next name.
+        # Bounded so a pathological directory cannot spin forever.
+        for n in range(1, 1000):
+            suffix = "" if n == 1 else f".{n}"
+            candidate = reviews_dir / f"{stamp}-{short}{suffix}.md"
+            try:
+                with candidate.open("x", encoding="utf-8") as fh:
+                    fh.write(raw)
+            except FileExistsError:
+                continue
+            written = candidate
+            break
     except OSError:
         written = None
 

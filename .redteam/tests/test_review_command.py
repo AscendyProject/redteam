@@ -455,3 +455,35 @@ def test_archive_is_reported_and_its_failure_is_survivable(monkeypatch, tmp_path
     monkeypatch.setattr(orch.Path, "write_text", _boom)
 
     assert orch.cmd_review(repo=tmp_path) == 0
+
+
+def test_archive_name_is_reserved_atomically_against_a_racing_process(monkeypatch, tmp_path) -> None:
+    """#162 review IR-001: another process winning the race must not cost a verdict.
+
+    exists()-then-write is a TOCTOU — two reviews of one commit finishing in the
+    same second can both see the name as free, and the second write destroys the
+    first. Simulated by making the first exclusive-create fail as if a competitor
+    took the name between our attempts; the review must land in a DISTINCT file
+    and the competitor's body must be untouched.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    reviews = tmp_path / ".redteam" / "reviews"
+    reviews.mkdir(parents=True)
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "head1234")
+    monkeypatch.setattr(orch, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("APPROVED")))
+
+    # A competitor already holds the first name, exactly as an atomic reservation
+    # by another process would leave it.
+    taken = reviews / "20260101T000000Z-head1234.md"
+    taken.write_text("COMPETITOR VERDICT\n", encoding="utf-8")
+
+    rc = orch.cmd_review(repo=tmp_path)
+
+    assert rc == 0
+    assert taken.read_text(encoding="utf-8") == "COMPETITOR VERDICT\n", "the other verdict must survive"
+    others = [p for p in reviews.glob("*.md") if p != taken]
+    assert len(others) == 1
+    assert "REVIEW_DECISION: APPROVED" in others[0].read_text(encoding="utf-8")
