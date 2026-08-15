@@ -10,7 +10,13 @@ def _load_implement_module():
     return _engine.implement()
 
 
-_PROJ = SimpleNamespace(source_dirs=["app/"], test_dir="tests/", context_file="docs/ctx.md", base_branch="main")
+_PROJ = SimpleNamespace(
+    source_dirs=["app/"],
+    test_dir="tests/",
+    context_file="docs/ctx.md",
+    base_branch="main",
+    test_conventions_file="docs/test-conventions.md",
+)
 
 
 def _wire(implement, monkeypatch, repo, *, on_invoke=None):
@@ -450,7 +456,13 @@ def test_real_git_commits_new_untracked_and_excludes_task_artifacts(monkeypatch,
     monkeypatch.setattr(
         implement,
         "project_config",
-        lambda: SimpleNamespace(source_dirs=["app/"], test_dir="tests/", context_file="c", base_branch="main"),
+        lambda: SimpleNamespace(
+            source_dirs=["app/"],
+            test_dir="tests/",
+            context_file="c",
+            base_branch="main",
+            test_conventions_file="docs/test-conventions.md",
+        ),
     )
 
     def invoke(**kwargs):

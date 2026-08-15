@@ -1,6 +1,6 @@
 # Test conventions — redteam
 
-> The test-author and test-verifier sub-agents read this (path from
+> The test-author, test-verifier, agent-pair implementer, and code-reviewer sub-agents read this (path from
 > `config.toml [project] test_conventions_file`) so generated tests match how
 > redteam's suite is actually wired. This repo dogfoods its own harness, so this
 > describes redteam's tests (stdlib + pytest, no DB/async framework). For a

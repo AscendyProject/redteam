@@ -48,6 +48,7 @@ _PROJ = SimpleNamespace(
     test_dir="tests/",
     context_file="docs/ctx.md",
     base_branch="main",
+    test_conventions_file="docs/test-conventions.md",
 )
 
 
