@@ -473,3 +473,23 @@ def test_rescue_rate_is_na_when_unmeasured_and_scoped_to_that_metric():
     report = build_report(["cfg"], [_rec("cfg", "done", retry_count=1, scope_creep_count=1), _rec("cfg", "done")])
     assert "50.00%" in next(ln for ln in report.splitlines() if "Retry rate" in ln)
     assert "50.00%" in next(ln for ln in report.splitlines() if "Scope-creep rate" in ln)
+
+
+def test_rescue_rate_uses_only_measured_records_as_the_denominator():
+    """#172 review IR-001: unmeasured records must not dilute a measured rate.
+
+    A resumed set can mix legacy records that carry real counts with new ones that
+    carry None. Dividing by ALL records reported [1, 0, None, None] as 25.00% when
+    the measured subset is 50.00% — a quietly wrong number, which is worse than
+    n/a because it looks computed.
+    """
+    records = [
+        _rec("cfg", "done", rescue_count=1),
+        _rec("cfg", "done", rescue_count=0),
+        _rec("cfg", "done", rescue_count=None),
+        _rec("cfg", "done", rescue_count=None),
+    ]
+    report = build_report(["cfg"], records)
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "50.00%" in rescue_line
+    assert "25.00%" not in rescue_line

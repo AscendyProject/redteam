@@ -538,7 +538,7 @@ def run_one(
                 "outcome": "error",
                 "review_rounds": 0,
                 "retry_count": 0,
-                "rescue_count": 0,
+                "rescue_count": None,  # unmeasured, not "no rescues" (#172)
                 "scope_creep_count": 0,
                 "wall_clock_sec": 0.0,
                 "claude_cost_usd": None,
@@ -666,7 +666,7 @@ def run_benchmark(
                 "outcome": "error",
                 "review_rounds": 0,
                 "retry_count": 0,
-                "rescue_count": 0,
+                "rescue_count": None,  # unmeasured, not "no rescues" (#172)
                 "scope_creep_count": 0,
                 "wall_clock_sec": 0.0,
                 "claude_cost_usd": None,
@@ -730,13 +730,12 @@ def build_report(config_names: list[str], records: list[dict]) -> str:
         approval = f"{done_count / total * 100:.2f}%"
         avg_rounds = f"{sum(r.get('review_rounds', 0) for r in recs) / total:.2f}"
         retry = f"{sum(r.get('retry_count', 0) for r in recs) / total * 100:.2f}%"
-        # None-aware: a rate over unmeasured values would be a fabricated 0.00%.
-        rescue_vals = [r.get("rescue_count") for r in recs]
-        rescue = (
-            f"{sum(v for v in rescue_vals if v is not None) / total * 100:.2f}%"
-            if any(v is not None for v in rescue_vals)
-            else "n/a"
-        )
+        # None-aware, and divided by the MEASURED values only. Dividing by `total`
+        # would let unmeasured records dilute a real rate — a resumed set mixing
+        # legacy counts with unmeasured ones would report [1, 0, None, None] as
+        # 25.00% when the measured subset is 50.00%.
+        rescue_measured = [v for v in (r.get("rescue_count") for r in recs) if v is not None]
+        rescue = f"{sum(rescue_measured) / len(rescue_measured) * 100:.2f}%" if rescue_measured else "n/a"
         scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
         avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
 

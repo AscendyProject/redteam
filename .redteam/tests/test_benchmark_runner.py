@@ -779,3 +779,26 @@ def test_bootstrap_driver_no_unsafe_literals() -> None:
     driver = bm._BENCH_DRIVER_TEMPLATE
     for pattern in ["gh ", "git push", "--force"]:
         assert pattern not in driver, f"Bootstrap driver template contains forbidden literal: {pattern!r}"
+
+
+def test_error_fallback_record_reports_rescue_count_unmeasured(tmp_path: Path) -> None:
+    """#172 review IR-001: the run_one-raised fallback record must not claim a
+    measured zero either.
+
+    An error-only run would otherwise report Rescue rate 0.00% — the same
+    fabrication the None migration exists to remove, reintroduced through the
+    error path.
+    """
+    set_root = tmp_path / "bset"
+    _make_set(set_root, ["alpha"], ["task-001"], repetitions=1)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("dispatch exploded")
+
+    rc = run_benchmark(set_root, run_one=_boom)
+
+    assert rc == 0  # the loop catches and continues
+    records = load_records(set_root / "results.jsonl")
+    assert len(records) == 1
+    assert records[0]["outcome"] == "error"
+    assert records[0]["rescue_count"] is None
