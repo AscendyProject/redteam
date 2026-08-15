@@ -45,7 +45,7 @@ def _rec(
     claude_cost_usd: float | None = 0.10,
 ) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "config": config,
         "task": "t1",
         "repetition": 1,
@@ -493,3 +493,29 @@ def test_rescue_rate_uses_only_measured_records_as_the_denominator():
     rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
     assert "50.00%" in rescue_line
     assert "25.00%" not in rescue_line
+
+
+def test_legacy_v1_rescue_counts_are_not_treated_as_measurements():
+    """#172 review IR-001: a v1 record's rescue_count is a fabricated 0.
+
+    Pre-#172 the extractor counted `rescue` telemetry entries the engine never
+    writes, so every v1 record stored 0. Reading those as measurements would let a
+    resumed set of [0, 0, None, None] still report 0.00% — the same misleading
+    near-constant the migration exists to remove, now laundered through history.
+    The schema_version bump is what makes the two distinguishable.
+    """
+    legacy = _rec("cfg", "done", rescue_count=0)
+    legacy["schema_version"] = 1
+    legacy2 = _rec("cfg", "done", rescue_count=0)
+    legacy2["schema_version"] = 1
+
+    report = build_report(["cfg"], [legacy, legacy2, _rec("cfg", "done", rescue_count=None)])
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "n/a" in rescue_line
+    assert "0.00%" not in rescue_line
+
+    # A v2 record with a real value is still measured — the exclusion is scoped
+    # to the version whose values are known-fabricated, not to the value 0.
+    report = build_report(["cfg"], [legacy, _rec("cfg", "done", rescue_count=0)])
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "0.00%" in rescue_line

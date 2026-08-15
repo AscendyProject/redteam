@@ -183,11 +183,17 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
 class BenchmarkRecord(TypedDict):
     """One result record written to results.jsonl.
 
-    schema_version = 1 for this schema. Fields are deterministic; never fabricate
-    values: claude_cost_usd is None when only Codex-role phases ran.
+    schema_version = 2. Fields are deterministic; never fabricate values:
+    claude_cost_usd is None when only Codex-role phases ran.
+
+    v1 → v2 (#172): rescue_count became nullable and its meaning changed. A v1
+    record stored 0 because the old extractor counted `rescue` telemetry entries
+    that the engine never writes — a fabricated zero, not a measurement. The
+    version bump is what lets a reader tell the two apart; without it a stored 0
+    is ambiguous and aggregation silently treats it as measured.
     """
 
-    schema_version: int  # always 1
+    schema_version: int  # 1 = pre-#172 (rescue_count fabricated as 0); 2 = current
     config: str  # [configs.<name>] key from benchmark.toml
     task: str  # task id (subdir name under tasks/)
     repetition: int  # 1-indexed
@@ -545,7 +551,7 @@ def run_one(
             }
 
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "config": config_name,
             "task": task_id,
             "repetition": repetition,
@@ -659,7 +665,7 @@ def run_benchmark(
         except Exception:
             now = _utc_now_iso()
             record = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "config": cfg,
                 "task": tid,
                 "repetition": rep,
@@ -734,7 +740,14 @@ def build_report(config_names: list[str], records: list[dict]) -> str:
         # would let unmeasured records dilute a real rate — a resumed set mixing
         # legacy counts with unmeasured ones would report [1, 0, None, None] as
         # 25.00% when the measured subset is 50.00%.
-        rescue_measured = [v for v in (r.get("rescue_count") for r in recs) if v is not None]
+        # A v1 record's rescue_count is a fabricated 0, not a measurement (#172),
+        # so it is excluded from the denominator as well as the numerator —
+        # otherwise a resumed set of [0, 0, None, None] still reports 0.00%.
+        rescue_measured = [
+            v
+            for v in (r.get("rescue_count") if int(r.get("schema_version") or 1) >= 2 else None for r in recs)
+            if v is not None
+        ]
         rescue = f"{sum(rescue_measured) / len(rescue_measured) * 100:.2f}%" if rescue_measured else "n/a"
         scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
         avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
