@@ -7,7 +7,10 @@ Covers:
   - Codex-worker path: cost_usd/duration_sec/model are None, provider == "codex".
   - Missing-signal path (parsed_json=None): None fields, outcome reflects actual status.
   - create_pr telemetry entry (both approved and error paths).
-  - Reviewer-transport phases (plan_review, review_code, rescue) emit no telemetry.
+  - The orchestrator appends an entry only when a runner returns `provider`.
+  - rescue emits no telemetry: it invokes no model, it only validates a report.
+  - plan_review / review_code DO emit (#172) — they invoke a reviewer model — with
+    cost/model/duration null, since a reviewer transport reports none of them.
   - Non-mutation guarantee: telemetry capture never changes PhaseResult.status.
   - Legacy state.json without phase_telemetry key: setdefault creates the list.
   - State template: phase_telemetry key is an empty list.
@@ -56,6 +59,12 @@ def _make_parsed_json(
     if duration_ms is not None:
         d["duration_ms"] = duration_ms
     return d
+
+
+def _engine_base():
+    import _engine
+
+    return _engine.base()
 
 
 def _load_adapter_modules():
@@ -439,8 +448,12 @@ def test_orchestrator_appends_telemetry_create_pr_error(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_plan_review_does_not_append_telemetry(monkeypatch, tmp_path):
-    """plan_review.run returns no provider field → no telemetry entry appended."""
+def test_runner_without_provider_appends_no_telemetry_plan_review(monkeypatch, tmp_path):
+    """Sentinel behaviour: a runner returning no `provider` produces no entry.
+
+    Drives a FAKE runner — this pins the orchestrator's sentinel rule, not the
+    real plan_review, which does emit telemetry since #172 (see
+    test_real_plan_review_emits_telemetry below)."""
     orch = _load_orchestrator()
     task_dir = _setup_task_dir(tmp_path)
     _setup_state(task_dir, next_phase="plan_review")
@@ -455,11 +468,14 @@ def test_plan_review_does_not_append_telemetry(monkeypatch, tmp_path):
 
     saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     telemetry = saved.get("phase_telemetry", [])
-    assert telemetry == [], f"plan_review should not append telemetry; got {telemetry}"
+    assert telemetry == [], f"a runner without `provider` must append nothing; got {telemetry}"
 
 
-def test_review_code_does_not_append_telemetry(monkeypatch, tmp_path):
-    """review_code.run returns no provider field → no telemetry entry appended."""
+def test_runner_without_provider_appends_no_telemetry_review_code(monkeypatch, tmp_path):
+    """Sentinel behaviour: a runner returning no `provider` produces no entry.
+
+    Drives a FAKE runner — the real review_code emits telemetry since #172 (see
+    test_real_review_code_emits_telemetry below)."""
     orch = _load_orchestrator()
     task_dir = _setup_task_dir(tmp_path)
     _setup_state(task_dir, next_phase="review_code")
@@ -473,11 +489,12 @@ def test_review_code_does_not_append_telemetry(monkeypatch, tmp_path):
 
     saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     telemetry = saved.get("phase_telemetry", [])
-    assert telemetry == [], f"review_code should not append telemetry; got {telemetry}"
+    assert telemetry == [], f"a runner without `provider` must append nothing; got {telemetry}"
 
 
 def test_rescue_does_not_append_telemetry(monkeypatch, tmp_path):
-    """rescue.run returns no provider field → no telemetry entry appended."""
+    """rescue emits no telemetry, and correctly so: it invokes no model at all —
+    it validates a manually produced rescue_report.md. Unchanged by #172."""
     orch = _load_orchestrator()
     task_dir = _setup_task_dir(tmp_path)
     _setup_state(task_dir, next_phase="rescue")
@@ -774,3 +791,100 @@ def _fake_config():
     cfg.project.verification_allowlist = ["bash", "pytest", "ruff"]
     cfg.models.review_stages = None
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# 8. #172 — the REAL reviewer runners emit telemetry
+# ---------------------------------------------------------------------------
+#
+# The sentinel tests above drive fake runners, so they cannot see what the real
+# ones do. These drive review_code.run / plan_review.run directly. Without them
+# nothing would notice a regression back to "no reviewer telemetry", which is
+# what made benchmark review_rounds read a real review loop as zero.
+
+
+def _ok_review(decision: str) -> dict:
+    return {"decision": decision, "raw": f"REVIEW_DECISION: {decision}\n", "parse_status": "ok"}
+
+
+def test_real_review_code_emits_telemetry(tmp_path):
+    """#172: review_code.run sets `provider`, so the orchestrator records the round.
+
+    Fails against pre-change code, where the runner set no telemetry fields and
+    the entry was never appended.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import phase_runners.review_code as review_code
+
+    state = {
+        "mode": "agent-pair",
+        "base_branch": "main",
+        "models": {"implementer": "claude-sonnet-4-6", "reviewer": "codex"},
+        "review_items": [],
+    }
+    with (
+        patch("phase_runners.review_code.get_reviewer_adapter", return_value=MagicMock()),
+        patch("phase_runners.review_code.review_with_fallback", return_value=_ok_review("CHANGES_REQUESTED")),
+        patch("phase_runners.review_code.compute_repo_diff", return_value=""),
+        patch("phase_runners.review_code.repo_root", return_value=tmp_path),
+        patch("phase_runners.review_code.git_rev_parse", return_value="deadbeef"),
+        patch("phase_runners.review_code._is_ancestor", return_value=False),
+        patch("phase_runners.review_code._incremental_diff_nonempty", return_value=False),
+    ):
+        result = review_code.run(tmp_path, state)
+
+    assert result["status"] == "changes_requested"
+    assert result["provider"] == "codex"
+    # Never invented: a reviewer transport reports none of these.
+    assert result["cost_usd"] is None
+    assert result["model"] is None
+    assert result["duration_sec"] is None
+
+    # End to end: the entry the orchestrator would build is countable as a round.
+    _base = _engine_base()
+    entry = _base.build_telemetry_entry("review_code", result)
+    assert entry["phase"] == "review_code"
+    assert entry["provider"] == "codex"
+    assert entry["outcome"] == "changes_requested"
+
+
+def test_real_plan_review_emits_telemetry(tmp_path):
+    """#172: plan_review.run sets `provider` on the headless path too."""
+    from unittest.mock import MagicMock, patch
+
+    import phase_runners.plan_review as plan_review
+
+    (tmp_path / "outcome.md").write_text("x\n", encoding="utf-8")
+    state = {"mode": "agent-pair", "models": {"reviewer": "codex"}}
+    with (
+        patch("phase_runners.plan_review.get_reviewer_adapter", return_value=MagicMock()),
+        patch("phase_runners.plan_review.review_with_fallback", return_value=_ok_review("APPROVED")),
+        patch("phase_runners.plan_review.compute_repo_diff", return_value=""),
+        patch("phase_runners.plan_review.repo_root", return_value=tmp_path),
+    ):
+        result = plan_review.run(tmp_path, state)
+
+    assert result["status"] == "approved"
+    assert result["provider"] == "codex"
+    assert result["cost_usd"] is None
+
+
+def test_manual_plan_review_still_emits_no_telemetry(tmp_path):
+    """No reviewer model invoked (no adapter) → still no entry, so the sentinel
+    keeps meaning "a model ran" rather than "the phase ran"."""
+    from unittest.mock import patch
+
+    import phase_runners.plan_review as plan_review
+
+    (tmp_path / "plan_review.md").write_text("REVIEW_DECISION: APPROVED\n", encoding="utf-8")
+    state = {"mode": "agent-pair", "models": {}}
+    with (
+        patch("phase_runners.plan_review.get_reviewer_adapter", return_value=None),
+        patch("phase_runners.plan_review.compute_repo_diff", return_value=""),
+        patch("phase_runners.plan_review.repo_root", return_value=tmp_path),
+    ):
+        result = plan_review.run(tmp_path, state)
+
+    assert result["status"] == "approved"
+    assert "provider" not in result
