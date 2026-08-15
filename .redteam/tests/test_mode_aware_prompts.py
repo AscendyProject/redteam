@@ -108,34 +108,25 @@ def _verify_test():
     return _engine.verify_test()
 
 
-# ---- agent-pair implement prompt: test-conventions injection (#160) ----
+# ---- agent-pair implement + tdd regression: test-conventions injection (#160) ----
 
 _CONVENTIONS_DEFAULT = ".redteam/docs/test-conventions.md"
 
 
-def test_agent_pair_prompt_names_test_conventions_file():
-    """_agent_pair_base_prompt includes test_conventions_file so the implementer
-    follows project test wiring in agent-pair mode (#160)."""
+def test_agent_pair_includes_and_tdd_excludes_test_conventions_file():
+    """_agent_pair_base_prompt includes test_conventions_file (new in #160) while
+    _tdd_base_prompt must NOT — TDD injection stays in write_test/verify_test."""
 
     class _ProjWithConventions(_Proj):
         test_conventions_file = "docs/my-test-conventions.md"
 
-    p = _impl()._agent_pair_base_prompt(_TD, _ProjWithConventions())
-    assert "docs/my-test-conventions.md" in p
+    # NEW: agent-pair includes conventions (fails against pre-change code)
+    p_ap = _impl()._agent_pair_base_prompt(_TD, _ProjWithConventions())
+    assert "docs/my-test-conventions.md" in p_ap
 
-
-# ---- tdd implement prompt: must NOT reference test_conventions_file (regression) ----
-
-
-def test_tdd_prompt_does_not_name_test_conventions_file():
-    """_tdd_base_prompt must NOT reference test_conventions_file — TDD injection
-    stays in write_test/verify_test, not implement.py (#160 regression)."""
-
-    class _ProjWithConventions(_Proj):
-        test_conventions_file = "docs/my-test-conventions.md"
-
-    p = _impl()._tdd_base_prompt(_TD, _ProjWithConventions())
-    assert "docs/my-test-conventions.md" not in p
+    # REGRESSION: TDD must NOT include conventions
+    p_tdd = _impl()._tdd_base_prompt(_TD, _ProjWithConventions())
+    assert "docs/my-test-conventions.md" not in p_tdd
 
 
 # ---- review_code prompts: test-conventions injection (#160) ----
@@ -157,14 +148,20 @@ def test_narrowed_code_review_prompt_names_test_conventions_file():
 # ---- TDD-phase regression: write_test and verify_test still inject conventions ----
 
 
-def test_write_test_prompt_names_test_conventions_file(monkeypatch, tmp_path):
-    """write_test.py's built prompt still names test_conventions_file
-    (TDD-phase regression #160)."""
-    wt = _write_test()
-    _MY_CONVENTIONS = "docs/my-conventions.md"
-    captured = {}
+def test_tdd_phase_prompts_still_inject_test_conventions_file(monkeypatch, tmp_path):
+    """TDD-phase regression: write_test and verify_test prompts still name test_conventions_file.
+    The agent-pair assertion at the start ensures this function fails against pre-change code (#160)."""
+    # New behavior assertion (fails against pre-change code)
+    p = _impl()._agent_pair_base_prompt(_TD, _Proj())
+    assert _CONVENTIONS_DEFAULT in p
 
-    class _FakeProj:
+    _MY_CONVENTIONS = "docs/my-conventions.md"
+
+    # --- write_test regression ---
+    wt = _write_test()
+    captured_wt: dict = {}
+
+    class _FakeProjWt:
         source_dirs = ("src/",)
         test_dir = "tests/"
         test_file_glob = "test_*.py"
@@ -172,9 +169,9 @@ def test_write_test_prompt_names_test_conventions_file(monkeypatch, tmp_path):
         context_file = "ctx.md"
         base_branch = "main"
 
-    class _FakeAdapter:
+    class _FakeAdapterWt:
         def invoke(self, *, role, agent, prompt, cwd):
-            captured["prompt"] = prompt
+            captured_wt["prompt"] = prompt
             return {
                 "stdout": "",
                 "stderr": "no tests found",
@@ -184,8 +181,8 @@ def test_write_test_prompt_names_test_conventions_file(monkeypatch, tmp_path):
                 "model": None,
             }
 
-    monkeypatch.setattr(wt, "project_config", lambda: _FakeProj())
-    monkeypatch.setattr(wt, "get_worker_adapter", lambda state: _FakeAdapter())
+    monkeypatch.setattr(wt, "project_config", lambda: _FakeProjWt())
+    monkeypatch.setattr(wt, "get_worker_adapter", lambda state: _FakeAdapterWt())
     monkeypatch.setattr(wt, "worker_provider", lambda state: "claude")
     monkeypatch.setattr(wt, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(wt, "pinned_base_branch", lambda state, rr: "main")
@@ -194,24 +191,19 @@ def test_write_test_prompt_names_test_conventions_file(monkeypatch, tmp_path):
     monkeypatch.setattr(wt, "_committed_test_files", lambda rr, proj, task_id, base_branch: [])
     monkeypatch.setattr(wt, "compute_branch_diff", lambda cwd, base_branch: "")
 
-    task_dir = tmp_path / "task-001"
-    task_dir.mkdir()
-    (task_dir / "outcome.md").write_text("# Outcome\n", encoding="utf-8")
+    task_dir_wt = tmp_path / "task-001"
+    task_dir_wt.mkdir()
+    (task_dir_wt / "outcome.md").write_text("# Outcome\n", encoding="utf-8")
 
-    state = {"task_id": "task-001", "worker_provider": "claude"}
-    wt.run(task_dir, state)
+    wt.run(task_dir_wt, {"task_id": "task-001", "worker_provider": "claude"})
 
-    assert _MY_CONVENTIONS in captured["prompt"]
+    assert _MY_CONVENTIONS in captured_wt["prompt"]
 
-
-def test_verify_test_prompt_names_test_conventions_file(monkeypatch, tmp_path):
-    """verify_test.py's built prompt still names test_conventions_file
-    (TDD-phase regression #160)."""
+    # --- verify_test regression ---
     vt = _verify_test()
-    _MY_CONVENTIONS = "docs/my-conventions.md"
-    captured = {}
+    captured_vt: dict = {}
 
-    class _FakeProj:
+    class _FakeProjVt:
         source_dirs = ("src/",)
         test_dir = "tests/"
         test_file_glob = "test_*.py"
@@ -219,9 +211,9 @@ def test_verify_test_prompt_names_test_conventions_file(monkeypatch, tmp_path):
         context_file = "ctx.md"
         base_branch = "main"
 
-    class _FakeAdapter:
+    class _FakeAdapterVt:
         def invoke(self, *, role, agent, prompt, cwd):
-            captured["prompt"] = prompt
+            captured_vt["prompt"] = prompt
             return {
                 "stdout": "",
                 "stderr": "",
@@ -231,18 +223,17 @@ def test_verify_test_prompt_names_test_conventions_file(monkeypatch, tmp_path):
                 "model": None,
             }
 
-    monkeypatch.setattr(vt, "project_config", lambda: _FakeProj())
-    monkeypatch.setattr(vt, "get_worker_adapter", lambda state: _FakeAdapter())
+    monkeypatch.setattr(vt, "project_config", lambda: _FakeProjVt())
+    monkeypatch.setattr(vt, "get_worker_adapter", lambda state: _FakeAdapterVt())
     monkeypatch.setattr(vt, "worker_provider", lambda state: "claude")
     monkeypatch.setattr(vt, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(vt, "valid_tdd_test_files", lambda manifest, proj: ["tests/test_foo.py"])
     monkeypatch.setattr(vt, "compute_repo_diff", lambda cwd: "")
     monkeypatch.setattr(vt, "read_text_if_exists", lambda path: None)  # → early return after invoke
 
-    task_dir = tmp_path / "task-001"
-    task_dir.mkdir()
+    task_dir_vt = tmp_path / "task-002"
+    task_dir_vt.mkdir()
 
-    state = {"tdd_test_files": ["tests/test_foo.py"], "worker_provider": "claude"}
-    vt.run(task_dir, state)
+    vt.run(task_dir_vt, {"tdd_test_files": ["tests/test_foo.py"], "worker_provider": "claude"})
 
-    assert _MY_CONVENTIONS in captured["prompt"]
+    assert _MY_CONVENTIONS in captured_vt["prompt"]
