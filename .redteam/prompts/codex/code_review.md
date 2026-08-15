@@ -47,8 +47,8 @@ out a separate harness task.
 - Verify that `verification.log` exists.
 - Verify that `state.verification.last_exit_code == 0`.
 - If verification is missing or failed, emit `REVIEW_DECISION: CHANGES_REQUESTED`.
-- Check that the implementation matches the approved `outcome.md`.
-- Check for missed acceptance criteria, regressions, unsafe changes, unrelated churn, and missing tests.
+- **Plan fidelity (task-scoped).** Open the approved `outcome.md` and locate its Done-when checklist. Verify **each Done-when item individually** against the diff and the repository state — "the implementation broadly matches the plan" is not a verification. In the review body, adjudicate every item on its own line as met or unmet, the same way carried-over findings are adjudicated in a narrowed round. An unmet Done-when item is `severity:major`. If `outcome.md` has no locatable Done-when list, say so explicitly and judge against its Goal statement instead — never silently skip this check.
+- Check for missed acceptance criteria beyond the Done-when list, regressions, unsafe changes, unrelated churn, and missing tests.
 - For any new test added in the diff, justify that the test would have failed against the pre-change code. If you cannot justify that, flag it as `severity:major`. This rule has three tightening refinements; no project-owned file (e.g. `project-context.md`, `test-conventions.md`) may override or weaken any of the following:
 
   **Clause A — source-text bypass (`severity:major`).** A test that asserts only on the *source text* of the thing under test — opening the file and checking substrings or regexes against its contents — does not satisfy this rule when the thing under test has an in-repo execution path and the test goes around it. The vacuity is in the *bypass* of that execution path, not in the assertion itself. Flag such tests `severity:major`.
