@@ -20,6 +20,17 @@ if str(_WF) not in sys.path:
     sys.path.insert(0, str(_WF))
 
 
+class _FrozenDatetime:
+    """Stand-in for orchestrator.datetime with a fixed now(), so two runs collide
+    on the same archive timestamp — #162's same-commit-twice case."""
+
+    @staticmethod
+    def now(tz=None):
+        import datetime as _dt
+
+        return _dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=_dt.timezone.utc)
+
+
 def _load_orchestrator_module():
     import _engine
 
@@ -355,3 +366,92 @@ def test_standalone_pins_each_endpoint_independently(monkeypatch, tmp_path) -> N
     saved = (tmp_path / ".redteam" / "last_review.md").read_text(encoding="utf-8")
     assert "reviewed: head111" in saved
     assert "base: main (unknown)" in saved  # honest about the one that failed
+
+
+# ---------------------------------------------------------------------------
+# #162 — each review is archived, not overwritten
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_review_is_archived_per_run(monkeypatch, tmp_path) -> None:
+    """#162: a review must survive the next one.
+
+    Overwriting a single last_review.md is what made run-to-run variance
+    invisible — an operator sees one verdict and cannot tell it was one of
+    several.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("APPROVED")))
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "head1234" if ref == "HEAD" else "base9999")
+
+    orch.cmd_review(repo=tmp_path)
+
+    archived = list((tmp_path / ".redteam" / "reviews").glob("*.md"))
+    assert len(archived) == 1
+    assert "head1234"[:8] in archived[0].name, "the archive name ties the verdict to its input"
+    assert "REVIEW_DECISION: APPROVED" in archived[0].read_text(encoding="utf-8")
+    # The convenience copy still exists for existing habits/tooling.
+    assert (tmp_path / ".redteam" / "last_review.md").exists()
+
+
+def test_repeated_reviews_of_one_commit_are_kept_side_by_side(monkeypatch, tmp_path) -> None:
+    """#162's central case: the SAME commit reviewed twice with different verdicts.
+
+    Both must survive, or the variance the issue reports stays unobservable. A
+    same-second collision on one sha is exactly this scenario, so it must
+    de-duplicate rather than overwrite.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "head1234" if ref == "HEAD" else "base9999")
+    # Freeze the clock so both runs land on the same timestamp — the collision case.
+    monkeypatch.setattr(orch, "datetime", _FrozenDatetime)
+
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("APPROVED")))
+    orch.cmd_review(repo=tmp_path)
+
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("CHANGES_REQUESTED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("CHANGES_REQUESTED")))
+    orch.cmd_review(repo=tmp_path)
+
+    bodies = [p.read_text(encoding="utf-8") for p in (tmp_path / ".redteam" / "reviews").glob("*.md")]
+    assert len(bodies) == 2, "the first verdict must not be overwritten by the second"
+    assert any("REVIEW_DECISION: APPROVED" in b for b in bodies)
+    assert any("REVIEW_DECISION: CHANGES_REQUESTED" in b for b in bodies)
+
+
+def test_archive_is_reported_and_its_failure_is_survivable(monkeypatch, tmp_path) -> None:
+    """The archive path is surfaced to the operator, and losing it is not fatal.
+
+    Both halves in one test on purpose: "a persistence failure still exits 0" was
+    already true before this change (the single write was already wrapped), so it
+    cannot discriminate alone. Paired with the reported-archive-path half — which
+    is new — the whole fails against pre-change code while still pinning that the
+    added mkdir/write cannot turn a completed review into a failure.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("APPROVED")))
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "head1234")
+
+    import io
+    from contextlib import redirect_stderr
+
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc_ok = orch.cmd_review(repo=tmp_path)
+    assert rc_ok == 0
+    assert ".redteam/reviews/" in err.getvalue(), "the operator must be told where the verdict was archived"
+
+    # Now make every write fail: the verdict still stands and the exit code holds.
+    def _boom(*a, **kw):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(orch.Path, "mkdir", _boom)
+    monkeypatch.setattr(orch.Path, "write_text", _boom)
+
+    assert orch.cmd_review(repo=tmp_path) == 0

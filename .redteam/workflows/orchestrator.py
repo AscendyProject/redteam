@@ -2219,6 +2219,59 @@ def _standalone_review_header(cfg: Any, provider: str | None, head_sha: str, bas
     return "\n".join(lines) + "\n\n---\n\n"
 
 
+def _persist_standalone_review(rr: Path, raw: str, head_sha: str) -> str:
+    """Archive the review under .redteam/reviews/ and refresh last_review.md (#162).
+
+    Every review used to overwrite a single last_review.md, so in normal use an
+    operator sees exactly one verdict and has no way to tell it was one of
+    several. That is what made the reported run-to-run variance invisible: you
+    only notice it if you happen to run twice and still have the first output on
+    screen.
+
+    The archive name carries the UTC timestamp and the reviewed commit, so a
+    verdict is tied to its input and repeated reviews of the SAME commit sit side
+    by side — which is precisely the comparison #162 needs. A same-second
+    collision is therefore de-duplicated rather than overwritten; overwriting
+    would recreate the original bug in exactly the case that matters.
+
+    last_review.md is kept as a copy (not a symlink — Windows) so existing habits
+    and any tooling reading that path keep working.
+
+    Returns the human-readable "(saved to …)" suffix, empty when nothing could be
+    written. Persistence is best-effort: a read-only checkout must not turn a
+    completed review into a failure.
+    """
+    reviews_dir = rr / ".redteam" / "reviews"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    short = (head_sha or "unknown")[:8]
+    written: Path | None = None
+    try:
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        candidate = reviews_dir / f"{stamp}-{short}.md"
+        n = 2
+        while candidate.exists():
+            candidate = reviews_dir / f"{stamp}-{short}.{n}.md"
+            n += 1
+        candidate.write_text(raw, encoding="utf-8")
+        written = candidate
+    except OSError:
+        written = None
+
+    latest_ok = False
+    try:
+        (rr / ".redteam" / "last_review.md").write_text(raw, encoding="utf-8")
+        latest_ok = True
+    except OSError:
+        latest_ok = False
+
+    if written is not None:
+        rel = written.relative_to(rr).as_posix()
+        return f" (saved to {rel}{' and .redteam/last_review.md' if latest_ok else ''})"
+    if latest_ok:
+        return " (saved to .redteam/last_review.md)"
+    return ""
+
+
 def cmd_review(repo: Path | None = None) -> int:
     """Run the configured reviewer — fail-closed if it would collapse to the
     worker's own provider — over the current branch diff, read-only, with no
@@ -2295,12 +2348,7 @@ def cmd_review(repo: Path | None = None) -> int:
         _standalone_review_header(cfg, result.get("provider_used") or rp, head_sha, base_sha, head_after)
         + result["raw"]
     )
-    out_path = rr / ".redteam" / "last_review.md"
-    try:
-        out_path.write_text(raw, encoding="utf-8")
-        saved = " (saved to .redteam/last_review.md)"
-    except OSError:
-        saved = ""
+    saved = _persist_standalone_review(rr, raw, head_sha)
     print(raw)
     if result["parse_status"] == MANUAL_REQUIRED:
         print(f"\n[redteam] reviewer fallback exhausted — manual review required{saved}.", file=sys.stderr)
