@@ -82,6 +82,36 @@ Close both halves without weakening the gate.
   - the assertion must pin a **semantic clause the change requires**, never
     incidental wording or formatting.
 
+  **Eligibility is established per artifact, never by file class.** It is shown
+  by naming that artifact's actual in-repo consumers and demonstrating none of
+  them act on its contents. A glob, a directory, or a file extension is not an
+  argument. Only `.redteam/prompts/codex/code_review.md` has been audited here;
+  whether the other prompts would also qualify is simply unknown, and the
+  rewritten rule must not imply an answer either way.
+
+  The audit for this one artifact, repo-wide, is **four** references — all of
+  which pass or embed its *path*, none of which open or parse it:
+  - `review_code.py:42` and `:116` — name it as the criteria in the built
+    reviewer prompt;
+  - `orchestrator.py:2133` — the same, for standalone `orchestrator review`;
+  - `orchestrator.py:452` — `_set_next_action_for_manual_phase`'s `prompt_map`,
+    which embeds the path in a human-readable instruction for the manual
+    fallback.
+
+  Two cautions, both learned by getting this wrong:
+
+  **Match on the full path, not the basename.** `code_review.md` names two
+  unrelated files here: the criteria prompt above, and the per-task review
+  artifact at `<task_dir>/code_review.md`. A bare `grep code_review.md` returns
+  `implement.py`, `create_pr.py` and `review_code.py`, which reads as three
+  runners consuming the prompt. They do not — those are all the task artifact.
+
+  **Search the whole repo, not just `phase_runners/`.** The first audit here
+  scoped to that directory and so reported two consumers when there are four,
+  missing both `orchestrator.py` sites. An audit that stops at the obvious
+  directory produces exactly the unsupported claim this obligation exists to
+  prevent.
+
   Where an execution path *does* exist, it must be preferred. For this task that
   means testing the **built prompt** — the string `review_code.py` actually
   assembles and hands to the reviewer — rather than grepping the markdown,
@@ -185,6 +215,19 @@ Two decisions are **not** delegated and must stop the run:
   conventions path appears in the built prompt for agent-pair mode, and that
   TDD-mode injection is unchanged) rather than asserting on whole prompt
   strings, which are brittle.
+
+- **Both prior decompositions failed the review gate the same way: claiming the
+  exemption instead of establishing it.** The first asserted it in a docstring
+  ("these tests are not source-text guards", no grounds given). The second
+  asserted it by file class (every `.redteam/prompts/codex/*` qualifies "because
+  `review_code.py` passes it by path" — unsupported: the glob was never audited,
+  and `review_code.py` is not even the only consumer of the one file that was).
+  Same error, different costume.
+
+  The brief must **derive** eligibility for the one artifact it edits, by naming
+  that artifact's consumers and showing none parse its contents — and must not
+  generalise past it. If a broader claim seems warranted, it is out of scope for
+  this task.
 
 - **Task 2's brief must not tell the implementer to assert an exemption it has
   not been given.** The first decomposition of this goal failed review on
