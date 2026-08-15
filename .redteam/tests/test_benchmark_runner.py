@@ -839,11 +839,26 @@ def test_rescue_count_discriminates_across_realistic_runs() -> None:
     assert extract_metrics(_state())["rescue_count"] is None
 
 
-def test_state_template_seeds_the_durable_rescue_counter() -> None:
-    """A freshly bootstrapped task carries the counter, so "never rescued" is a
-    measured 0 rather than indistinguishable from an old engine."""
+def test_seeded_task_state_carries_the_durable_rescue_counter(tmp_path: Path) -> None:
+    """#172: a freshly seeded task carries rescue_total_count, so "never rescued"
+    is a MEASURED 0 rather than indistinguishable from a pre-counter engine.
+
+    Drives _seed_state — the actual path that consumes the template and writes
+    state.json — rather than parsing the template file. The template has an
+    in-repo execution path, so asserting on its text would bypass the very
+    behaviour under test.
+    """
     import json as _json
 
-    template = Path(__file__).resolve().parents[1] / "templates" / "state.template.json"
-    seeded = _json.loads(template.read_text(encoding="utf-8"))
+    import _engine
+
+    orch = _engine.orchestrator()
+    task_dir = tmp_path / "task-001"
+    task_dir.mkdir()
+
+    orch._seed_state(task_dir)
+
+    seeded = _json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert seeded["rescue_total_count"] == 0
+    # And the metric reads it as measured, not absent.
+    assert extract_metrics({**seeded, "next_phase": "done"})["rescue_count"] == 0
