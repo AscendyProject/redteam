@@ -44,7 +44,11 @@ _trusted_task_dirs: set[Path] = set()
 # Shared allowlist predicate for pre-worker floors (#136).
 # ---------------------------------------------------------------------------
 _BATCH_ROOT_ARTIFACT_ALLOWLIST = frozenset({"goal.md", "goal.json", "decompose_review.md", "decompose_blocked.md"})
-_SIBLING_BASENAME_ALLOWLIST = frozenset({"state.json", "outcome.md", "pr.md", "input.md"})
+# pr_url.txt (#158): create_pr writes it into the task dir, so in a stacked goal run
+# every task after the first sees its parent's copy and the pre-worker floors fail
+# closed on a file the harness itself just produced. Same class as pr.md/state.json —
+# harness decision trail, never operator WIP.
+_SIBLING_BASENAME_ALLOWLIST = frozenset({"state.json", "outcome.md", "pr.md", "input.md", "pr_url.txt"})
 
 
 def _is_harness_artifact(p: str, task_dir: Path, cwd: Path, scope_roots: list[str]) -> bool:
@@ -58,9 +62,9 @@ def _is_harness_artifact(p: str, task_dir: Path, cwd: Path, scope_roots: list[st
        decompose_review.md, decompose_blocked.md). Files in a batch-root subdirectory
        or with a different basename are NOT exempt.
     4. A top-level harness decision-trail file (state.json, outcome.md, pr.md, input.md,
-       or *_review.md) directly under a SIBLING task dir in the same batch's tasks/ root
-       (task_dir.parent). Files buried in a sibling subdirectory, non-allowlisted basenames,
-       and paths under a different batch's tasks/ root are NOT exempt.
+       pr_url.txt, or *_review.md) directly under a SIBLING task dir in the same batch's
+       tasks/ root (task_dir.parent). Files buried in a sibling subdirectory, non-allowlisted
+       basenames, and paths under a different batch's tasks/ root are NOT exempt.
 
     Used by `_floor_outside_scope` and `_cross_run_trust_root_floor` so their "allowed"
     definitions cannot drift apart.

@@ -118,7 +118,7 @@ def _wire_tdd(impl, monkeypatch, repo: Path, *, on_invoke=None) -> None:
 # =============================================================================
 
 
-@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md"])
+@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md", "pr_url.txt"])
 def test_sibling_top_level_artifact_proceeds_agent_pair(monkeypatch, tmp_path, artifact_name):
     """agent-pair: sibling top-level artifact → floor does NOT fire, worker IS invoked."""
     impl = _impl()
@@ -140,7 +140,7 @@ def test_sibling_top_level_artifact_proceeds_agent_pair(monkeypatch, tmp_path, a
     assert invoked["yes"] is True
 
 
-@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md"])
+@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md", "pr_url.txt"])
 def test_sibling_top_level_artifact_proceeds_tdd(monkeypatch, tmp_path, artifact_name):
     """tdd: sibling top-level artifact → floor does NOT fire, worker IS invoked."""
     impl = _impl()
@@ -378,3 +378,72 @@ def test_root_level_out_of_scope_still_trips_tdd(monkeypatch, tmp_path):
     assert "README.md" in result["feedback"]
     assert "commit or stash" in result["feedback"]
     assert invoked["yes"] is False
+
+
+# =============================================================================
+# #158 — sibling pr_url.txt, UNTRACKED, must not trip the cross-run trust-root floor
+# =============================================================================
+#
+# The tests above stage their artifact, so they exercise _floor_outside_scope
+# (the tracked path). The failure #158 actually reports comes from the other
+# floor: create_pr writes pr_url.txt and never commits it, so in a stacked goal
+# run the next task sees it as an UNTRACKED outside-scope path and
+# _cross_run_trust_root_floor fails closed. Reproduce that shape specifically —
+# the file is written and deliberately NOT added to the index.
+
+
+def test_sibling_untracked_pr_url_does_not_trip_trust_root_floor(monkeypatch, tmp_path):
+    """#158: untracked sibling pr_url.txt → trust-root floor does NOT fire.
+
+    Fails against pre-change code: pr_url.txt was absent from
+    _SIBLING_BASENAME_ALLOWLIST, so _is_harness_artifact returned False and the
+    floor refused to invoke the worker.
+    """
+    impl = _impl()
+    repo, task_dir, sibling_dir = _make_stacked_repo(tmp_path)
+
+    # Written by create_pr, never staged — exactly how the real run leaves it.
+    (sibling_dir / "pr_url.txt").write_text("https://github.com/AscendyProject/redteam/pull/171\n", encoding="utf-8")
+
+    invoked = {"yes": False}
+    _wire_agent_pair(impl, monkeypatch, repo, on_invoke=lambda: invoked.__setitem__("yes", True))
+
+    st = _state()
+    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
+
+    result = impl._run_agent_pair(task_dir, st)
+
+    assert result["status"] == "approved", result.get("feedback", "")
+    assert invoked["yes"] is True
+
+
+def test_sibling_untracked_pr_url_exemption_is_basename_exact(monkeypatch, tmp_path):
+    """#158: the exemption covers pr_url.txt and ONLY pr_url.txt.
+
+    Both files are present, so the floor fires either way and a bare "does it
+    fire" assertion could not tell the versions apart. What changes is the
+    CONTENT of the offending list: pre-change it names both files, post-change
+    it names only the .bak. Asserting the exact set therefore fails against
+    pre-change code while still proving a near-miss basename stays fail-closed
+    (a prefix or glob fix would wrongly drop the .bak from this list).
+    """
+    impl = _impl()
+    repo, task_dir, sibling_dir = _make_stacked_repo(tmp_path)
+
+    (sibling_dir / "pr_url.txt").write_text("https://example.invalid/pull/1\n", encoding="utf-8")
+    (sibling_dir / "pr_url.txt.bak").write_text("https://example.invalid/pull/0\n", encoding="utf-8")
+
+    invoked = {"yes": False}
+    _wire_agent_pair(impl, monkeypatch, repo, on_invoke=lambda: invoked.__setitem__("yes", True))
+
+    st = _state()
+    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
+
+    result = impl._run_agent_pair(task_dir, st)
+
+    assert result["status"] == "error"
+    assert invoked["yes"] is False
+
+    listed = result["feedback"].split("Offending paths: ", 1)[1].strip()
+    offending = {entry.strip().rsplit("/", 1)[-1] for entry in listed.split(",") if entry.strip()}
+    assert offending == {"pr_url.txt.bak"}, f"expected only the .bak to remain offending, got {offending}"
