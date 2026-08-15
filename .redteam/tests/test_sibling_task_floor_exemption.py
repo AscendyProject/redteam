@@ -416,13 +416,21 @@ def test_sibling_untracked_pr_url_does_not_trip_trust_root_floor(monkeypatch, tm
     assert invoked["yes"] is True
 
 
-def test_sibling_untracked_non_allowlisted_still_trips_trust_root_floor(monkeypatch, tmp_path):
-    """The untracked exemption is basename-scoped, not a blanket pass for the
-    sibling dir: an untracked non-allowlisted sibling file must still fail closed."""
+def test_sibling_untracked_pr_url_exemption_is_basename_exact(monkeypatch, tmp_path):
+    """#158: the exemption covers pr_url.txt and ONLY pr_url.txt.
+
+    Both files are present, so the floor fires either way and a bare "does it
+    fire" assertion could not tell the versions apart. What changes is the
+    CONTENT of the offending list: pre-change it names both files, post-change
+    it names only the .bak. Asserting the exact set therefore fails against
+    pre-change code while still proving a near-miss basename stays fail-closed
+    (a prefix or glob fix would wrongly drop the .bak from this list).
+    """
     impl = _impl()
     repo, task_dir, sibling_dir = _make_stacked_repo(tmp_path)
 
-    (sibling_dir / "pr_url.txt.bak").write_text("https://example.invalid/1\n", encoding="utf-8")
+    (sibling_dir / "pr_url.txt").write_text("https://example.invalid/pull/1\n", encoding="utf-8")
+    (sibling_dir / "pr_url.txt.bak").write_text("https://example.invalid/pull/0\n", encoding="utf-8")
 
     invoked = {"yes": False}
     _wire_agent_pair(impl, monkeypatch, repo, on_invoke=lambda: invoked.__setitem__("yes", True))
@@ -433,5 +441,8 @@ def test_sibling_untracked_non_allowlisted_still_trips_trust_root_floor(monkeypa
     result = impl._run_agent_pair(task_dir, st)
 
     assert result["status"] == "error"
-    assert "pr_url.txt.bak" in result["feedback"]
     assert invoked["yes"] is False
+
+    listed = result["feedback"].split("Offending paths: ", 1)[1].strip()
+    offending = {entry.strip().rsplit("/", 1)[-1] for entry in listed.split(",") if entry.strip()}
+    assert offending == {"pr_url.txt.bak"}, f"expected only the .bak to remain offending, got {offending}"
