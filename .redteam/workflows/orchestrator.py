@@ -2109,7 +2109,7 @@ def cmd_status(batch_dir: Path, *, as_json: bool = False) -> int:
 # ---------- standalone review ----------
 
 
-def _standalone_review_prompt(cfg: Any) -> str:
+def _standalone_review_prompt(cfg: Any, base_sha: str = "", head_sha: str = "") -> str:
     """Prompt for a one-shot adversarial review of the current branch diff, with
     no task context. Mirrors the in-pipeline review_code prompt's read-only,
     stdout-only contract so the same reviewer adapter can run it unchanged.
@@ -2127,9 +2127,21 @@ def _standalone_review_prompt(cfg: Any) -> str:
     the Required-Checks suspension — keep this list in sync when a diff-level check is
     added to code_review.md (#97)."""
     proj = cfg.project
+    # Pin the range to immutable SHAs when the caller resolved them (#166 review
+    # IR-001). Naming branches here would be a TOCTOU: either ref can move between
+    # our sampling and the reviewer actually running git, so the range recorded in
+    # the provenance header would not be the range read. With SHAs, "what was
+    # recorded" and "what was read" are the same object by construction.
+    # Pinned PER ENDPOINT: an all-or-nothing fallback would discard a SHA that did
+    # resolve. Realistic case — the base branch was renamed, so it fails while HEAD
+    # succeeds; reverting the whole range to movable refs then lets HEAD advance
+    # before the reviewer reads it, while the header still records the old
+    # head_sha. Each endpoint that resolved is used; only the one that did not
+    # falls back, and the header renders that one as "unknown".
+    rng = f"{base_sha or proj.base_branch}...{head_sha or 'HEAD'}"
     return (
         "Act as an adversarial code-security reviewer. Review the changes in "
-        f"`git diff {proj.base_branch}...HEAD`. Apply the review criteria in "
+        f"`git diff {rng}`. Apply the review criteria in "
         ".redteam/prompts/codex/code_review.md, the project security checklist at "
         f"{proj.security_checklist}, and the project hard rules at {proj.context_file}. "
         "This is a STANDALONE review with NO task artifacts: there is no "
@@ -2148,6 +2160,63 @@ def _standalone_review_prompt(cfg: Any) -> str:
         "stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
         "CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with IR-NNN findings above it."
     )
+
+
+def _standalone_review_endpoints(rr: Path, cfg: Any) -> tuple[str, str]:
+    """Resolve the reviewed range's endpoints to immutable SHAs (#166).
+
+    MUST be called BEFORE the reviewer is invoked. Resolving afterwards would
+    label the verdict with whatever HEAD happens to be when the review returns,
+    which on a long review can be a commit the reviewer never saw — the exact
+    misattribution the header exists to prevent. Branch NAMES are not enough for
+    the same reason: `main...HEAD` cannot be reconstructed once `main` moves.
+
+    Returns "" for an endpoint that cannot be resolved — falsy on purpose, so
+    callers fall back to the branch name rather than handing the reviewer a
+    literal "unknown...unknown" range. The header renders the absence instead.
+    """
+
+    def _resolve(ref: str) -> str:
+        try:
+            return git_rev_parse(ref, rr)
+        except Exception:
+            return ""
+
+    return _resolve("HEAD"), _resolve(cfg.project.base_branch)
+
+
+def _standalone_review_header(cfg: Any, provider: str | None, head_sha: str, base_sha: str, head_after: str) -> str:
+    """Provenance header prepended to a standalone review (#166).
+
+    A standalone APPROVED asserts strictly less than an in-pipeline one: there is
+    no task directory, so the verification gate and outcome.md alignment are not
+    checked (#103 suspends those Required Checks by design). Rendered identically,
+    the two are indistinguishable — and `cmd_review` maps the verdict to an exit
+    code that can gate CI, so the weaker one can end up gating a merge.
+
+    Emitted by the HARNESS, never requested from the model: a reviewer that forgot
+    to print it would look exactly like a full pipeline review, which is the
+    failure this prevents.
+
+    Deliberately contains no `REVIEW_DECISION:` substring, so prepending it cannot
+    disturb the last-line decision parse of the persisted artifact.
+    """
+    lines = [
+        "<!-- redteam standalone review -->",
+        "MODE: standalone (no task artifacts — verification and outcome.md alignment NOT asserted)",
+        f"reviewed: {head_sha or 'unknown'}",
+        f"base: {cfg.project.base_branch} ({base_sha or 'unknown'})",
+        f"reviewer: {provider or 'unknown'}",
+    ]
+    if head_after != head_sha:
+        # The reviewer was given the pinned range, so the verdict genuinely
+        # describes head_sha regardless. But the worktree has moved on, so an
+        # operator reading this later must not take it as current.
+        lines.append(
+            f"WARNING: HEAD moved during the review ({head_sha} → {head_after}); "
+            "this verdict describes the reviewed commit above, NOT the current worktree."
+        )
+    return "\n".join(lines) + "\n\n---\n\n"
 
 
 def cmd_review(repo: Path | None = None) -> int:
@@ -2206,14 +2275,26 @@ def cmd_review(repo: Path | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # Pin the reviewed range BEFORE dispatch (#166): resolved afterwards, a branch
+    # that moved during a long review would label the verdict with a commit the
+    # reviewer never read.
+    head_sha, base_sha = _standalone_review_endpoints(rr, cfg)
     result = review_with_fallback(
         {},
         role="review_code",
-        prompt=_standalone_review_prompt(cfg),
+        prompt=_standalone_review_prompt(cfg, base_sha, head_sha),
         cwd=rr,
-        target={"kind": "branch_diff", "base": cfg.project.base_branch},
+        # Pinned SHA, not the branch name: the target must name the same immutable
+        # range the prompt does, or a native-diff adapter could read a different one.
+        target={"kind": "branch_diff", "base": base_sha or cfg.project.base_branch},
     )
-    raw = result["raw"]
+    # Prepend provenance (#166). result["decision"] was already parsed by the
+    # adapter from the untouched reviewer output, so this cannot affect the gate.
+    head_after, _ = _standalone_review_endpoints(rr, cfg)
+    raw = (
+        _standalone_review_header(cfg, result.get("provider_used") or rp, head_sha, base_sha, head_after)
+        + result["raw"]
+    )
     out_path = rr / ".redteam" / "last_review.md"
     try:
         out_path.write_text(raw, encoding="utf-8")
