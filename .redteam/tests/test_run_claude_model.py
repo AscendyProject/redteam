@@ -206,3 +206,56 @@ def test_run_claude_passes_allowed_tools_when_set(monkeypatch):
     i = cmd.index("--allowedTools")
     assert cmd[i + 1 : i + 3] == ["Bash", "PowerShell"]
     assert cmd[i + 3] == "--output-format"
+
+
+# ---------------------------------------------------------------------------
+# #168 — the model comes from the `system`/`init` event, not from `result`
+# ---------------------------------------------------------------------------
+
+
+class _FakeProcWithInit:
+    """Stream shaped like the real CLI: an init event carrying the model, then a
+    result event carrying cost/duration but NO model."""
+
+    def __init__(self) -> None:
+        self.stdout = io.StringIO(
+            '{"type":"system","subtype":"init","model":"claude-opus-4-7"}\n'
+            '{"type":"result","is_error":false,"total_cost_usd":0.25,"duration_ms":1500}\n'
+        )
+        self.stderr = io.StringIO("")
+        self.returncode = 0
+
+    def wait(self, timeout: int | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+def test_run_claude_captures_model_from_init_event(monkeypatch):
+    """#168: init_model is populated from the init event.
+
+    Fails against pre-change code, where run_claude kept only the result event
+    and no init_model key existed, so phase_telemetry recorded model=null on
+    every entry.
+    """
+    base = _load_base_module()
+    monkeypatch.setattr(base.subprocess, "Popen", lambda cmd, **kw: _FakeProcWithInit())
+
+    result = base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    assert result["init_model"] == "claude-opus-4-7"
+    # The result event is still captured verbatim, and still carries no model —
+    # which is precisely why parsed_json could never supply it.
+    assert result["parsed_json"]["total_cost_usd"] == 0.25
+    assert "model" not in result["parsed_json"]
+
+
+def test_run_claude_init_model_none_when_no_init_event(monkeypatch):
+    """A stream with no init event leaves init_model None rather than raising."""
+    base = _load_base_module()
+    monkeypatch.setattr(base.subprocess, "Popen", lambda cmd, **kw: _FakeProc())
+
+    result = base.run_claude(agent="implementer", prompt="do it", model=None)
+
+    assert result["init_model"] is None
