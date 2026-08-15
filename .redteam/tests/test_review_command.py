@@ -186,3 +186,77 @@ def test_review_dispatched_by_main_without_batch(monkeypatch) -> None:
     monkeypatch.setattr(orch, "cmd_review", _fake_review)
     assert orch.main(["orchestrator.py", "review"]) == 0
     assert called["review"] is True
+
+
+# ---------------------------------------------------------------------------
+# #166 — the standalone verdict declares the conditions it was produced under
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_review_declares_its_mode(monkeypatch, tmp_path) -> None:
+    """#166: a standalone APPROVED asserts less than an in-pipeline one — no
+    verification gate, no outcome.md alignment — so the artifact must say so.
+
+    Emitted by the harness, not requested from the model: a reviewer that omitted
+    the line would look exactly like a full pipeline review.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("APPROVED")))
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "abc1234")
+
+    rc = orch.cmd_review(repo=tmp_path)
+
+    assert rc == 0
+    saved = (tmp_path / ".redteam" / "last_review.md").read_text(encoding="utf-8")
+    assert "MODE: standalone" in saved
+    assert "NOT asserted" in saved
+    assert "abc1234" in saved  # reviewed commit, so a verdict is tied to its input
+
+
+def test_standalone_header_does_not_disturb_the_decision_parse(monkeypatch, tmp_path) -> None:
+    """The header is present AND the artifact still parses last-line-wins.
+
+    Asserted together on purpose: "exactly one REVIEW_DECISION line" is trivially
+    true before this change (there was no header to add one), so it cannot
+    discriminate alone. Paired with the header assertion — which is new — the whole
+    fails against pre-change code while still pinning that the header must never
+    introduce a decision line that would flip a later re-read.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("CHANGES_REQUESTED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("CHANGES_REQUESTED")))
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "abc1234")
+
+    rc = orch.cmd_review(repo=tmp_path)
+
+    saved = (tmp_path / ".redteam" / "last_review.md").read_text(encoding="utf-8")
+    from phase_runners._base import parse_review_decision
+
+    assert rc == 1
+    assert "MODE: standalone" in saved
+    assert saved.count("REVIEW_DECISION:") == 1
+    assert parse_review_decision(saved) == "CHANGES_REQUESTED"
+
+
+def test_standalone_header_survives_unavailable_git(monkeypatch, tmp_path) -> None:
+    """A repo where rev-parse fails still gets the mode line — the declaration is
+    the point, the sha is a bonus, and losing git must not lose the warning."""
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("APPROVED")))
+
+    def _boom(ref, repo):
+        raise RuntimeError("not a git repo")
+
+    monkeypatch.setattr(orch, "git_rev_parse", _boom)
+
+    rc = orch.cmd_review(repo=tmp_path)
+
+    assert rc == 0
+    saved = (tmp_path / ".redteam" / "last_review.md").read_text(encoding="utf-8")
+    assert "MODE: standalone" in saved
+    assert "reviewed: unknown" in saved

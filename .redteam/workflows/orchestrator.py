@@ -2150,6 +2150,36 @@ def _standalone_review_prompt(cfg: Any) -> str:
     )
 
 
+def _standalone_review_header(rr: Path, cfg: Any, provider: str | None) -> str:
+    """Provenance header prepended to a standalone review (#166).
+
+    A standalone APPROVED asserts strictly less than an in-pipeline one: there is
+    no task directory, so the verification gate and outcome.md alignment are not
+    checked (#103 suspends those Required Checks by design). Rendered identically,
+    the two are indistinguishable — and `cmd_review` maps the verdict to an exit
+    code that can gate CI, so the weaker one can end up gating a merge.
+
+    Emitted by the HARNESS, never requested from the model: a reviewer that forgot
+    to print it would look exactly like a full pipeline review, which is the
+    failure this prevents.
+
+    Deliberately contains no `REVIEW_DECISION:` substring, so prepending it cannot
+    disturb the last-line decision parse of the persisted artifact.
+    """
+    try:
+        head = git_rev_parse("HEAD", rr)
+    except Exception:
+        head = "unknown"
+    return (
+        "<!-- redteam standalone review -->\n"
+        "MODE: standalone (no task artifacts — verification and outcome.md alignment NOT asserted)\n"
+        f"reviewed: {head}\n"
+        f"base: {cfg.project.base_branch}\n"
+        f"reviewer: {provider or 'unknown'}\n"
+        "\n---\n\n"
+    )
+
+
 def cmd_review(repo: Path | None = None) -> int:
     """Run the configured reviewer — fail-closed if it would collapse to the
     worker's own provider — over the current branch diff, read-only, with no
@@ -2213,7 +2243,9 @@ def cmd_review(repo: Path | None = None) -> int:
         cwd=rr,
         target={"kind": "branch_diff", "base": cfg.project.base_branch},
     )
-    raw = result["raw"]
+    # Prepend provenance (#166). result["decision"] was already parsed by the
+    # adapter from the untouched reviewer output, so this cannot affect the gate.
+    raw = _standalone_review_header(rr, cfg, result.get("provider_used") or rp) + result["raw"]
     out_path = rr / ".redteam" / "last_review.md"
     try:
         out_path.write_text(raw, encoding="utf-8")
