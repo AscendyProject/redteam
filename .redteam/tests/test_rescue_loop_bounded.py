@@ -44,6 +44,10 @@ def test_route_helper_allows_max_entries_then_defers(tmp_path):
     assert state["rescue_entry_count"] == 4
     terminal = [r for r in state["deferred_requirements"] if r.get("reason") == "rescue_cycle_exceeded"]
     assert len(terminal) == 1 and terminal[0]["attempts"] == 4
+    # #172: the refused 4th attempt never entered rescue, so it must not be counted.
+    # Counting it would report 4 rescues for a task that took 3 and would penalise
+    # exactly the configurations that reach the ceiling.
+    assert state["rescue_total_count"] == 3
 
 
 def test_route_helper_records_escalation_until_terminal_then_only_terminal(tmp_path):
@@ -120,3 +124,32 @@ def test_review_code_defers_instead_of_looping_when_rescue_budget_exhausted(monk
     assert outcome == "deferred"  # NOT blocked_on_human_gate / not routed to rescue again
     assert saved["next_phase"] == "deferred"
     assert any(r.get("reason") == "rescue_cycle_exceeded" for r in saved["deferred_requirements"])
+
+
+def test_cumulative_rescue_counter_tracks_entries_without_touching_the_budget(tmp_path):
+    """#172: rescue_total_count accumulates alongside the budget counter.
+
+    The budget (rescue_entry_count) must keep its exact semantics — it is what
+    bounds the #87 runaway — so this asserts both move together here, and a
+    separate test covers the counter surviving the convergence reset that zeroes
+    the budget.
+    """
+    orch = _orch()
+    task_dir = tmp_path / "t"
+    task_dir.mkdir()
+    state = {"task_id": "t", "max_retries_per_phase": 3}
+
+    for i in range(1, 4):
+        orch._route_to_rescue_or_defer(task_dir, state, "review_code", _result(n=i))
+        assert state["rescue_entry_count"] == i  # budget unchanged in behaviour
+        assert state["rescue_total_count"] == i  # cumulative tracks actual entries
+
+    # The 4th is refused: the budget still counts the attempt, the total does not.
+    orch._route_to_rescue_or_defer(task_dir, state, "review_code", _result(n=4))
+    assert state["rescue_entry_count"] == 4
+    assert state["rescue_total_count"] == 3
+
+    # Convergence zeroes the BUDGET only; the cumulative total must survive, or a
+    # successful task reports zero rescues no matter how many it actually took.
+    state["rescue_entry_count"] = 0
+    assert state["rescue_total_count"] == 3

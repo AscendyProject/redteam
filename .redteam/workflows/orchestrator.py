@@ -750,6 +750,14 @@ def _route_to_rescue_or_defer(
         return "deferred"
     if escalation_record is not None:
         state.setdefault("deferred_requirements", []).append(escalation_record)
+    # Cumulative rescue entries, NEVER reset (#172). Counted HERE — past the
+    # ceiling check, where the task genuinely enters rescue. Counting alongside
+    # rescue_entry_count above would include the terminal attempt that is refused
+    # and deferred, reporting 3 rescues for a task that took 2 and penalising
+    # exactly the configurations that hit the ceiling.
+    # rescue_entry_count is the BUDGET (zeroed on convergence) and is untouched;
+    # this is the total the benchmark needs.
+    state["rescue_total_count"] = int(state.get("rescue_total_count", 0)) + 1
     state["next_phase"] = "rescue"
     save_state(task_dir, state)
     return None

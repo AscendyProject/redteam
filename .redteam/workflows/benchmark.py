@@ -183,18 +183,28 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
 class BenchmarkRecord(TypedDict):
     """One result record written to results.jsonl.
 
-    schema_version = 1 for this schema. Fields are deterministic; never fabricate
-    values: claude_cost_usd is None when only Codex-role phases ran.
+    schema_version = 2. Fields are deterministic; never fabricate values:
+    claude_cost_usd is None when only Codex-role phases ran.
+
+    v1 → v2 (#172): rescue_count became nullable and its meaning changed. A v1
+    record stored 0 because the old extractor counted `rescue` telemetry entries
+    that the engine never writes — a fabricated zero, not a measurement. The
+    version bump is what lets a reader tell the two apart; without it a stored 0
+    is ambiguous and aggregation silently treats it as measured.
     """
 
-    schema_version: int  # always 1
+    schema_version: int  # 1 = pre-#172 (rescue_count fabricated as 0); 2 = current
     config: str  # [configs.<name>] key from benchmark.toml
     task: str  # task id (subdir name under tasks/)
     repetition: int  # 1-indexed
     outcome: str  # "done" | "deferred" | "error"
     review_rounds: int
     retry_count: int
-    rescue_count: int
+    # None = not measured, never 0-by-default (#172). The rescue phase invokes no
+    # model — it validates a manually produced rescue_report.md — so it emits no
+    # telemetry to count, and rescue_entry_count is a budget counter reset on
+    # convergence. Recording 0 would render as a measured "no rescues ever".
+    rescue_count: int | None
     scope_creep_count: int  # floor-trip count
     wall_clock_sec: float
     claude_cost_usd: float | None  # None when only Codex-role phases ran
@@ -284,7 +294,14 @@ def extract_metrics(state: dict) -> dict:
 
     telemetry: list[dict] = state.get("phase_telemetry", [])
     review_rounds = sum(1 for e in telemetry if e.get("phase") == "review_code")
-    rescue_count = sum(1 for e in telemetry if e.get("phase") == "rescue")
+    # rescue_count: from the durable cumulative counter (#172), NOT from telemetry
+    # (rescue.py invokes no model, so it writes no entry) and NOT from
+    # rescue_entry_count (a budget, zeroed on convergence). Absent key → None:
+    # the state predates the counter, so the value is unmeasured rather than zero.
+    # A state seeded from the current template always carries it, so a task that
+    # simply never rescued correctly reports a measured 0.
+    _rescue_total = state.get("rescue_total_count")
+    rescue_count = int(_rescue_total) if _rescue_total is not None else None
     # retry_count: deterministic sum of the per-phase retry counter (existing field, no new key).
     retry_count = sum(state.get("retries", {}).values())
     # scope_creep_count: floor-trip count from deferred_requirements.
@@ -529,14 +546,14 @@ def run_one(
                 "outcome": "error",
                 "review_rounds": 0,
                 "retry_count": 0,
-                "rescue_count": 0,
+                "rescue_count": None,  # unmeasured, not "no rescues" (#172)
                 "scope_creep_count": 0,
                 "wall_clock_sec": 0.0,
                 "claude_cost_usd": None,
             }
 
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "config": config_name,
             "task": task_id,
             "repetition": repetition,
@@ -650,14 +667,14 @@ def run_benchmark(
         except Exception:
             now = _utc_now_iso()
             record = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "config": cfg,
                 "task": tid,
                 "repetition": rep,
                 "outcome": "error",
                 "review_rounds": 0,
                 "retry_count": 0,
-                "rescue_count": 0,
+                "rescue_count": None,  # unmeasured, not "no rescues" (#172)
                 "scope_creep_count": 0,
                 "wall_clock_sec": 0.0,
                 "claude_cost_usd": None,
@@ -721,7 +738,19 @@ def build_report(config_names: list[str], records: list[dict]) -> str:
         approval = f"{done_count / total * 100:.2f}%"
         avg_rounds = f"{sum(r.get('review_rounds', 0) for r in recs) / total:.2f}"
         retry = f"{sum(r.get('retry_count', 0) for r in recs) / total * 100:.2f}%"
-        rescue = f"{sum(r.get('rescue_count', 0) for r in recs) / total * 100:.2f}%"
+        # None-aware, and divided by the MEASURED values only. Dividing by `total`
+        # would let unmeasured records dilute a real rate — a resumed set mixing
+        # legacy counts with unmeasured ones would report [1, 0, None, None] as
+        # 25.00% when the measured subset is 50.00%.
+        # A v1 record's rescue_count is a fabricated 0, not a measurement (#172),
+        # so it is excluded from the denominator as well as the numerator —
+        # otherwise a resumed set of [0, 0, None, None] still reports 0.00%.
+        rescue_measured = [
+            v
+            for v in (r.get("rescue_count") if int(r.get("schema_version") or 1) >= 2 else None for r in recs)
+            if v is not None
+        ]
+        rescue = f"{sum(rescue_measured) / len(rescue_measured) * 100:.2f}%" if rescue_measured else "n/a"
         scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
         avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
 

@@ -45,7 +45,7 @@ def _rec(
     claude_cost_usd: float | None = 0.10,
 ) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "config": config,
         "task": "t1",
         "repetition": 1,
@@ -439,3 +439,83 @@ def test_usage_constant_documents_dry_run():
     """USAGE constant documents the --dry-run flag for the benchmark subcommand."""
     orch = _orch()
     assert "--dry-run" in orch.USAGE
+
+
+# ---------------------------------------------------------------------------
+# #172 — an unmeasured metric renders n/a, not 0.00%
+# ---------------------------------------------------------------------------
+
+
+def test_rescue_rate_is_na_when_unmeasured_and_scoped_to_that_metric():
+    """#172: rescue_count is None (the engine writes no rescue telemetry), so the
+    rate reads n/a — while every other rate keeps computing.
+
+    0.00% would be worse than a blank: it presents "never measured" as "measured
+    and found to be zero", which nothing in the report contradicts. Same honesty
+    rule the cost column already follows for Codex-only runs.
+
+    The three halves are one claim — the None-handling is correct AND scoped —
+    and are asserted together because only the n/a half differs from pre-change
+    code; the other two are true on both sides and could not discriminate alone.
+    """
+    # 1. Unmeasured → n/a (the new behaviour).
+    report = build_report(["cfg"], [_rec("cfg", "done", rescue_count=None)] * 2)
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "n/a" in rescue_line
+    assert "0.00%" not in rescue_line
+
+    # 2. Not hardcoded: if a real source ever supplies values, the rate computes.
+    report = build_report(["cfg"], [_rec("cfg", "done", rescue_count=1), _rec("cfg", "done", rescue_count=0)])
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "50.00%" in rescue_line
+
+    # 3. Scoped: the neighbouring rates are untouched by the None handling.
+    report = build_report(["cfg"], [_rec("cfg", "done", retry_count=1, scope_creep_count=1), _rec("cfg", "done")])
+    assert "50.00%" in next(ln for ln in report.splitlines() if "Retry rate" in ln)
+    assert "50.00%" in next(ln for ln in report.splitlines() if "Scope-creep rate" in ln)
+
+
+def test_rescue_rate_uses_only_measured_records_as_the_denominator():
+    """#172 review IR-001: unmeasured records must not dilute a measured rate.
+
+    A resumed set can mix legacy records that carry real counts with new ones that
+    carry None. Dividing by ALL records reported [1, 0, None, None] as 25.00% when
+    the measured subset is 50.00% — a quietly wrong number, which is worse than
+    n/a because it looks computed.
+    """
+    records = [
+        _rec("cfg", "done", rescue_count=1),
+        _rec("cfg", "done", rescue_count=0),
+        _rec("cfg", "done", rescue_count=None),
+        _rec("cfg", "done", rescue_count=None),
+    ]
+    report = build_report(["cfg"], records)
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "50.00%" in rescue_line
+    assert "25.00%" not in rescue_line
+
+
+def test_legacy_v1_rescue_counts_are_not_treated_as_measurements():
+    """#172 review IR-001: a v1 record's rescue_count is a fabricated 0.
+
+    Pre-#172 the extractor counted `rescue` telemetry entries the engine never
+    writes, so every v1 record stored 0. Reading those as measurements would let a
+    resumed set of [0, 0, None, None] still report 0.00% — the same misleading
+    near-constant the migration exists to remove, now laundered through history.
+    The schema_version bump is what makes the two distinguishable.
+    """
+    legacy = _rec("cfg", "done", rescue_count=0)
+    legacy["schema_version"] = 1
+    legacy2 = _rec("cfg", "done", rescue_count=0)
+    legacy2["schema_version"] = 1
+
+    report = build_report(["cfg"], [legacy, legacy2, _rec("cfg", "done", rescue_count=None)])
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "n/a" in rescue_line
+    assert "0.00%" not in rescue_line
+
+    # A v2 record with a real value is still measured — the exclusion is scoped
+    # to the version whose values are known-fabricated, not to the value 0.
+    report = build_report(["cfg"], [legacy, _rec("cfg", "done", rescue_count=0)])
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "0.00%" in rescue_line

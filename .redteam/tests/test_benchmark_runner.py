@@ -497,7 +497,14 @@ def test_extract_metrics_error_outcome() -> None:
 
 
 def test_extract_metrics_review_rounds_and_rescue_count() -> None:
-    """review_rounds counts review_code entries; rescue_count counts rescue entries."""
+    """review_rounds counts review_code entries; rescue_count is None — not measured.
+
+    Updated for #172: rescue.py invokes no model, so a `rescue` telemetry entry is
+    never written by the engine. Counting them therefore always yielded 0, which
+    is indistinguishable from a real measurement of zero rescues. None says
+    "unmeasured" instead. The synthetic rescue entry below is retained precisely
+    to show the extractor does NOT start counting one if it appears.
+    """
     state = {
         "next_phase": "done",
         "phase_telemetry": [
@@ -512,7 +519,7 @@ def test_extract_metrics_review_rounds_and_rescue_count() -> None:
     }
     m = extract_metrics(state)
     assert m["review_rounds"] == 2
-    assert m["rescue_count"] == 1
+    assert m["rescue_count"] is None
     assert m["retry_count"] == 3  # sum of {implement: 2, review_code: 1}
 
 
@@ -557,11 +564,11 @@ def test_extract_metrics_wall_clock_sec_sums_duration_with_none() -> None:
 
 
 def test_extract_metrics_empty_telemetry() -> None:
-    """Empty phase_telemetry → all phase counts 0; claude_cost_usd=None."""
+    """Empty phase_telemetry → phase counts 0; claude_cost_usd and rescue_count None."""
     state = {"next_phase": "done", "phase_telemetry": []}
     m = extract_metrics(state)
     assert m["review_rounds"] == 0
-    assert m["rescue_count"] == 0
+    assert m["rescue_count"] is None  # unmeasured, not "measured as zero" (#172)
     assert m["retry_count"] == 0
     assert m["wall_clock_sec"] == 0.0
     assert m["claude_cost_usd"] is None
@@ -772,3 +779,86 @@ def test_bootstrap_driver_no_unsafe_literals() -> None:
     driver = bm._BENCH_DRIVER_TEMPLATE
     for pattern in ["gh ", "git push", "--force"]:
         assert pattern not in driver, f"Bootstrap driver template contains forbidden literal: {pattern!r}"
+
+
+def test_error_fallback_record_reports_rescue_count_unmeasured(tmp_path: Path) -> None:
+    """#172 review IR-001: the run_one-raised fallback record must not claim a
+    measured zero either.
+
+    An error-only run would otherwise report Rescue rate 0.00% — the same
+    fabrication the None migration exists to remove, reintroduced through the
+    error path.
+    """
+    set_root = tmp_path / "bset"
+    _make_set(set_root, ["alpha"], ["task-001"], repetitions=1)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("dispatch exploded")
+
+    rc = run_benchmark(set_root, run_one=_boom)
+
+    assert rc == 0  # the loop catches and continues
+    records = load_records(set_root / "results.jsonl")
+    assert len(records) == 1
+    assert records[0]["outcome"] == "error"
+    assert records[0]["rescue_count"] is None
+
+
+def test_rescue_count_comes_from_the_durable_counter_not_the_budget() -> None:
+    """#172: a CONVERGED task must still report the rescues it took.
+
+    rescue_entry_count is a budget and is zeroed on convergence, so reading it
+    would report 0 for exactly the runs that matter. rescue_total_count is never
+    reset, which is what makes the metric survive a successful task.
+    """
+    converged = {
+        "next_phase": "done",
+        "phase_telemetry": [],
+        "rescue_entry_count": 0,  # budget: reset by convergence
+        "rescue_total_count": 2,  # cumulative: what actually happened
+    }
+    assert extract_metrics(converged)["rescue_count"] == 2
+
+
+def test_rescue_count_discriminates_across_realistic_runs() -> None:
+    """The metric must vary with reality, not collapse to a constant.
+
+    Anti-degeneracy: a task that never rescued reports a measured 0, one that
+    rescued twice reports 2, and only a pre-counter state reports None.
+    """
+
+    def _state(**extra):
+        s = {"next_phase": "done", "phase_telemetry": []}
+        s.update(extra)
+        return s
+
+    assert extract_metrics(_state(rescue_total_count=0))["rescue_count"] == 0
+    assert extract_metrics(_state(rescue_total_count=1))["rescue_count"] == 1
+    assert extract_metrics(_state(rescue_total_count=2))["rescue_count"] == 2
+    # No key at all → the state predates the counter, so it is unmeasured.
+    assert extract_metrics(_state())["rescue_count"] is None
+
+
+def test_seeded_task_state_carries_the_durable_rescue_counter(tmp_path: Path) -> None:
+    """#172: a freshly seeded task carries rescue_total_count, so "never rescued"
+    is a MEASURED 0 rather than indistinguishable from a pre-counter engine.
+
+    Drives _seed_state — the actual path that consumes the template and writes
+    state.json — rather than parsing the template file. The template has an
+    in-repo execution path, so asserting on its text would bypass the very
+    behaviour under test.
+    """
+    import json as _json
+
+    import _engine
+
+    orch = _engine.orchestrator()
+    task_dir = tmp_path / "task-001"
+    task_dir.mkdir()
+
+    orch._seed_state(task_dir)
+
+    seeded = _json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    assert seeded["rescue_total_count"] == 0
+    # And the metric reads it as measured, not absent.
+    assert extract_metrics({**seeded, "next_phase": "done"})["rescue_count"] == 0
