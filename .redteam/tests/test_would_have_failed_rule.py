@@ -14,12 +14,15 @@ Per the rewritten Clause B, a test that exercises the code path by calling an ac
 function is *not preventive*, even if the invariant already held; such tests are
 justified by showing they would detect an incorrect implementation.
 
-The template section tests check for content added by this diff and therefore fail
-against pre-change code — no exemption needed.
+The template section tests check for content added by this diff and exercise the
+install.py _seed_file path (install.py:221-234) rather than reading the template
+source text directly — the template has an in-repo execution path via the installer
+and therefore does not qualify for Clause C's source-text exemption.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -32,7 +35,14 @@ import phase_runners.review_code as _rc  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CODE_REVIEW_MD = _REPO_ROOT / ".redteam/prompts/codex/code_review.md"
-_TEMPLATE_CONVENTIONS_MD = _REPO_ROOT / ".redteam/templates/docs/test-conventions.md"
+
+# Load install.py via importlib (same pattern as test_install.py) so the template
+# tests can exercise the _seed_file installer path rather than reading source text.
+_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+_install_spec = importlib.util.spec_from_file_location("redteam_install_whf", _SCRIPTS / "install.py")
+assert _install_spec and _install_spec.loader
+_install_mod = importlib.util.module_from_spec(_install_spec)
+_install_spec.loader.exec_module(_install_mod)
 
 _TD_PATH = Path("/tmp/batch/tasks/task-001")
 _BASE = "main"
@@ -90,6 +100,27 @@ def _slice_section(text: str, heading: str) -> str:
     return text[content_start : content_start + next_m.start()]
 
 
+def _extract_decision_vocab(text: str) -> set[str]:
+    """Parse REVIEW_DECISION vocabulary from a prompt string.
+
+    Returns the set of decision values by extracting the primary value from
+    'REVIEW_DECISION: VALUE' patterns and alternatives from '(or X / Y / Z)'
+    parentheticals that follow a REVIEW_DECISION mention.  Supports exact-set
+    equality checks (no new values, no removals).
+    """
+    values: set[str] = set()
+    # Capture the primary value: REVIEW_DECISION: VALUE
+    for m in re.finditer(r"REVIEW_DECISION:\s*(\w+)", text):
+        values.add(m.group(1))
+    # Capture alternatives in the same sentence: VALUE` (or ALT1 / ALT2 / ...)
+    for m in re.finditer(r"REVIEW_DECISION:\s*\w+[^(]*\(or\s+([\w\s/]+)\)", text):
+        for alt in m.group(1).split("/"):
+            alt = alt.strip()
+            if alt:
+                values.add(alt)
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Built-prompt regressions
 # (Done-when items 4 and 5; exercises _code_review_prompt /
@@ -108,14 +139,16 @@ def test_code_review_prompt_names_criteria_file():
 
 
 def test_code_review_prompt_names_all_decision_values():
-    """Done-when item 4 (regression, #103): _code_review_prompt still enumerates
-    all four REVIEW_DECISION values so the runner can parse them.
+    """Done-when item 4 (regression, #103): _code_review_prompt enumerates exactly
+    the four REVIEW_DECISION values — APPROVED, CHANGES_REQUESTED, RESCUE_REQUIRED,
+    ASK_USER; no new values, no removals.
     Exercises the _code_review_prompt() code path directly.
-    Would fail against an implementation that dropped any decision value.
+    Would fail if any decision value is added, removed, or renamed.
     """
     p = _rc._code_review_prompt(_TD_PATH, _BASE)
-    for value in ("APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"):
-        assert value in p, f"REVIEW_DECISION:{value} missing from _code_review_prompt output"
+    expected = {"APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"}
+    found = _extract_decision_vocab(p)
+    assert found == expected, f"REVIEW_DECISION vocabulary mismatch: found={found!r}, expected={expected!r}"
 
 
 def test_narrowed_code_review_prompt_names_criteria_file():
@@ -129,14 +162,16 @@ def test_narrowed_code_review_prompt_names_criteria_file():
 
 
 def test_narrowed_code_review_prompt_names_all_decision_values():
-    """Done-when item 5 (regression, #103): _narrowed_code_review_prompt still enumerates
-    all four REVIEW_DECISION values (no new values, no removals).
+    """Done-when item 5 (regression, #103): _narrowed_code_review_prompt enumerates
+    exactly the four REVIEW_DECISION values — APPROVED, CHANGES_REQUESTED,
+    RESCUE_REQUIRED, ASK_USER; no new values, no removals.
     Exercises the _narrowed_code_review_prompt() code path directly.
-    Would fail against an implementation that altered the decision vocabulary.
+    Would fail if any decision value is added, removed, or renamed.
     """
     p = _rc._narrowed_code_review_prompt(_TD_PATH, _BASE, "abc1234", [])
-    for value in ("APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"):
-        assert value in p, f"REVIEW_DECISION:{value} missing from _narrowed_code_review_prompt output"
+    expected = {"APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"}
+    found = _extract_decision_vocab(p)
+    assert found == expected, f"REVIEW_DECISION vocabulary mismatch: found={found!r}, expected={expected!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -235,29 +270,42 @@ def test_decision_vocabulary_at_tail_of_file():
 
 
 # ---------------------------------------------------------------------------
-# Template regression
+# Template regression — exercises the install.py _seed_file path
 # (Done-when item 3; fails against pre-change code — section is newly added)
+# The template .redteam/templates/docs/test-conventions.md is registered as a
+# project seed at install.py:156 and copied to the consumer via _seed_file
+# (install.py:221-234).  Tests assert on the installed consumer document after
+# exercising that path, not on the template source text directly.
 # ---------------------------------------------------------------------------
 
 
-def test_template_has_runtime_coverage_section():
-    """Done-when item 3: .redteam/templates/docs/test-conventions.md now contains
-    a '## Runtime coverage' section (heading exactly).
-    Fails against pre-change code: the section did not exist in the template.
+def test_template_has_runtime_coverage_section(tmp_path: Path) -> None:
+    """Done-when item 3 / regression: after the harness installer seeds the
+    test-conventions template into a consumer project via install.py _seed_file
+    (install.py:221-234), the installed consumer document contains a
+    '## Runtime coverage' section (heading exactly).
+    Exercises the install.py install() → _seed_file() path; asserts on the
+    installed consumer document, not the template source text.
+    Fails against pre-change code: the section did not exist in the template before this diff.
     """
-    text = _TEMPLATE_CONVENTIONS_MD.read_text(encoding="utf-8")
+    _install_mod.install(tmp_path, overwrite=False, dry=False)
+    text = (tmp_path / ".redteam/docs/test-conventions.md").read_text(encoding="utf-8")
     assert "## Runtime coverage" in text
 
 
-def test_template_runtime_coverage_section_body():
-    """Done-when item 3: the body of the '## Runtime coverage' section requires
-    importing/mounting/executing the thing under test and calls out source-text
-    guards as insufficient when an execution path exists.
+def test_template_runtime_coverage_section_body(tmp_path: Path) -> None:
+    """Done-when item 3 / regression: the installed consumer document's
+    '## Runtime coverage' section (seeded via install.py _seed_file, install.py:221-234)
+    requires importing, mounting, or executing the thing under test, and calls out
+    source-text guards as insufficient when an execution path exists.
     Scoped to the isolated body of the section (between '## Runtime coverage'
     and the next '## ' heading or EOF).
-    Fails against pre-change code: the section did not exist in the template.
+    Exercises the install.py install() → _seed_file() path; asserts on the installed
+    consumer document, not the template source text.
+    Fails against pre-change code: the section did not exist before this diff.
     """
-    text = _TEMPLATE_CONVENTIONS_MD.read_text(encoding="utf-8")
+    _install_mod.install(tmp_path, overwrite=False, dry=False)
+    text = (tmp_path / ".redteam/docs/test-conventions.md").read_text(encoding="utf-8")
     body = _slice_section(text, "## Runtime coverage")
     # requires execution-path exercising (importing / mounting / executing)
     exec_terms = ("import", "mount", "execut", "load")
