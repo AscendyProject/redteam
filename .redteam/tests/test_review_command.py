@@ -298,3 +298,27 @@ def test_standalone_header_pins_the_reviewed_commit_before_dispatch(monkeypatch,
     assert "reviewed: before1" in saved, "must name the commit the reviewer actually read"
     assert "WARNING: HEAD moved" in saved
     assert "after2" in saved
+
+
+def test_standalone_reviewer_is_given_the_pinned_sha_range(monkeypatch, tmp_path) -> None:
+    """#166 review IR-001: the reviewer must be told to diff the SAME immutable
+    range the header records.
+
+    Naming branches in the prompt is a TOCTOU — either ref can move between our
+    sampling and the reviewer actually running git — so the recorded range would
+    not be the range read. Asserted at the diff-consumption boundary (the prompt
+    and target handed to the ladder), not merely on mocked rev-parse values.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "head111" if ref == "HEAD" else "base222")
+    rwf = MagicMock(return_value=_result("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", rwf)
+
+    orch.cmd_review(repo=tmp_path)
+
+    _, kwargs = rwf.call_args
+    assert "base222...head111" in kwargs["prompt"]
+    assert "main...HEAD" not in kwargs["prompt"], "a movable ref must not define the reviewed range"
+    assert kwargs["target"]["base"] == "base222"
