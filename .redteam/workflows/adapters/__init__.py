@@ -130,8 +130,15 @@ def _is_valid_result(result: ReviewResult) -> bool:
     return result["parse_status"] == "ok" and result["decision"] != "MISSING"
 
 
-def _manual_required(audit: str) -> ReviewResult:
-    return {"decision": "MISSING", "raw": audit, "parse_status": MANUAL_REQUIRED}
+def _manual_required(audit: str, *, provider_used: str | None = None) -> ReviewResult:
+    result: ReviewResult = {"decision": "MISSING", "raw": audit, "parse_status": MANUAL_REQUIRED}
+    # Only set when a model actually ran and then failed (#172). The other
+    # manual_required paths reject the fallback BEFORE invoking it — unknown
+    # provider, self-review, not read-only — so the last model to run really is
+    # the primary and recording it is correct.
+    if provider_used:
+        result["provider_used"] = provider_used
+    return result
 
 
 def _review_with_fallback_impl(
@@ -161,6 +168,8 @@ def _review_with_fallback_impl(
         return _manual_required("no headless reviewer adapter configured — manual review required")
     result = primary.review(role=role, prompt=prompt, cwd=cwd, target=target)
     if _is_valid_result(result):
+        if primary_name:
+            result["provider_used"] = primary_name
         return result
 
     audit = f"primary reviewer '{primary_name}' failed (parse_status={result['parse_status']}, decision={result['decision']})."
@@ -191,9 +200,14 @@ def _review_with_fallback_impl(
             "raw": f"{FALLBACK_AUDIT_MARKER} {audit_line}\n\n{fb_result['raw']}",
             "parse_status": "ok",
             "fallback_audit": audit_line,
+            "provider_used": fb,
         }
+    # The fallback DID run here; it just produced an invalid result. Attributing
+    # this to the configured primary would name a model that is not the last one
+    # invoked, and would corrupt provider-level failure metrics.
     return _manual_required(
-        f"{audit} Fallback '{fb}' also failed (parse_status={fb_result['parse_status']}) — manual review required.\n\n{fb_result['raw'][-2000:]}"
+        f"{audit} Fallback '{fb}' also failed (parse_status={fb_result['parse_status']}) — manual review required.\n\n{fb_result['raw'][-2000:]}",
+        provider_used=fb,
     )
 
 

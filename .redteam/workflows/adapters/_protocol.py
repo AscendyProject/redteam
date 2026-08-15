@@ -59,6 +59,13 @@ class ReviewResult(TypedDict):
     # automatic fallback produced this result. The engine trusts THIS (not any
     # in-band marker in `raw`) for the audit trail (#37 review PR-002).
     fallback_audit: NotRequired[str]
+    # Provider that actually produced THIS result (#172). Structured, engine-set —
+    # never parsed from reviewer text. Needed because the provider that ran is not
+    # always `reviewer_provider(state)`: a staged first-pass round runs
+    # `review_stages.first_pass_reviewer`, and an automatic fallback runs the
+    # fallback provider. Attributing either to the configured primary records a
+    # wrong provider, which is worse than recording none.
+    provider_used: NotRequired[str]
 
 
 class ReviewerAdapter(Protocol):
