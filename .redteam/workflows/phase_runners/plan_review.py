@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from adapters import MANUAL_REQUIRED, get_reviewer_adapter, review_with_fallback, reviewer_provider
+from adapters import MANUAL_REQUIRED, get_reviewer_adapter, review_with_fallback
 
 from ._base import PhaseResult, compute_repo_diff, parse_review_decision, read_text_if_exists, repo_root
 
@@ -38,17 +38,6 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     # rather than re-invoking the failing headless primary (#37).
     manual_required = "plan_review" in (state.get("manual_review_required") or {})
     adapter = get_reviewer_adapter(state)
-    # Telemetry (#172): populated only when a reviewer model was actually invoked;
-    # an empty dict means the orchestrator appends no entry, which is the correct
-    # record for the manual / no-adapter path. Values a reviewer transport cannot
-    # report stay None rather than invented — codex exec is stdout-only (no cost)
-    # and ReviewResult carries no model id. duration_sec is left None to match
-    # review_code, where the D4 contract forbids clock reads with ceilings
-    # unconfigured; timing both is a separate, deliberate change.
-    # provider is the provider that ACTUALLY produced the result — an automatic
-    # fallback runs a different provider than the configured primary, and labelling
-    # it with the primary would record a wrong provider.
-    _tele: dict[str, Any] = {}
     if adapter is not None and not manual_required:
         result = review_with_fallback(
             state,
@@ -57,16 +46,10 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             cwd=repo_root(),
             target={"kind": "plan", "base": None},
         )
-        _tele = dict(
-            cost_usd=None,
-            duration_sec=None,
-            model=None,
-            provider=result.get("provider_used") or reviewer_provider(state),
-        )
         # The reviewer (primary or fallback) failed infra → block for a manual
         # review. The audit is NOT persisted as plan_review.md (it is not a review).
         if result["parse_status"] == MANUAL_REQUIRED:
-            return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff, **_tele)
+            return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
         review_text = result["raw"]
         review_path.write_text(review_text, encoding="utf-8")
         # Fail closed on ANY non-ok parse status; trust the adapter's decision
@@ -74,19 +57,19 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
         # rescued by a stray REVIEW_DECISION line in the body).
         if result["parse_status"] != "ok":
             feedback = f"reviewer returned parse_status={result['parse_status']}\n\n{review_text[-2000:]}"
-            return PhaseResult(status="error", feedback=feedback, log=review_text, diff=diff, **_tele)
+            return PhaseResult(status="error", feedback=feedback, log=review_text, diff=diff)
         decision = result["decision"]
         fallback_audit = result.get("fallback_audit")  # structured provenance, not text
     else:
         review_text = read_text_if_exists(review_path)
         if review_text is None:
             feedback = f"plan_review.md was not produced at {review_path}"
-            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tele)
+            return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
         decision = parse_review_decision(review_text)
         fallback_audit = None
 
     def _emit(status: str, feedback: str) -> PhaseResult:
-        res = PhaseResult(status=status, feedback=feedback, log=review_text, diff=diff, **_tele)
+        res = PhaseResult(status=status, feedback=feedback, log=review_text, diff=diff)
         if fallback_audit:
             res["fallback_audit"] = fallback_audit
         return res

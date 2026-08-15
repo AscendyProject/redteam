@@ -13,8 +13,6 @@ from adapters import (
     get_worker_adapter,
     review_with_fallback,
     review_with_fallback_for_provider,
-    reviewer_provider,
-    worker_provider,
 )
 
 from ._base import (
@@ -163,10 +161,6 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             return PhaseResult(status="error", feedback=msg, log=msg, diff=compute_repo_diff(cwd=rr))
         diff = compute_repo_diff(cwd=repo_root())
         review_path = task_dir / "code_review.md"
-        # Telemetry (#172): stays empty on paths where no reviewer model runs
-        # (manual stage, pre-dispatch ceiling aborts) — the empty dict means the
-        # orchestrator appends no entry, which is the correct record for them.
-        _tele: dict[str, Any] = {}
 
         # D4 master gate: read ceilings from live config (lazy, mirrors the
         # _resolve_round_stage pattern). When review_ceilings is None the runner
@@ -306,28 +300,6 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                         time.monotonic() - _wc_t0
                     )
 
-            # Telemetry (#172): a reviewer model IS invoked on this path, so the
-            # phase must appear in phase_telemetry — otherwise metrics that count
-            # review_code entries (benchmark review_rounds) read a real review loop
-            # as zero. Built here rather than in the finally above, where `result`
-            # is not yet bound if the dispatch raised. Values a reviewer transport
-            # cannot report stay None rather than being invented:
-            #   cost_usd — codex exec is stdout-only, no cost is emitted
-            #   model    — ReviewResult carries no model id
-            #   duration_sec — measurable in principle, but the D4 contract keeps
-            #     this runner free of time.monotonic() reads when review_ceilings is
-            #     unconfigured (test_review_code_hard_ceilings guards it), so timing
-            #     it here is a separate, deliberate change.
-            # provider is the provider that ACTUALLY produced this result: a staged
-            # first-pass round and an automatic fallback both differ from the
-            # configured primary, and recording the primary would be a wrong label.
-            _tele = dict(
-                cost_usd=None,
-                duration_sec=None,
-                model=None,
-                provider=result.get("provider_used") or reviewer_provider(state),
-            )
-
             review_text = result["raw"]
             if result["parse_status"] != MANUAL_REQUIRED:
                 # Persist the reviewer's raw (audit trail) before any terminal
@@ -354,17 +326,14 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                     log=f"{feedback}\n\n{review_text}",
                     diff=diff,
                     ceiling_hit="max_wall_clock_sec",
-                    **_tele,
                 )
             if result["parse_status"] == MANUAL_REQUIRED:
-                return PhaseResult(
-                    status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff, **_tele
-                )
+                return PhaseResult(status="manual_required", feedback=result["raw"], log=result["raw"], diff=diff)
             # Fail closed on any non-ok parse status; trust the adapter's decision
             # rather than re-parsing the raw body.
             if result["parse_status"] != "ok":
                 feedback = f"reviewer returned parse_status={result['parse_status']}\n\n{review_text[-2000:]}"
-                return PhaseResult(status="error", feedback=feedback, log=review_text, diff=diff, **_tele)
+                return PhaseResult(status="error", feedback=feedback, log=review_text, diff=diff)
             decision = result["decision"]
             fallback_audit = result.get("fallback_audit")  # structured provenance, not text
             # Capture the reviewed HEAD revision after a successful parsed round.
@@ -391,7 +360,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             fallback_audit = None
 
         def _emit(status: str, feedback: str) -> PhaseResult:
-            res = PhaseResult(status=status, feedback=feedback, log=review_text, diff=diff, **_tele)
+            res = PhaseResult(status=status, feedback=feedback, log=review_text, diff=diff)
             if fallback_audit:
                 res["fallback_audit"] = fallback_audit
             if staging_audit:
@@ -430,14 +399,6 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
 
     rr = repo_root()
     result = get_worker_adapter(state).invoke(role="reviewer", agent=AGENT_NAME, prompt=prompt, cwd=rr)
-    # This branch invokes the WORKER adapter, so the standard materialization rule
-    # applies and real cost/duration/model are available (#172).
-    _tdd_tele = dict(
-        cost_usd=result.get("cost_usd"),
-        duration_sec=result.get("duration_sec"),
-        model=result.get("model"),
-        provider=worker_provider(state),
-    )
     diff = compute_repo_diff(cwd=rr)
 
     review_path = task_dir / "code_review.md"
@@ -448,22 +409,21 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"returncode={result['returncode']}\n"
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tdd_tele)
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
 
     decision = parse_review_decision(review_text)
     if decision == "APPROVED":
-        return PhaseResult(status="approved", feedback="", log=review_text, diff=diff, **_tdd_tele)
+        return PhaseResult(status="approved", feedback="", log=review_text, diff=diff)
     if decision == "CHANGES_REQUESTED":
         return PhaseResult(
             status="changes_requested",
             feedback=review_text,
             log=review_text,
             diff=diff,
-            **_tdd_tele,
         )
     feedback = (
         "code_review.md is missing a final `REVIEW_DECISION:` line. "
         "The reviewer output is malformed.\n\n"
         f"Last 30 lines:\n{chr(10).join(review_text.splitlines()[-30:])}"
     )
-    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tdd_tele)
+    return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)

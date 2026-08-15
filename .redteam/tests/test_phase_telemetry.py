@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -588,6 +589,366 @@ def test_telemetry_append_error_swallowed_to_stderr(monkeypatch, tmp_path, capsy
 
     captured = capsys.readouterr()
     assert "telemetry" in captured.err.lower() or "boom" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# 9. Legacy state.json without phase_telemetry key
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_state_missing_key_still_appends(monkeypatch, tmp_path):
+    """A state dict that lacks 'phase_telemetry' gets setdefault([]) and the
+    new entry is appended without KeyError."""
+    orch = _load_orchestrator()
+    task_dir = _setup_task_dir(tmp_path)
+    _setup_state(task_dir, next_phase="plan_outcome")
+
+    # Confirm the on-disk state has NO phase_telemetry key
+    raw = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    raw.pop("phase_telemetry", None)
+    (task_dir / "state.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    def fake_runner(td, st):
+        return {
+            "status": "approved",
+            "feedback": "",
+            "log": "",
+            "diff": "",
+            "provider": "claude",
+            "cost_usd": 0.5,
+            "duration_sec": 2.0,
+            "model": "m",
+        }
+
+    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_runner)
+    orch.process_task(task_dir)
+
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    telemetry = saved.get("phase_telemetry", [])
+    assert len(telemetry) == 1
+    assert telemetry[0]["provider"] == "claude"
+
+
+# ---------------------------------------------------------------------------
+# 10. State template shape
+# ---------------------------------------------------------------------------
+
+
+def test_state_template_has_phase_telemetry():
+    """state.template.json parses as JSON and contains 'phase_telemetry' as an
+    empty list at the top level."""
+    assert _TEMPLATE_PATH.exists(), f"state.template.json not found at {_TEMPLATE_PATH}"
+    data = json.loads(_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    assert "phase_telemetry" in data, "state.template.json is missing 'phase_telemetry' key"
+    assert data["phase_telemetry"] == [], (
+        f"state.template.json 'phase_telemetry' should be an empty list, got {data['phase_telemetry']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. No-secret-bleed shape
+# ---------------------------------------------------------------------------
+
+
+def test_telemetry_entry_has_exactly_six_allowed_keys(monkeypatch, tmp_path):
+    """The appended entry's keys are exactly {phase, provider, model, cost_usd,
+    duration_sec, outcome} — no free-text field (feedback, log, diff, stderr,
+    stdout, last_failure_log, review text) leaks in."""
+    orch = _load_orchestrator()
+    task_dir = _setup_task_dir(tmp_path)
+    _setup_state(task_dir, next_phase="plan_outcome")
+
+    def fake_runner(td, st):
+        return {
+            "status": "approved",
+            "feedback": "SENSITIVE FEEDBACK",
+            "log": "SENSITIVE LOG",
+            "diff": "SENSITIVE DIFF",
+            "provider": "claude",
+            "cost_usd": 1.0,
+            "duration_sec": 2.0,
+            "model": "claude-test",
+        }
+
+    _patch_orchestrator_for_single_phase(monkeypatch, orch, tmp_path, task_dir, "plan_outcome", fake_runner)
+    orch.process_task(task_dir)
+
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    telemetry = saved.get("phase_telemetry", [])
+    assert len(telemetry) == 1
+    entry = telemetry[0]
+    entry_keys = frozenset(entry.keys())
+    assert entry_keys == _EXPECTED_ENTRY_KEYS, f"entry keys mismatch. expected {_EXPECTED_ENTRY_KEYS}, got {entry_keys}"
+    for forbidden in _FORBIDDEN_ENTRY_KEYS:
+        assert forbidden not in entry, f"forbidden key {forbidden!r} leaked into telemetry entry"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for orchestrator tests
+# ---------------------------------------------------------------------------
+
+
+def _fake_proj():
+    """Minimal fake project config."""
+    proj = MagicMock()
+    proj.context_file = str(_REPO_ROOT / ".redteam" / "docs" / "project-context.md")
+    proj.source_dirs = [".redteam/workflows/"]
+    proj.test_dir = ".redteam/tests/"
+    proj.test_file_glob = "test_*.py"
+    proj.verify_command = "bash .redteam/scripts/verify.sh"
+    proj.verification_allowlist = ["bash", "pytest", "ruff"]
+    proj.branch_prefix = "redteam"
+    proj.base_branch = "main"
+    return proj
+
+
+def _make_adapter(fake_result: dict):
+    """Return a fake WorkerAdapter whose invoke() returns fake_result."""
+
+    class _FakeAdapter:
+        name = "fake"
+
+        def invoke(self, *, role, agent, prompt, cwd):
+            return fake_result
+
+    return _FakeAdapter()
+
+
+def _setup_task_dir(tmp_path: Path) -> Path:
+    """Create a minimal task directory with input.md."""
+    task_dir = tmp_path / "tasks" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "input.md").write_text("do a thing", encoding="utf-8")
+    return task_dir
+
+
+def _setup_state(task_dir: Path, *, next_phase: str, max_retries: int = 2) -> dict:
+    """Seed a minimal state.json and return the state dict.
+
+    max_retries: set to 0 when the fake runner always returns an error and the test
+    needs exactly one telemetry entry — max_retries=0 causes an immediate defer after
+    the first failure instead of looping through retries (which would append multiple
+    entries and make `len(telemetry) == 1` assertions fail).
+    """
+    state = {
+        "task_id": task_dir.name,
+        "mode": "agent-pair",
+        "phase": next_phase,
+        "next_phase": next_phase,
+        "base_branch": "main",
+        "phases_completed": [],
+        "retries": {},
+        "max_retries_per_phase": max_retries,
+        "models": {"implementer": "claude-sonnet-4-6", "reviewer": "codex"},
+        "phase_telemetry": [],
+        "verification": {},
+        "escape": {"ask_user": False, "reason": None, "return_phase": None},
+    }
+    (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return state
+
+
+def _patch_orchestrator_for_single_phase(
+    monkeypatch,
+    orch,
+    tmp_path: Path,
+    task_dir: Path,
+    phase_name: str,
+    fake_runner,
+) -> None:
+    """Patch orchestrator dependencies so process_task runs exactly one phase."""
+    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **kw: f"redteam/{task_dir.name}")
+    monkeypatch.setattr(orch, "load_config", lambda *a, **kw: _fake_config())
+    monkeypatch.setattr(orch, "_adversarial_pairing_error", lambda state: None)
+
+    # Run EXACTLY the one target phase: force the phase-advance to terminate the
+    # loop after it, so process_task doesn't walk the rest of PHASE_ORDER (an
+    # "approved" stub advances rather than terminates, which otherwise loops).
+    monkeypatch.setattr(orch, "_next_phase", lambda state, current: "done")
+
+    # Install fake runner; all other runners terminate the loop (approved, next done)
+    def _terminating_runner(td, st):
+        return {"status": "approved", "feedback": "", "log": "", "diff": ""}
+
+    # Build a copy of PHASE_RUNNERS with the fake for the target phase and
+    # terminating dummies for everything else (so loop stops after one real phase).
+    fake_runners = {}
+    for k in orch.PHASE_RUNNERS:
+        if k == phase_name:
+            fake_runners[k] = fake_runner
+        else:
+            fake_runners[k] = _terminating_runner
+    monkeypatch.setattr(orch, "PHASE_RUNNERS", fake_runners)
+
+
+def _fake_config():
+    """Minimal fake config object."""
+    cfg = MagicMock()
+    cfg.tiers = {}
+    cfg.project.base_branch = "main"
+    cfg.project.branch_prefix = "redteam"
+    cfg.project.verify_command = "bash .redteam/scripts/verify.sh"
+    cfg.project.verification_allowlist = ["bash", "pytest", "ruff"]
+    cfg.models.review_stages = None
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# 8. #172 — the REAL reviewer runners emit telemetry
+# ---------------------------------------------------------------------------
+#
+# The sentinel tests above drive fake runners, so they cannot see what the real
+# ones do. These drive review_code.run / plan_review.run directly. Without them
+# nothing would notice a regression back to "no reviewer telemetry", which is
+# what made benchmark review_rounds read a real review loop as zero.
+
+
+_PROJ_STUB = SimpleNamespace(security_checklist="sec.md", context_file="ctx.md")
+
+
+def _ok_review(decision: str) -> dict:
+    return {"decision": decision, "raw": f"REVIEW_DECISION: {decision}\n", "parse_status": "ok"}
+
+
+def test_real_review_code_emits_telemetry(tmp_path):
+    """#172: review_code.run sets `provider`, so the orchestrator records the round.
+
+    Fails against pre-change code, where the runner set no telemetry fields and
+    the entry was never appended.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import phase_runners.review_code as review_code
+
+    state = {
+        "mode": "agent-pair",
+        "base_branch": "main",
+        "models": {"implementer": "claude-sonnet-4-6", "reviewer": "codex"},
+        "review_items": [],
+    }
+    with (
+        patch("phase_runners.review_code.get_reviewer_adapter", return_value=MagicMock()),
+        patch("phase_runners.review_code.review_with_fallback", return_value=_ok_review("CHANGES_REQUESTED")),
+        patch("phase_runners.review_code.compute_repo_diff", return_value=""),
+        patch("phase_runners.review_code.repo_root", return_value=tmp_path),
+        patch("phase_runners.review_code.git_rev_parse", return_value="deadbeef"),
+        patch("phase_runners.review_code._is_ancestor", return_value=False),
+        patch("phase_runners.review_code._incremental_diff_nonempty", return_value=False),
+    ):
+        result = review_code.run(tmp_path, state)
+
+    assert result["status"] == "changes_requested"
+    assert result["provider"] == "codex"
+    # Never invented: a reviewer transport reports none of these.
+    assert result["cost_usd"] is None
+    assert result["model"] is None
+    assert result["duration_sec"] is None
+
+    # End to end: the entry the orchestrator would build is countable as a round.
+    _base = _engine_base()
+    entry = _base.build_telemetry_entry("review_code", result)
+    assert entry["phase"] == "review_code"
+    assert entry["provider"] == "codex"
+    assert entry["outcome"] == "changes_requested"
+
+
+def test_real_plan_review_emits_telemetry(tmp_path):
+    """#172: plan_review.run sets `provider` on the headless path too."""
+    from unittest.mock import MagicMock, patch
+
+    import phase_runners.plan_review as plan_review
+
+    (tmp_path / "outcome.md").write_text("x\n", encoding="utf-8")
+    state = {"mode": "agent-pair", "models": {"reviewer": "codex"}}
+    with (
+        patch("phase_runners.plan_review.get_reviewer_adapter", return_value=MagicMock()),
+        patch("phase_runners.plan_review.review_with_fallback", return_value=_ok_review("APPROVED")),
+        patch("phase_runners.plan_review.compute_repo_diff", return_value=""),
+        patch("phase_runners.plan_review.repo_root", return_value=tmp_path),
+    ):
+        result = plan_review.run(tmp_path, state)
+
+    assert result["status"] == "approved"
+    assert result["provider"] == "codex"
+    assert result["cost_usd"] is None
+
+
+def test_plan_review_records_headless_but_not_manual(tmp_path):
+    """The sentinel keeps meaning "a model ran", not "the phase ran".
+
+    Asserted as a contrast in one test on purpose. The manual half alone is
+    unchanged behaviour and would pass against pre-change code, so it cannot
+    stand as its own regression test; paired with the headless half — which is new
+    — the whole discriminates while still pinning that the manual path must NOT
+    start emitting.
+    """
+    from unittest.mock import MagicMock, patch
+
+    import phase_runners.plan_review as plan_review
+
+    (tmp_path / "outcome.md").write_text("x\n", encoding="utf-8")
+
+    # Headless: a reviewer model runs → recorded (new behaviour).
+    with (
+        patch("phase_runners.plan_review.get_reviewer_adapter", return_value=MagicMock()),
+        patch("phase_runners.plan_review.review_with_fallback", return_value=_ok_review("APPROVED")),
+        patch("phase_runners.plan_review.compute_repo_diff", return_value=""),
+        patch("phase_runners.plan_review.repo_root", return_value=tmp_path),
+    ):
+        headless = plan_review.run(tmp_path, {"mode": "agent-pair", "models": {"reviewer": "codex"}})
+
+    # Manual: no adapter, no model runs → still nothing, so the exemption holds.
+    (tmp_path / "plan_review.md").write_text("REVIEW_DECISION: APPROVED\n", encoding="utf-8")
+    with (
+        patch("phase_runners.plan_review.get_reviewer_adapter", return_value=None),
+        patch("phase_runners.plan_review.compute_repo_diff", return_value=""),
+        patch("phase_runners.plan_review.repo_root", return_value=tmp_path),
+    ):
+        manual = plan_review.run(tmp_path, {"mode": "agent-pair", "models": {}})
+
+    assert headless["provider"] == "codex"
+    assert "provider" not in manual
+
+
+def test_tdd_review_code_records_worker_telemetry(tmp_path):
+    """#172: the tdd branch invokes the WORKER adapter, so real cost/duration/model
+    are recorded there — that path emitted nothing before this change."""
+    from unittest.mock import patch
+
+    import phase_runners.review_code as review_code
+
+    (tmp_path / "code_review.md").write_text("REVIEW_DECISION: APPROVED\n", encoding="utf-8")
+    worker = type(
+        "W",
+        (),
+        {
+            "invoke": lambda self, **kw: {
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+                "cost_usd": 0.42,
+                "duration_sec": 12.5,
+                "model": "claude-sonnet-4-6",
+                "provider": "claude",
+            }
+        },
+    )()
+    with (
+        patch("phase_runners.review_code.get_worker_adapter", return_value=worker),
+        patch("phase_runners.review_code.worker_provider", return_value="claude"),
+        patch("phase_runners.review_code.compute_repo_diff", return_value=""),
+        patch("phase_runners.review_code.repo_root", return_value=tmp_path),
+        patch("phase_runners.review_code.project_config", return_value=_PROJ_STUB),
+    ):
+        result = review_code.run(tmp_path, {"mode": "tdd"})
+
+    assert result["status"] == "approved"
+    assert result["provider"] == "claude"
+    # Unlike the reviewer transport, this path CAN report these — so it must.
+    assert result["cost_usd"] == 0.42
+    assert result["duration_sec"] == 12.5
+    assert result["model"] == "claude-sonnet-4-6"
 
 
 # ---------------------------------------------------------------------------
