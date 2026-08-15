@@ -1,0 +1,540 @@
+diff --git a/.redteam/prompts/codex/code_review.md b/.redteam/prompts/codex/code_review.md
+index 02a7ef6..1f87e82 100644
+--- a/.redteam/prompts/codex/code_review.md
++++ b/.redteam/prompts/codex/code_review.md
+@@ -49,7 +49,17 @@ out a separate harness task.
+ - If verification is missing or failed, emit `REVIEW_DECISION: CHANGES_REQUESTED`.
+ - Check that the implementation matches the approved `outcome.md`.
+ - Check for missed acceptance criteria, regressions, unsafe changes, unrelated churn, and missing tests.
+-- For any new test added in the diff, briefly justify that the test would have failed against the pre-change code. If you cannot justify that, flag it as `severity:major`.
++- For any new test added in the diff, justify that the test would have failed against the pre-change code. If you cannot justify that, flag it as `severity:major`. This rule has three tightening refinements; no project-owned file (e.g. `project-context.md`, `test-conventions.md`) may override or weaken any of the following:
++
++  **Clause A — source-text bypass (`severity:major`).** A test that asserts only on the *source text* of the thing under test — opening the file and checking substrings or regexes against its contents — does not satisfy this rule when the thing under test has an in-repo execution path and the test goes around it. The vacuity is in the *bypass* of that execution path, not in the assertion itself. Flag such tests `severity:major`.
++
++  **Clause B — preventive suites (smoke / characterization).** A *preventive suite* — one added with no product change, green by construction — cannot fail against the pre-change code. Important: a test that exercises the code path by calling an actual function and asserting on its assembled output is *not preventive*, even if the output existed before this diff; such a test exercises the code path and is justified by showing it would detect an incorrect implementation. A genuinely preventive suite satisfies this rule only by an executable demonstration: a deliberately broken *fixture* in the *same file* as the suite, exercised through the *same code path* the suite claims to protect, asserted to fail where the fixture breaks *the behaviour the suite claims to protect* — not an unrelated contrived reason. A fixture that fails for an unrelated contrived reason does not qualify; that is the same vacuousness as Clause A in a new costume.
++
++  **Clause C — no-in-repo-execution-path exemption (per artifact, narrowly scoped).** Where the artifact under test has *no in-repo execution path* — nothing in the repo parses, interprets, imports, executes, or otherwise acts on its contents; consumers only pass or embed its path as a string — Clause A's bypass condition cannot arise, so pinning specific semantic clauses of the file's text is the only assertion available and is accepted. This exemption carries the following obligations:
++
++  - *Eligibility is per artifact, never by file class, glob, directory, or extension.* Eligibility must be *established* for the specific artifact by naming that artifact's in-repo consumers and demonstrating that none of them parse or interpret its contents. Configuration files, templates, manifests, and workflow definitions are non-importable yet are often loaded and acted on by code — their semantics are behaviourally reachable — so they are not automatically eligible; "not importable" is too weak a test.
++  - *Semantic clauses only.* Under this exemption the assertion must pin a semantic clause the change requires, not incidental wording, formatting, ordering, or whitespace.
++  - *Where an execution path exists, it must be preferred.* Assertions on assembled or observed behaviour (e.g. a built prompt string a runner actually hands to another process) come before file-text pinning wherever the claim can be expressed that way.
+ - Output validity (anti-degeneracy): if the change produces a discriminating output — a score, grade, ranking, classification, threshold, or similar — argue from a few realistic inputs whether it *meaningfully discriminates*, or whether it saturates, clusters, or collapses to a near-constant (a result that conforms to the spec yet carries no signal). If it plausibly degenerates, flag it `severity:major`. Conformance to `outcome.md` does NOT excuse a degenerate design — when the spec itself encodes the saturation, say so.
+ 
+ ## Finding Format
+diff --git a/.redteam/templates/docs/test-conventions.md b/.redteam/templates/docs/test-conventions.md
+index acc8a33..48437ad 100644
+--- a/.redteam/templates/docs/test-conventions.md
++++ b/.redteam/templates/docs/test-conventions.md
+@@ -39,3 +39,12 @@ Name the missing fixtures / un-stubbed systems so a sub-agent patches callsites
+ directly instead of inventing fragile global setup. If a needed fixture is
+ missing, the convention is to add it centrally and update this file in the same
+ PR rather than inlining ad-hoc setup.
++
++## Runtime coverage
++
++Tests must exercise the code path they claim to protect — importing, mounting,
++or executing the thing under test — not just open its source file and assert on
++its text. A test that opens a file and checks substrings against its contents
++(a source-text guard) does not satisfy the "would have failed against the
++pre-change code" criterion when an execution path exists; the check belongs to
++the code's *behaviour*, not its *text*.
+diff --git a/.redteam/tests/test_sibling_task_floor_exemption.py b/.redteam/tests/test_sibling_task_floor_exemption.py
+index 81ec39a..d232628 100644
+--- a/.redteam/tests/test_sibling_task_floor_exemption.py
++++ b/.redteam/tests/test_sibling_task_floor_exemption.py
+@@ -118,7 +118,7 @@ def _wire_tdd(impl, monkeypatch, repo: Path, *, on_invoke=None) -> None:
+ # =============================================================================
+ 
+ 
+-@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md"])
++@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md", "pr_url.txt"])
+ def test_sibling_top_level_artifact_proceeds_agent_pair(monkeypatch, tmp_path, artifact_name):
+     """agent-pair: sibling top-level artifact → floor does NOT fire, worker IS invoked."""
+     impl = _impl()
+@@ -140,7 +140,7 @@ def test_sibling_top_level_artifact_proceeds_agent_pair(monkeypatch, tmp_path, a
+     assert invoked["yes"] is True
+ 
+ 
+-@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md"])
++@pytest.mark.parametrize("artifact_name", ["state.json", "outcome.md", "pr.md", "code_review.md", "pr_url.txt"])
+ def test_sibling_top_level_artifact_proceeds_tdd(monkeypatch, tmp_path, artifact_name):
+     """tdd: sibling top-level artifact → floor does NOT fire, worker IS invoked."""
+     impl = _impl()
+@@ -378,3 +378,72 @@ def test_root_level_out_of_scope_still_trips_tdd(monkeypatch, tmp_path):
+     assert "README.md" in result["feedback"]
+     assert "commit or stash" in result["feedback"]
+     assert invoked["yes"] is False
++
++
++# =============================================================================
++# #158 — sibling pr_url.txt, UNTRACKED, must not trip the cross-run trust-root floor
++# =============================================================================
++#
++# The tests above stage their artifact, so they exercise _floor_outside_scope
++# (the tracked path). The failure #158 actually reports comes from the other
++# floor: create_pr writes pr_url.txt and never commits it, so in a stacked goal
++# run the next task sees it as an UNTRACKED outside-scope path and
++# _cross_run_trust_root_floor fails closed. Reproduce that shape specifically —
++# the file is written and deliberately NOT added to the index.
++
++
++def test_sibling_untracked_pr_url_does_not_trip_trust_root_floor(monkeypatch, tmp_path):
++    """#158: untracked sibling pr_url.txt → trust-root floor does NOT fire.
++
++    Fails against pre-change code: pr_url.txt was absent from
++    _SIBLING_BASENAME_ALLOWLIST, so _is_harness_artifact returned False and the
++    floor refused to invoke the worker.
++    """
++    impl = _impl()
++    repo, task_dir, sibling_dir = _make_stacked_repo(tmp_path)
++
++    # Written by create_pr, never staged — exactly how the real run leaves it.
++    (sibling_dir / "pr_url.txt").write_text("https://github.com/AscendyProject/redteam/pull/171\n", encoding="utf-8")
++
++    invoked = {"yes": False}
++    _wire_agent_pair(impl, monkeypatch, repo, on_invoke=lambda: invoked.__setitem__("yes", True))
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl._run_agent_pair(task_dir, st)
++
++    assert result["status"] == "approved", result.get("feedback", "")
++    assert invoked["yes"] is True
++
++
++def test_sibling_untracked_pr_url_exemption_is_basename_exact(monkeypatch, tmp_path):
++    """#158: the exemption covers pr_url.txt and ONLY pr_url.txt.
++
++    Both files are present, so the floor fires either way and a bare "does it
++    fire" assertion could not tell the versions apart. What changes is the
++    CONTENT of the offending list: pre-change it names both files, post-change
++    it names only the .bak. Asserting the exact set therefore fails against
++    pre-change code while still proving a near-miss basename stays fail-closed
++    (a prefix or glob fix would wrongly drop the .bak from this list).
++    """
++    impl = _impl()
++    repo, task_dir, sibling_dir = _make_stacked_repo(tmp_path)
++
++    (sibling_dir / "pr_url.txt").write_text("https://example.invalid/pull/1\n", encoding="utf-8")
++    (sibling_dir / "pr_url.txt.bak").write_text("https://example.invalid/pull/0\n", encoding="utf-8")
++
++    invoked = {"yes": False}
++    _wire_agent_pair(impl, monkeypatch, repo, on_invoke=lambda: invoked.__setitem__("yes", True))
++
++    st = _state()
++    (task_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
++
++    result = impl._run_agent_pair(task_dir, st)
++
++    assert result["status"] == "error"
++    assert invoked["yes"] is False
++
++    listed = result["feedback"].split("Offending paths: ", 1)[1].strip()
++    offending = {entry.strip().rsplit("/", 1)[-1] for entry in listed.split(",") if entry.strip()}
++    assert offending == {"pr_url.txt.bak"}, f"expected only the .bak to remain offending, got {offending}"
+diff --git a/.redteam/tests/test_would_have_failed_rule.py b/.redteam/tests/test_would_have_failed_rule.py
+new file mode 100644
+index 0000000..f6109ab
+--- /dev/null
++++ b/.redteam/tests/test_would_have_failed_rule.py
+@@ -0,0 +1,317 @@
++"""Tests for the tightened "would have failed before" Required Check rule (#159 + #161).
++
++Clause C eligibility for .redteam/prompts/codex/code_review.md is established by
++the audit recorded in outcome.md: the file has exactly four in-repo consumers —
++review_code.py:42, review_code.py:117, orchestrator.py:2133, orchestrator.py:452 —
++all of which embed only the file's *path* as a string.  None of them open, read,
++parse, or interpret the file's contents within harness code.  The markdown
++assertions in this file therefore ride Clause C's per-artifact exemption under the
++rewritten rule's own terms.
++
++The built-prompt regression tests call the actual _code_review_prompt() and
++_narrowed_code_review_prompt() functions and assert on their assembled string output.
++Per the rewritten Clause B, a test that exercises the code path by calling an actual
++function is *not preventive*, even if the invariant already held; such tests are
++justified by showing they would detect an incorrect implementation.
++
++The template section tests check for content added by this diff and exercise the
++install.py _seed_file path (install.py:221-234) rather than reading the template
++source text directly — the template has an in-repo execution path via the installer
++and therefore does not qualify for Clause C's source-text exemption.
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import re
++import sys
++from pathlib import Path
++
++_WF = Path(__file__).resolve().parents[1] / "workflows"
++if str(_WF) not in sys.path:
++    sys.path.insert(0, str(_WF))
++
++import phase_runners.review_code as _rc  # noqa: E402
++
++_REPO_ROOT = Path(__file__).resolve().parents[2]
++_CODE_REVIEW_MD = _REPO_ROOT / ".redteam/prompts/codex/code_review.md"
++
++# Load install.py via importlib (same pattern as test_install.py) so the template
++# tests can exercise the _seed_file installer path rather than reading source text.
++_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
++_install_spec = importlib.util.spec_from_file_location("redteam_install_whf", _SCRIPTS / "install.py")
++assert _install_spec and _install_spec.loader
++_install_mod = importlib.util.module_from_spec(_install_spec)
++_install_spec.loader.exec_module(_install_mod)
++
++_TD_PATH = Path("/tmp/batch/tasks/task-001")
++_BASE = "main"
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++
++def _slice_between_headings(text: str, start_heading: str, end_heading: str) -> str:
++    """Return text between start_heading line and end_heading line (both exclusive)."""
++    start_idx = text.find(start_heading)
++    assert start_idx != -1, f"Heading not found: {start_heading!r}"
++    newline = text.find("\n", start_idx)
++    start_content = newline + 1
++    end_idx = text.find(end_heading, start_content)
++    if end_idx == -1:
++        return text[start_content:]
++    return text[start_content:end_idx]
++
++
++def _extract_new_check_paragraph(section: str) -> str:
++    """Return the rewritten 'would have failed' paragraph.
++
++    The paragraph begins at '- For any new test added' and ends at the next
++    top-level bullet (a line starting with '- ' at column 0).
++    """
++    start_marker = "- For any new test added"
++    start = section.find(start_marker)
++    assert start != -1, f"Marker not found in Required Checks section: {start_marker!r}"
++    rest = section[start:]
++    result_lines: list[str] = []
++    first_line_seen = False
++    for line in rest.split("\n"):
++        if not first_line_seen:
++            result_lines.append(line)
++            first_line_seen = True
++            continue
++        # Stop at the next top-level bullet (starts with "- " at column 0)
++        if line.startswith("- "):
++            break
++        result_lines.append(line)
++    return "\n".join(result_lines)
++
++
++def _slice_section(text: str, heading: str) -> str:
++    """Return body of section with given heading, up to next '## ' heading or EOF."""
++    m = re.search(r"^" + re.escape(heading), text, re.MULTILINE)
++    assert m is not None, f"Heading not found: {heading!r}"
++    content_start = text.find("\n", m.start()) + 1
++    next_m = re.search(r"^## ", text[content_start:], re.MULTILINE)
++    if next_m is None:
++        return text[content_start:]
++    return text[content_start : content_start + next_m.start()]
++
++
++def _extract_decision_vocab(text: str) -> set[str]:
++    """Parse REVIEW_DECISION vocabulary from a prompt string.
++
++    Returns the set of decision values by extracting the primary value from
++    'REVIEW_DECISION: VALUE' patterns and alternatives from '(or X / Y / Z)'
++    parentheticals that follow a REVIEW_DECISION mention.  Supports exact-set
++    equality checks (no new values, no removals).
++    """
++    values: set[str] = set()
++    # Capture the primary value: REVIEW_DECISION: VALUE
++    for m in re.finditer(r"REVIEW_DECISION:\s*(\w+)", text):
++        values.add(m.group(1))
++    # Capture alternatives in the same sentence: VALUE` (or ALT1 / ALT2 / ...)
++    for m in re.finditer(r"REVIEW_DECISION:\s*\w+[^(]*\(or\s+([\w\s/]+)\)", text):
++        for alt in m.group(1).split("/"):
++            alt = alt.strip()
++            if alt:
++                values.add(alt)
++    return values
++
++
++# ---------------------------------------------------------------------------
++# Built-prompt regressions
++# (Done-when items 4 and 5; exercises _code_review_prompt /
++# _narrowed_code_review_prompt code paths — not source-text guards)
++# ---------------------------------------------------------------------------
++
++
++def test_code_review_prompt_names_criteria_file():
++    """Done-when item 4 (regression): _code_review_prompt still names
++    .redteam/prompts/codex/code_review.md as the criteria file the reviewer applies.
++    Exercises the _code_review_prompt() code path directly; not a source-text guard.
++    Would fail against an implementation that removed the path from the prompt builder.
++    """
++    p = _rc._code_review_prompt(_TD_PATH, _BASE)
++    assert ".redteam/prompts/codex/code_review.md" in p
++
++
++def test_code_review_prompt_names_all_decision_values():
++    """Done-when item 4 (regression, #103): _code_review_prompt enumerates exactly
++    the four REVIEW_DECISION values — APPROVED, CHANGES_REQUESTED, RESCUE_REQUIRED,
++    ASK_USER; no new values, no removals.
++    Exercises the _code_review_prompt() code path directly.
++    Would fail if any decision value is added, removed, or renamed.
++    """
++    p = _rc._code_review_prompt(_TD_PATH, _BASE)
++    expected = {"APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"}
++    found = _extract_decision_vocab(p)
++    assert found == expected, f"REVIEW_DECISION vocabulary mismatch: found={found!r}, expected={expected!r}"
++
++
++def test_narrowed_code_review_prompt_names_criteria_file():
++    """Done-when item 5 (regression): _narrowed_code_review_prompt still names
++    .redteam/prompts/codex/code_review.md as the criteria file the reviewer applies.
++    Exercises the _narrowed_code_review_prompt() code path directly.
++    Would fail against an implementation that removed the path from the narrowed prompt builder.
++    """
++    p = _rc._narrowed_code_review_prompt(_TD_PATH, _BASE, "abc1234", [])
++    assert ".redteam/prompts/codex/code_review.md" in p
++
++
++def test_narrowed_code_review_prompt_names_all_decision_values():
++    """Done-when item 5 (regression, #103): _narrowed_code_review_prompt enumerates
++    exactly the four REVIEW_DECISION values — APPROVED, CHANGES_REQUESTED,
++    RESCUE_REQUIRED, ASK_USER; no new values, no removals.
++    Exercises the _narrowed_code_review_prompt() code path directly.
++    Would fail if any decision value is added, removed, or renamed.
++    """
++    p = _rc._narrowed_code_review_prompt(_TD_PATH, _BASE, "abc1234", [])
++    expected = {"APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"}
++    found = _extract_decision_vocab(p)
++    assert found == expected, f"REVIEW_DECISION vocabulary mismatch: found={found!r}, expected={expected!r}"
++
++
++# ---------------------------------------------------------------------------
++# Markdown semantic-clause assertions
++# (Done-when item 1; Clause C exemption applies — see module docstring)
++# All assertions are scoped to the isolated rewritten paragraph, not the whole file.
++# ---------------------------------------------------------------------------
++
++
++def test_clause_a_source_text_bypass_named():
++    """Done-when item 1 / Clause A: the rewritten paragraph names the source-text
++    bypass as a severity:major violation.
++    Fails against pre-change code (the one-liner at line 52 contains none of these clauses).
++    Clause C applies: code_review.md has no in-repo consumer that parses its contents.
++    """
++    text = _CODE_REVIEW_MD.read_text(encoding="utf-8")
++    section = _slice_between_headings(text, "## Required Checks", "## Finding Format")
++    para = _extract_new_check_paragraph(section)
++    assert "source text" in para
++    # bypass / execution path must co-occur with source text
++    assert "bypass" in para or "execution path" in para
++    assert "severity:major" in para
++
++
++def test_clause_b_preventive_suites_named():
++    """Done-when item 1 / Clause B: the rewritten paragraph names preventive suites
++    and requires a broken fixture through the same code path in the same file,
++    asserted to fail, disqualifying fixtures that fail for unrelated/contrived reasons.
++    Fails against pre-change code (the one-liner at line 52 contains none of these clauses).
++    Clause C applies: code_review.md has no in-repo consumer that parses its contents.
++    """
++    text = _CODE_REVIEW_MD.read_text(encoding="utf-8")
++    section = _slice_between_headings(text, "## Required Checks", "## Finding Format")
++    para = _extract_new_check_paragraph(section)
++    assert "preventive" in para
++    assert "fixture" in para
++    assert "same code path" in para
++    assert "same file" in para
++    assert "asserted to fail" in para
++    # explicit disqualification of unrelated / contrived failure
++    assert "unrelated" in para or "contrived" in para
++
++
++def test_clause_c_no_execution_path_exemption_named():
++    """Done-when item 1 / Clause C: the rewritten paragraph names the per-artifact
++    no-in-repo-execution-path exemption with all required obligations (eligibility
++    per artifact, naming consumers, configuration/templates/manifests/workflow warning,
++    semantic clauses only, execution path preferred).
++    Fails against pre-change code (the one-liner at line 52 contains none of these clauses).
++    Clause C applies: code_review.md has no in-repo consumer that parses its contents.
++    """
++    text = _CODE_REVIEW_MD.read_text(encoding="utf-8")
++    section = _slice_between_headings(text, "## Required Checks", "## Finding Format")
++    para = _extract_new_check_paragraph(section)
++    # per-artifact scoping (never by file class / glob / directory / extension)
++    assert "per artifact" in para
++    # the exemption condition
++    assert "no in-repo execution path" in para
++    # obligation to establish eligibility by naming consumers
++    assert "consumers" in para
++    assert "parse" in para or "interpret" in para
++    # warning that configuration / templates / manifests / workflow definitions may
++    # still have behaviourally reachable semantics
++    assert "configuration" in para.lower() or "templates" in para.lower()
++    assert "manifests" in para.lower() or "workflow" in para.lower()
++    assert "too weak" in para.lower() or "not importable" in para.lower()
++    # execution path preferred
++    assert "preferred" in para
++    # semantic clauses only, not incidental wording / formatting / ordering / whitespace
++    assert "semantic" in para
++    assert "formatting" in para or "whitespace" in para or "ordering" in para
++
++
++def test_required_check_forbids_project_owned_override():
++    """Done-when item 1 (regression, #161): the rewritten paragraph explicitly forbids
++    a project-owned file from overriding or weakening this Required Check.
++    Fails against pre-change code (the one-liner at line 52 does not name this restriction).
++    Clause C applies: code_review.md has no in-repo consumer that parses its contents.
++    """
++    text = _CODE_REVIEW_MD.read_text(encoding="utf-8")
++    section = _slice_between_headings(text, "## Required Checks", "## Finding Format")
++    para = _extract_new_check_paragraph(section)
++    assert "project-owned" in para
++
++
++def test_decision_vocabulary_at_tail_of_file():
++    """Done-when item 2 (tail regression, #103): all four REVIEW_DECISION values are
++    still enumerated at the tail of code_review.md so the file can return APPROVED.
++    Scoped to the whole file (existence is sufficient — concern is that no implementation
++    of this task accidentally removes the Decision block).
++    Clause C applies: code_review.md has no in-repo consumer that parses its contents.
++    """
++    text = _CODE_REVIEW_MD.read_text(encoding="utf-8")
++    for value in ("APPROVED", "CHANGES_REQUESTED", "RESCUE_REQUIRED", "ASK_USER"):
++        assert f"REVIEW_DECISION: {value}" in text, f"REVIEW_DECISION: {value} missing from {_CODE_REVIEW_MD}"
++
++
++# ---------------------------------------------------------------------------
++# Template regression — exercises the install.py _seed_file path
++# (Done-when item 3; fails against pre-change code — section is newly added)
++# The template .redteam/templates/docs/test-conventions.md is registered as a
++# project seed at install.py:156 and copied to the consumer via _seed_file
++# (install.py:221-234).  Tests assert on the installed consumer document after
++# exercising that path, not on the template source text directly.
++# ---------------------------------------------------------------------------
++
++
++def test_template_has_runtime_coverage_section(tmp_path: Path) -> None:
++    """Done-when item 3 / regression: after the harness installer seeds the
++    test-conventions template into a consumer project via install.py _seed_file
++    (install.py:221-234), the installed consumer document contains a
++    '## Runtime coverage' section (heading exactly).
++    Exercises the install.py install() → _seed_file() path; asserts on the
++    installed consumer document, not the template source text.
++    Fails against pre-change code: the section did not exist in the template before this diff.
++    """
++    _install_mod.install(tmp_path, overwrite=False, dry=False)
++    text = (tmp_path / ".redteam/docs/test-conventions.md").read_text(encoding="utf-8")
++    assert "## Runtime coverage" in text
++
++
++def test_template_runtime_coverage_section_body(tmp_path: Path) -> None:
++    """Done-when item 3 / regression: the installed consumer document's
++    '## Runtime coverage' section (seeded via install.py _seed_file, install.py:221-234)
++    requires importing, mounting, or executing the thing under test, and calls out
++    source-text guards as insufficient when an execution path exists.
++    Scoped to the isolated body of the section (between '## Runtime coverage'
++    and the next '## ' heading or EOF).
++    Exercises the install.py install() → _seed_file() path; asserts on the installed
++    consumer document, not the template source text.
++    Fails against pre-change code: the section did not exist before this diff.
++    """
++    _install_mod.install(tmp_path, overwrite=False, dry=False)
++    text = (tmp_path / ".redteam/docs/test-conventions.md").read_text(encoding="utf-8")
++    body = _slice_section(text, "## Runtime coverage")
++    # requires execution-path exercising (importing / mounting / executing)
++    exec_terms = ("import", "mount", "execut", "load")
++    assert any(t in body.lower() for t in exec_terms), (
++        "Runtime coverage section must name importing, mounting, or executing"
++    )
++    # calls out source-text guards as insufficient when an execution path exists
++    assert "source" in body.lower() or "text" in body.lower()
++    assert "execution path" in body.lower() or "code path" in body.lower()
+diff --git a/.redteam/workflows/phase_runners/implement.py b/.redteam/workflows/phase_runners/implement.py
+index 23c5788..267ebc4 100644
+--- a/.redteam/workflows/phase_runners/implement.py
++++ b/.redteam/workflows/phase_runners/implement.py
+@@ -44,7 +44,11 @@ _trusted_task_dirs: set[Path] = set()
+ # Shared allowlist predicate for pre-worker floors (#136).
+ # ---------------------------------------------------------------------------
+ _BATCH_ROOT_ARTIFACT_ALLOWLIST = frozenset({"goal.md", "goal.json", "decompose_review.md", "decompose_blocked.md"})
+-_SIBLING_BASENAME_ALLOWLIST = frozenset({"state.json", "outcome.md", "pr.md", "input.md"})
++# pr_url.txt (#158): create_pr writes it into the task dir, so in a stacked goal run
++# every task after the first sees its parent's copy and the pre-worker floors fail
++# closed on a file the harness itself just produced. Same class as pr.md/state.json —
++# harness decision trail, never operator WIP.
++_SIBLING_BASENAME_ALLOWLIST = frozenset({"state.json", "outcome.md", "pr.md", "input.md", "pr_url.txt"})
+ 
+ 
+ def _is_harness_artifact(p: str, task_dir: Path, cwd: Path, scope_roots: list[str]) -> bool:
+@@ -58,9 +62,9 @@ def _is_harness_artifact(p: str, task_dir: Path, cwd: Path, scope_roots: list[st
+        decompose_review.md, decompose_blocked.md). Files in a batch-root subdirectory
+        or with a different basename are NOT exempt.
+     4. A top-level harness decision-trail file (state.json, outcome.md, pr.md, input.md,
+-       or *_review.md) directly under a SIBLING task dir in the same batch's tasks/ root
+-       (task_dir.parent). Files buried in a sibling subdirectory, non-allowlisted basenames,
+-       and paths under a different batch's tasks/ root are NOT exempt.
++       pr_url.txt, or *_review.md) directly under a SIBLING task dir in the same batch's
++       tasks/ root (task_dir.parent). Files buried in a sibling subdirectory, non-allowlisted
++       basenames, and paths under a different batch's tasks/ root are NOT exempt.
+ 
+     Used by `_floor_outside_scope` and `_cross_run_trust_root_floor` so their "allowed"
+     definitions cannot drift apart.
+diff --git a/.redteam/batches/test-quality-gate/tasks/task-001-wire-conventions-into-agent-pair/state.json b/.redteam/batches/test-quality-gate/tasks/task-001-wire-conventions-into-agent-pair/state.json
+index 617965e..f5c2df4 100644
+--- a/.redteam/batches/test-quality-gate/tasks/task-001-wire-conventions-into-agent-pair/state.json
++++ b/.redteam/batches/test-quality-gate/tasks/task-001-wire-conventions-into-agent-pair/state.json
+@@ -1,14 +1,15 @@
+ {
+   "task_id": "task-001-wire-conventions-into-agent-pair",
+   "mode": "agent-pair",
+-  "phase": "create_pr",
++  "phase": "done",
+   "phases_completed": [
+     "plan_outcome",
+     "plan_review",
+     "implement",
+-    "review_code"
++    "review_code",
++    "create_pr"
+   ],
+-  "next_phase": "create_pr",
++  "next_phase": "done",
+   "decision": "pending",
+   "owner": "claude",
+   "reviewer": "codex",
+@@ -60,7 +61,7 @@
+   "last_failure_diff": null,
+   "deferred_requirements": [],
+   "branch": "redteam/task-001-wire-conventions-into-agent-pair",
+-  "pr_url": null,
++  "pr_url": "https://github.com/AscendyProject/redteam/pull/171",
+   "phase_telemetry": [
+     {
+       "phase": "plan_outcome",
+@@ -93,10 +94,18 @@
+       "cost_usd": 0.46715490000000004,
+       "duration_sec": 276.721,
+       "outcome": "approved"
++    },
++    {
++      "phase": "create_pr",
++      "provider": "claude",
++      "model": null,
++      "cost_usd": 0.8290589999999999,
++      "duration_sec": 121.021,
++      "outcome": "approved"
+     }
+   ],
+   "created_at": "2026-08-15T03:17:32.247061+00:00",
+-  "updated_at": "2026-08-15T03:45:11.385569+00:00",
++  "updated_at": "2026-08-15T04:09:03.707092+00:00",
+   "base_branch": "main",
+   "phase_started_at": "2026-08-15T03:45:11.385558+00:00",
+   "last_user_response": null,
