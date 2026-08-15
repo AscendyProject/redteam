@@ -42,7 +42,13 @@ def _orch():
 
 # ---------- shared test fixtures / helpers ----------
 
-_PROJ = SimpleNamespace(source_dirs=["app/"], test_dir="tests/", context_file="docs/ctx.md", base_branch="main")
+_PROJ = SimpleNamespace(
+    source_dirs=["app/"],
+    test_dir="tests/",
+    context_file="docs/ctx.md",
+    base_branch="main",
+    test_conventions_file="docs/test-conventions.md",
+)
 
 
 def _state(**extra: Any) -> dict[str, Any]:

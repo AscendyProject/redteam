@@ -40,7 +40,8 @@ def _code_review_prompt(task_dir: Path, base_branch: str) -> str:
         f"{task_dir}/. Review `git diff {base_branch}...HEAD`. Inputs: {task_dir}/outcome.md, "
         f"{task_dir}/plan_review.md, {task_dir}/impl_diff.patch, and the git diff. Apply the review "
         f"criteria described in .redteam/prompts/codex/code_review.md, the project security checklist "
-        f"at {proj.security_checklist}, and the project hard rules at {proj.context_file}, but DO NOT "
+        f"at {proj.security_checklist}, the project hard rules at {proj.context_file}, and the test "
+        f"conventions at {proj.test_conventions_file}, but DO NOT "
         f"write any files or touch any sentinels — output the ENTIRE review to stdout only. End with a "
         f"final line `REVIEW_DECISION: APPROVED` (or CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), "
         f"with IR-NNN findings above it."
@@ -114,8 +115,9 @@ def _narrowed_code_review_prompt(
         "",
         f"Inputs: {task_dir}/outcome.md, {task_dir}/plan_review.md, {task_dir}/impl_diff.patch. "
         f"Apply the review criteria described in .redteam/prompts/codex/code_review.md, the project "
-        f"security checklist at {proj.security_checklist}, and the project hard rules at "
-        f"{proj.context_file}, but DO NOT write any files or touch any sentinels — output the "
+        f"security checklist at {proj.security_checklist}, the project hard rules at "
+        f"{proj.context_file}, and the test conventions at {proj.test_conventions_file}, but DO NOT "
+        f"write any files or touch any sentinels — output the "
         f"ENTIRE review to stdout only. End with a final line `REVIEW_DECISION: APPROVED` (or "
         f"CHANGES_REQUESTED / RESCUE_REQUIRED / ASK_USER), with IR-NNN findings above it.",
     ]
