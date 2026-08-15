@@ -294,12 +294,14 @@ def extract_metrics(state: dict) -> dict:
 
     telemetry: list[dict] = state.get("phase_telemetry", [])
     review_rounds = sum(1 for e in telemetry if e.get("phase") == "review_code")
-    # rescue_count: NOT derivable today (#172). rescue.py invokes no model, so it
-    # writes no telemetry entry to count; state["rescue_entry_count"] is a budget
-    # counter reset to 0 on convergence, so a completed task always reports 0.
-    # None means "not measured" — a literal 0 here would be indistinguishable from
-    # a real measurement of zero rescues.
-    rescue_count = None
+    # rescue_count: from the durable cumulative counter (#172), NOT from telemetry
+    # (rescue.py invokes no model, so it writes no entry) and NOT from
+    # rescue_entry_count (a budget, zeroed on convergence). Absent key → None:
+    # the state predates the counter, so the value is unmeasured rather than zero.
+    # A state seeded from the current template always carries it, so a task that
+    # simply never rescued correctly reports a measured 0.
+    _rescue_total = state.get("rescue_total_count")
+    rescue_count = int(_rescue_total) if _rescue_total is not None else None
     # retry_count: deterministic sum of the per-phase retry counter (existing field, no new key).
     retry_count = sum(state.get("retries", {}).values())
     # scope_creep_count: floor-trip count from deferred_requirements.

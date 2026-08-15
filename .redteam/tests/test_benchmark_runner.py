@@ -802,3 +802,48 @@ def test_error_fallback_record_reports_rescue_count_unmeasured(tmp_path: Path) -
     assert len(records) == 1
     assert records[0]["outcome"] == "error"
     assert records[0]["rescue_count"] is None
+
+
+def test_rescue_count_comes_from_the_durable_counter_not_the_budget() -> None:
+    """#172: a CONVERGED task must still report the rescues it took.
+
+    rescue_entry_count is a budget and is zeroed on convergence, so reading it
+    would report 0 for exactly the runs that matter. rescue_total_count is never
+    reset, which is what makes the metric survive a successful task.
+    """
+    converged = {
+        "next_phase": "done",
+        "phase_telemetry": [],
+        "rescue_entry_count": 0,  # budget: reset by convergence
+        "rescue_total_count": 2,  # cumulative: what actually happened
+    }
+    assert extract_metrics(converged)["rescue_count"] == 2
+
+
+def test_rescue_count_discriminates_across_realistic_runs() -> None:
+    """The metric must vary with reality, not collapse to a constant.
+
+    Anti-degeneracy: a task that never rescued reports a measured 0, one that
+    rescued twice reports 2, and only a pre-counter state reports None.
+    """
+
+    def _state(**extra):
+        s = {"next_phase": "done", "phase_telemetry": []}
+        s.update(extra)
+        return s
+
+    assert extract_metrics(_state(rescue_total_count=0))["rescue_count"] == 0
+    assert extract_metrics(_state(rescue_total_count=1))["rescue_count"] == 1
+    assert extract_metrics(_state(rescue_total_count=2))["rescue_count"] == 2
+    # No key at all → the state predates the counter, so it is unmeasured.
+    assert extract_metrics(_state())["rescue_count"] is None
+
+
+def test_state_template_seeds_the_durable_rescue_counter() -> None:
+    """A freshly bootstrapped task carries the counter, so "never rescued" is a
+    measured 0 rather than indistinguishable from an old engine."""
+    import json as _json
+
+    template = Path(__file__).resolve().parents[1] / "templates" / "state.template.json"
+    seeded = _json.loads(template.read_text(encoding="utf-8"))
+    assert seeded["rescue_total_count"] == 0

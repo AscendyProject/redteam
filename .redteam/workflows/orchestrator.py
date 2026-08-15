@@ -734,6 +734,11 @@ def _route_to_rescue_or_defer(
     max_retries = int(state.get("max_retries_per_phase", 3))
     count = int(state.get("rescue_entry_count", 0)) + 1
     state["rescue_entry_count"] = count
+    # Cumulative rescue entries, NEVER reset (#172). rescue_entry_count above is a
+    # BUDGET and is zeroed on convergence, so it cannot answer "how many rescues
+    # did this task take" — a converged task always reports 0. The benchmark needs
+    # the total, so it is tracked separately here. Budget semantics are untouched.
+    state["rescue_total_count"] = int(state.get("rescue_total_count", 0)) + 1
     _record_failure(state, result)
     if count > max_retries:
         deferred: list[dict[str, Any]] = state.setdefault("deferred_requirements", [])
