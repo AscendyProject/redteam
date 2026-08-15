@@ -2169,9 +2169,7 @@ def _standalone_review_endpoints(rr: Path, cfg: Any) -> tuple[str, str]:
     return _resolve("HEAD"), _resolve(cfg.project.base_branch)
 
 
-def _standalone_review_header(
-    cfg: Any, provider: str | None, head_sha: str, base_sha: str, head_after: str
-) -> str:
+def _standalone_review_header(cfg: Any, provider: str | None, head_sha: str, base_sha: str, head_after: str) -> str:
     """Provenance header prepended to a standalone review (#166).
 
     A standalone APPROVED asserts strictly less than an in-pipeline one: there is
