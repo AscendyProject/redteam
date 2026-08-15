@@ -2150,7 +2150,28 @@ def _standalone_review_prompt(cfg: Any) -> str:
     )
 
 
-def _standalone_review_header(rr: Path, cfg: Any, provider: str | None) -> str:
+def _standalone_review_endpoints(rr: Path, cfg: Any) -> tuple[str, str]:
+    """Resolve the reviewed range's endpoints to immutable SHAs (#166).
+
+    MUST be called BEFORE the reviewer is invoked. Resolving afterwards would
+    label the verdict with whatever HEAD happens to be when the review returns,
+    which on a long review can be a commit the reviewer never saw — the exact
+    misattribution the header exists to prevent. Branch NAMES are not enough for
+    the same reason: `main...HEAD` cannot be reconstructed once `main` moves.
+    """
+
+    def _resolve(ref: str) -> str:
+        try:
+            return git_rev_parse(ref, rr)
+        except Exception:
+            return "unknown"
+
+    return _resolve("HEAD"), _resolve(cfg.project.base_branch)
+
+
+def _standalone_review_header(
+    cfg: Any, provider: str | None, head_sha: str, base_sha: str, head_after: str
+) -> str:
     """Provenance header prepended to a standalone review (#166).
 
     A standalone APPROVED asserts strictly less than an in-pipeline one: there is
@@ -2166,18 +2187,22 @@ def _standalone_review_header(rr: Path, cfg: Any, provider: str | None) -> str:
     Deliberately contains no `REVIEW_DECISION:` substring, so prepending it cannot
     disturb the last-line decision parse of the persisted artifact.
     """
-    try:
-        head = git_rev_parse("HEAD", rr)
-    except Exception:
-        head = "unknown"
-    return (
-        "<!-- redteam standalone review -->\n"
-        "MODE: standalone (no task artifacts — verification and outcome.md alignment NOT asserted)\n"
-        f"reviewed: {head}\n"
-        f"base: {cfg.project.base_branch}\n"
-        f"reviewer: {provider or 'unknown'}\n"
-        "\n---\n\n"
-    )
+    lines = [
+        "<!-- redteam standalone review -->",
+        "MODE: standalone (no task artifacts — verification and outcome.md alignment NOT asserted)",
+        f"reviewed: {head_sha}",
+        f"base: {cfg.project.base_branch} ({base_sha})",
+        f"reviewer: {provider or 'unknown'}",
+    ]
+    if head_after != head_sha:
+        # The worktree moved under the reviewer. The verdict still describes
+        # head_sha — that is what was read — but it no longer describes what is
+        # checked out, so say so rather than letting it read as current.
+        lines.append(
+            f"WARNING: HEAD moved during the review ({head_sha} → {head_after}); "
+            "this verdict does NOT describe the current worktree."
+        )
+    return "\n".join(lines) + "\n\n---\n\n"
 
 
 def cmd_review(repo: Path | None = None) -> int:
@@ -2236,6 +2261,10 @@ def cmd_review(repo: Path | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # Pin the reviewed range BEFORE dispatch (#166): resolved afterwards, a branch
+    # that moved during a long review would label the verdict with a commit the
+    # reviewer never read.
+    head_sha, base_sha = _standalone_review_endpoints(rr, cfg)
     result = review_with_fallback(
         {},
         role="review_code",
@@ -2245,7 +2274,11 @@ def cmd_review(repo: Path | None = None) -> int:
     )
     # Prepend provenance (#166). result["decision"] was already parsed by the
     # adapter from the untouched reviewer output, so this cannot affect the gate.
-    raw = _standalone_review_header(rr, cfg, result.get("provider_used") or rp) + result["raw"]
+    head_after, _ = _standalone_review_endpoints(rr, cfg)
+    raw = (
+        _standalone_review_header(cfg, result.get("provider_used") or rp, head_sha, base_sha, head_after)
+        + result["raw"]
+    )
     out_path = rr / ".redteam" / "last_review.md"
     try:
         out_path.write_text(raw, encoding="utf-8")
