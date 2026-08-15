@@ -23,3 +23,11 @@ build/
 # surface, not part of the audit trail, so it must not ride into a PR via
 # pr-author's whole-task-dir staging.
 .redteam/batches/**/progress.md
+
+# Standalone `orchestrator review` output (#162): the per-run archive plus the
+# convenience copy. Operator-local audit trail for a command that runs OUTSIDE
+# the task pipeline — reviews of committed work belong in the PR, not the tree.
+# Untracked and unignored, these accumulate on every review and can trip the
+# pre-worker floors on outside-scope paths.
+.redteam/reviews/
+.redteam/last_review.md
