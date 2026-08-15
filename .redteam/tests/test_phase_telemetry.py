@@ -41,16 +41,20 @@ def _make_parsed_json(
     *,
     total_cost_usd: float | None = 1.23,
     duration_ms: int | None = 4500,
-    model: str | None = "claude-sonnet-4-6",
 ) -> dict:
-    """Build a fake `result` event dict as produced by run_claude stream-json."""
+    """Build a fake `result` event dict as produced by run_claude stream-json.
+
+    Deliberately carries NO `model` key (#168): the real CLI reports the model on
+    the `system`/`init` event, not on `result`. The previous version of this
+    helper fabricated one here, which is why the adapter's `parsed_json["model"]`
+    read passed its test while returning None in production. run_claude surfaces
+    the real value as ClaudeRunResult["init_model"].
+    """
     d: dict[str, Any] = {"type": "result", "is_error": False}
     if total_cost_usd is not None:
         d["total_cost_usd"] = total_cost_usd
     if duration_ms is not None:
         d["duration_ms"] = duration_ms
-    if model is not None:
-        d["model"] = model
     return d
 
 
@@ -94,13 +98,14 @@ def test_claude_adapter_invoke_populates_telemetry(monkeypatch):
     """ClaudeWorkerAdapter.invoke returns WorkerRunResult with cost_usd,
     duration_sec (= duration_ms / 1000), model, and provider == 'claude'."""
     _adapters_pkg, _claude_mod = _load_adapter_modules()
-    parsed = _make_parsed_json(total_cost_usd=2.50, duration_ms=3000, model="claude-opus-4-7")
+    parsed = _make_parsed_json(total_cost_usd=2.50, duration_ms=3000)
 
     fake_run_result = {
         "returncode": 0,
         "stdout": "ok",
         "stderr": "",
         "parsed_json": parsed,
+        "init_model": "claude-opus-4-7",  # #168: from the init event, not result
     }
     monkeypatch.setattr(_claude_mod, "run_claude", lambda **kw: fake_run_result)
     monkeypatch.setattr(_claude_mod, "claude_model_for_role", lambda state, role: None)
@@ -178,7 +183,7 @@ def test_plan_outcome_approved_carries_telemetry(monkeypatch, tmp_path):
         "returncode": 0,
         "stdout": "done",
         "stderr": "",
-        "parsed_json": _make_parsed_json(total_cost_usd=0.5, duration_ms=2000, model="claude-test"),
+        "parsed_json": _make_parsed_json(total_cost_usd=0.5, duration_ms=2000),
         "cost_usd": 0.5,
         "duration_sec": 2.0,
         "model": "claude-test",

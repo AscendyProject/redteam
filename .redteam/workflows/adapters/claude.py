@@ -55,7 +55,6 @@ class ClaudeWorkerAdapter:
             )
         cost_usd: float | None = None
         duration_sec: float | None = None
-        model: str | None = None
         try:
             cost_usd = parsed_json.get("total_cost_usd")
         except Exception:
@@ -66,10 +65,10 @@ class ClaudeWorkerAdapter:
                 duration_sec = duration_ms / 1000
         except Exception:
             pass
-        try:
-            model = parsed_json.get("model")
-        except Exception:
-            pass
+        # #168: the model lives on the CLI's `system`/`init` event, never on the
+        # final `result` event that parsed_json holds — reading it from there
+        # always yielded None. run_claude captures it during the stream loop.
+        model = result.get("init_model")
         return WorkerRunResult(
             returncode=result["returncode"],
             stdout=result["stdout"],

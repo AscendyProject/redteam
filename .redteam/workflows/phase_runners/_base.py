@@ -115,6 +115,11 @@ class ClaudeRunResult(TypedDict):
     stdout: str
     stderr: str
     parsed_json: dict | None
+    # Model id from the CLI's `system`/`init` event (#168). The final `result`
+    # event carries no model, so parsed_json can never supply it; it is captured
+    # separately during the stream loop. NotRequired: absent on spawn failure,
+    # where no init event is ever emitted.
+    init_model: NotRequired[str | None]
 
 
 def repo_root() -> Path:
@@ -317,6 +322,7 @@ def run_claude(
 
     raw_lines: list[str] = []
     final_result: dict | None = None
+    init_model: str | None = None
     timed_out = threading.Event()
 
     def _kill_on_timeout() -> None:
@@ -336,6 +342,8 @@ def run_claude(
                 event = _print_stream_event(line, agent)
                 if event is not None and event.get("type") == "result":
                     final_result = event
+                elif event is not None and event.get("type") == "system" and event.get("subtype") == "init":
+                    init_model = event.get("model")
         except Exception as e:
             proc.kill()
             proc.wait(timeout=5)
@@ -344,6 +352,7 @@ def run_claude(
                 stdout="".join(raw_lines),
                 stderr=f"stream read error: {e!r}",
                 parsed_json=final_result,
+                init_model=init_model,
             )
 
         if timed_out.is_set():
@@ -359,6 +368,7 @@ def run_claude(
                 stdout="".join(raw_lines),
                 stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
                 parsed_json=final_result,
+                init_model=init_model,
             )
 
         try:
@@ -376,6 +386,7 @@ def run_claude(
                 stdout="".join(raw_lines),
                 stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
                 parsed_json=final_result,
+                init_model=init_model,
             )
 
         # Re-check: timer may have fired while we were blocked in proc.wait().
@@ -395,6 +406,7 @@ def run_claude(
                 stdout="".join(raw_lines),
                 stderr=f"timeout after {timeout_sec}s\n{stderr_tail[:2000]}",
                 parsed_json=final_result,
+                init_model=init_model,
             )
 
         stderr_output = proc.stderr.read() if proc.stderr else ""
@@ -404,6 +416,7 @@ def run_claude(
             stdout="".join(raw_lines),
             stderr=stderr_output,
             parsed_json=final_result,
+            init_model=init_model,
         )
     finally:
         timer.cancel()
