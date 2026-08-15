@@ -322,3 +322,36 @@ def test_standalone_reviewer_is_given_the_pinned_sha_range(monkeypatch, tmp_path
     assert "base222...head111" in kwargs["prompt"]
     assert "main...HEAD" not in kwargs["prompt"], "a movable ref must not define the reviewed range"
     assert kwargs["target"]["base"] == "base222"
+
+
+def test_standalone_pins_each_endpoint_independently(monkeypatch, tmp_path) -> None:
+    """#166 review IR-001: one endpoint failing must not un-pin the other.
+
+    Realistic case — the configured base branch was renamed, so it cannot be
+    resolved while HEAD can. An all-or-nothing fallback would revert the whole
+    range to movable refs, letting HEAD advance before the reviewer reads it while
+    the header still records the old head_sha.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+
+    def _rev(ref, repo):
+        if ref == "HEAD":
+            return "head111"
+        raise RuntimeError("no such branch")
+
+    monkeypatch.setattr(orch, "git_rev_parse", _rev)
+    rwf = MagicMock(return_value=_result("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", rwf)
+
+    orch.cmd_review(repo=tmp_path)
+
+    _, kwargs = rwf.call_args
+    # The resolvable endpoint stays pinned; only the unresolvable one falls back.
+    assert "main...head111" in kwargs["prompt"]
+    assert "...HEAD" not in kwargs["prompt"]
+
+    saved = (tmp_path / ".redteam" / "last_review.md").read_text(encoding="utf-8")
+    assert "reviewed: head111" in saved
+    assert "base: main (unknown)" in saved  # honest about the one that failed

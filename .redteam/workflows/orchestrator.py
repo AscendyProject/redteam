@@ -2132,7 +2132,13 @@ def _standalone_review_prompt(cfg: Any, base_sha: str = "", head_sha: str = "") 
     # our sampling and the reviewer actually running git, so the range recorded in
     # the provenance header would not be the range read. With SHAs, "what was
     # recorded" and "what was read" are the same object by construction.
-    rng = f"{base_sha}...{head_sha}" if (base_sha and head_sha) else f"{proj.base_branch}...HEAD"
+    # Pinned PER ENDPOINT: an all-or-nothing fallback would discard a SHA that did
+    # resolve. Realistic case — the base branch was renamed, so it fails while HEAD
+    # succeeds; reverting the whole range to movable refs then lets HEAD advance
+    # before the reviewer reads it, while the header still records the old
+    # head_sha. Each endpoint that resolved is used; only the one that did not
+    # falls back, and the header renders that one as "unknown".
+    rng = f"{base_sha or proj.base_branch}...{head_sha or 'HEAD'}"
     return (
         "Act as an adversarial code-security reviewer. Review the changes in "
         f"`git diff {rng}`. Apply the review criteria in "
