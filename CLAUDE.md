@@ -138,10 +138,46 @@ post-commit plan-affected integrity layer. #138 (planner emitting a non-parseabl
 block) is fixed at the skeleton source (#143). Everything is additive and opt-in;
 no breaking changes.
 
+**Post-0.8.0 (on `main`, unreleased).** The #146 **Phase 1 benchmark MVP** is
+landed: `orchestrator benchmark <set-root> [--dry-run]` +
+`benchmark-report <set-root>` over `.redteam/benchmarks/<set>` (#154–#156) — but
+only after a **stacked-merge accident**: #155/#156 were merged into their parent
+branches within 24 seconds of #154, GitHub never retargeted their bases, and the
+runner/report/CLI sat stranded off-main until recovered by #163. (Same trap
+nearly recurred on #174 — after a squash-merge, always verify the child PR's
+base actually retargeted to `main` before merging it.) CI's lint/test toolchain
+is now **pinned** (#164) after an unpinned `pip install ruff` let ruff 0.16 red
+every branch on untouched code. Note the benchmark has **never yet run for
+real** — `.redteam/benchmarks/` doesn't exist; Phase 2 (#146 Pareto/profiles)
+waits on real Phase 1 use. A consumer bug-report wave (vendored v0.4.0) closed
+#144/#149/#165 as already-fixed-upstream and drove the **third autonomous goal
+run** (batch `test-quality-gate`): #171 wires `test_conventions_file` into the
+agent-pair implement/review prompts (#160), and #174 rewrites the "would have
+failed before" Required Check into **Clauses A/B/C** (source-text bypass;
+preventive suites need a deliberately-broken-fixture demonstration; narrow
+per-artifact no-execution-path exemption established by consumer audit) — with
+an explicit rule that no project-owned file may override them. That run also hit
+#158 live (sibling `pr_url.txt` floor false-positive, fixed in #173). A
+review-provenance/telemetry family followed: #175 (telemetry `model` was always
+null — it lives on the CLI's `init` event, not `result`), #176 (reviewer phases
+now emit telemetry; `provider_used` records the model that actually produced a
+review across staging/fallback), #179 (`rescue_total_count` durable counter,
+record **schema v2** — a v1 `rescue_count: 0` is a fabricated zero, excluded
+from aggregation), #177 (standalone review header: mode + pinned
+`<base_sha>...<head_sha>` range handed to the reviewer, removing a TOCTOU), and
+#178 (each standalone review archived to `.redteam/reviews/<ts>-<sha>.md`
+instead of overwriting `last_review.md` — the observability half of #162). #180
+makes the plan-fidelity check **per-item**: reviewers must adjudicate every
+`outcome.md` Done-when item as met/unmet (#133; the one-line version produced
+zero plan findings across ~19 observed rounds). Suite: 850 → 902 tests.
+
 **Roadmap:** goal mode v1 engine + e2e + operator docs are shipped and #92 is
 closed; the autonomous-run pair #136/#137 and the planner fix #138 are merged.
-Remaining open work is the native-diff coupling follow-up (#120), the
-pure-visual-task fit question (#132), and plan-aware review (#133). Floor
+Remaining open work: the #162 **gate half** (reproduce-before-block /
+majority-of-N — a review-gate semantics change; decide on evidence from #178's
+archive, not anecdote), #146 **Phase 2** (after Phase 1 sees real use), the
+native-diff coupling follow-up (#120, self-parked until a native-diff adapter
+exists), and the pure-visual-task fit question (#132, a design discussion). Floor
 exemptions are security boundaries — plan_review first. Goal mode v1 is a **single-parent
 forest** — multi-parent (a task depending on ≥2 others) fails closed and is future
 work; if revived it restarts from a fresh `plan_review`. The reviewer-transport work
