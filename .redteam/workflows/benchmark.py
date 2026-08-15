@@ -194,7 +194,11 @@ class BenchmarkRecord(TypedDict):
     outcome: str  # "done" | "deferred" | "error"
     review_rounds: int
     retry_count: int
-    rescue_count: int
+    # None = not measured, never 0-by-default (#172). The rescue phase invokes no
+    # model — it validates a manually produced rescue_report.md — so it emits no
+    # telemetry to count, and rescue_entry_count is a budget counter reset on
+    # convergence. Recording 0 would render as a measured "no rescues ever".
+    rescue_count: int | None
     scope_creep_count: int  # floor-trip count
     wall_clock_sec: float
     claude_cost_usd: float | None  # None when only Codex-role phases ran
@@ -284,7 +288,12 @@ def extract_metrics(state: dict) -> dict:
 
     telemetry: list[dict] = state.get("phase_telemetry", [])
     review_rounds = sum(1 for e in telemetry if e.get("phase") == "review_code")
-    rescue_count = sum(1 for e in telemetry if e.get("phase") == "rescue")
+    # rescue_count: NOT derivable today (#172). rescue.py invokes no model, so it
+    # writes no telemetry entry to count; state["rescue_entry_count"] is a budget
+    # counter reset to 0 on convergence, so a completed task always reports 0.
+    # None means "not measured" — a literal 0 here would be indistinguishable from
+    # a real measurement of zero rescues.
+    rescue_count = None
     # retry_count: deterministic sum of the per-phase retry counter (existing field, no new key).
     retry_count = sum(state.get("retries", {}).values())
     # scope_creep_count: floor-trip count from deferred_requirements.
@@ -721,7 +730,13 @@ def build_report(config_names: list[str], records: list[dict]) -> str:
         approval = f"{done_count / total * 100:.2f}%"
         avg_rounds = f"{sum(r.get('review_rounds', 0) for r in recs) / total:.2f}"
         retry = f"{sum(r.get('retry_count', 0) for r in recs) / total * 100:.2f}%"
-        rescue = f"{sum(r.get('rescue_count', 0) for r in recs) / total * 100:.2f}%"
+        # None-aware: a rate over unmeasured values would be a fabricated 0.00%.
+        rescue_vals = [r.get("rescue_count") for r in recs]
+        rescue = (
+            f"{sum(v for v in rescue_vals if v is not None) / total * 100:.2f}%"
+            if any(v is not None for v in rescue_vals)
+            else "n/a"
+        )
         scope = f"{sum(r.get('scope_creep_count', 0) for r in recs) / total * 100:.2f}%"
         avg_wall = f"{sum(r.get('wall_clock_sec', 0.0) for r in recs) / total:.2f}"
 

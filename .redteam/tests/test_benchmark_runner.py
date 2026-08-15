@@ -497,7 +497,14 @@ def test_extract_metrics_error_outcome() -> None:
 
 
 def test_extract_metrics_review_rounds_and_rescue_count() -> None:
-    """review_rounds counts review_code entries; rescue_count counts rescue entries."""
+    """review_rounds counts review_code entries; rescue_count is None — not measured.
+
+    Updated for #172: rescue.py invokes no model, so a `rescue` telemetry entry is
+    never written by the engine. Counting them therefore always yielded 0, which
+    is indistinguishable from a real measurement of zero rescues. None says
+    "unmeasured" instead. The synthetic rescue entry below is retained precisely
+    to show the extractor does NOT start counting one if it appears.
+    """
     state = {
         "next_phase": "done",
         "phase_telemetry": [
@@ -512,7 +519,7 @@ def test_extract_metrics_review_rounds_and_rescue_count() -> None:
     }
     m = extract_metrics(state)
     assert m["review_rounds"] == 2
-    assert m["rescue_count"] == 1
+    assert m["rescue_count"] is None
     assert m["retry_count"] == 3  # sum of {implement: 2, review_code: 1}
 
 
@@ -557,11 +564,11 @@ def test_extract_metrics_wall_clock_sec_sums_duration_with_none() -> None:
 
 
 def test_extract_metrics_empty_telemetry() -> None:
-    """Empty phase_telemetry → all phase counts 0; claude_cost_usd=None."""
+    """Empty phase_telemetry → phase counts 0; claude_cost_usd and rescue_count None."""
     state = {"next_phase": "done", "phase_telemetry": []}
     m = extract_metrics(state)
     assert m["review_rounds"] == 0
-    assert m["rescue_count"] == 0
+    assert m["rescue_count"] is None  # unmeasured, not "measured as zero" (#172)
     assert m["retry_count"] == 0
     assert m["wall_clock_sec"] == 0.0
     assert m["claude_cost_usd"] is None

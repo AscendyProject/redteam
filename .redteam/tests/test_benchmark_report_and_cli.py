@@ -439,3 +439,37 @@ def test_usage_constant_documents_dry_run():
     """USAGE constant documents the --dry-run flag for the benchmark subcommand."""
     orch = _orch()
     assert "--dry-run" in orch.USAGE
+
+
+# ---------------------------------------------------------------------------
+# #172 — an unmeasured metric renders n/a, not 0.00%
+# ---------------------------------------------------------------------------
+
+
+def test_rescue_rate_is_na_when_unmeasured_and_scoped_to_that_metric():
+    """#172: rescue_count is None (the engine writes no rescue telemetry), so the
+    rate reads n/a — while every other rate keeps computing.
+
+    0.00% would be worse than a blank: it presents "never measured" as "measured
+    and found to be zero", which nothing in the report contradicts. Same honesty
+    rule the cost column already follows for Codex-only runs.
+
+    The three halves are one claim — the None-handling is correct AND scoped —
+    and are asserted together because only the n/a half differs from pre-change
+    code; the other two are true on both sides and could not discriminate alone.
+    """
+    # 1. Unmeasured → n/a (the new behaviour).
+    report = build_report(["cfg"], [_rec("cfg", "done", rescue_count=None)] * 2)
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "n/a" in rescue_line
+    assert "0.00%" not in rescue_line
+
+    # 2. Not hardcoded: if a real source ever supplies values, the rate computes.
+    report = build_report(["cfg"], [_rec("cfg", "done", rescue_count=1), _rec("cfg", "done", rescue_count=0)])
+    rescue_line = next(ln for ln in report.splitlines() if "Rescue rate" in ln)
+    assert "50.00%" in rescue_line
+
+    # 3. Scoped: the neighbouring rates are untouched by the None handling.
+    report = build_report(["cfg"], [_rec("cfg", "done", retry_count=1, scope_creep_count=1), _rec("cfg", "done")])
+    assert "50.00%" in next(ln for ln in report.splitlines() if "Retry rate" in ln)
+    assert "50.00%" in next(ln for ln in report.splitlines() if "Scope-creep rate" in ln)
