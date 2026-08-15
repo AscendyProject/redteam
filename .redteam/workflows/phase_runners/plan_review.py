@@ -45,8 +45,9 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     # and ReviewResult carries no model id. duration_sec is left None to match
     # review_code, where the D4 contract forbids clock reads with ceilings
     # unconfigured; timing both is a separate, deliberate change.
-    # provider is the CONFIGURED reviewer; if a fallback produced the result that
-    # provenance lives in `fallback_audit`, not here.
+    # provider is the provider that ACTUALLY produced the result — an automatic
+    # fallback runs a different provider than the configured primary, and labelling
+    # it with the primary would record a wrong provider.
     _tele: dict[str, Any] = {}
     if adapter is not None and not manual_required:
         result = review_with_fallback(
@@ -60,7 +61,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             cost_usd=None,
             duration_sec=None,
             model=None,
-            provider=reviewer_provider(state),
+            provider=result.get("provider_used") or reviewer_provider(state),
         )
         # The reviewer (primary or fallback) failed infra → block for a manual
         # review. The audit is NOT persisted as plan_review.md (it is not a review).

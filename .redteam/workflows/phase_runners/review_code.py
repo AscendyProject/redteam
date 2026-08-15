@@ -301,27 +301,32 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             finally:
                 # Accrue wall-clock time immediately after the dispatch returns
                 # (or raises), regardless of the reviewer's verdict (D3).
-                # Telemetry (#172): a reviewer model IS invoked on this path, so the
-                # phase must appear in phase_telemetry — otherwise metrics that count
-                # review_code entries (benchmark review_rounds) read a real review
-                # loop as zero. Every value a reviewer transport cannot report stays
-                # None rather than being invented:
-                #   cost_usd  — codex exec is stdout-only, no cost is emitted
-                #   model     — ReviewResult carries no model id
-                #   duration_sec — measurable in principle, but the D4 contract keeps
-                #     this runner free of time.monotonic() reads when review_ceilings
-                #     is unconfigured (test_review_code_hard_ceilings guards it), so
-                #     timing it here is a separate, deliberate change.
-                _tele = dict(
-                    cost_usd=None,
-                    duration_sec=None,
-                    model=None,
-                    provider=reviewer_provider(state),
-                )
                 if _wc_t0 is not None:
                     state["review_code_wall_clock_sec"] = float(state.get("review_code_wall_clock_sec") or 0.0) + (
                         time.monotonic() - _wc_t0
                     )
+
+            # Telemetry (#172): a reviewer model IS invoked on this path, so the
+            # phase must appear in phase_telemetry — otherwise metrics that count
+            # review_code entries (benchmark review_rounds) read a real review loop
+            # as zero. Built here rather than in the finally above, where `result`
+            # is not yet bound if the dispatch raised. Values a reviewer transport
+            # cannot report stay None rather than being invented:
+            #   cost_usd — codex exec is stdout-only, no cost is emitted
+            #   model    — ReviewResult carries no model id
+            #   duration_sec — measurable in principle, but the D4 contract keeps
+            #     this runner free of time.monotonic() reads when review_ceilings is
+            #     unconfigured (test_review_code_hard_ceilings guards it), so timing
+            #     it here is a separate, deliberate change.
+            # provider is the provider that ACTUALLY produced this result: a staged
+            # first-pass round and an automatic fallback both differ from the
+            # configured primary, and recording the primary would be a wrong label.
+            _tele = dict(
+                cost_usd=None,
+                duration_sec=None,
+                model=None,
+                provider=result.get("provider_used") or reviewer_provider(state),
+            )
 
             review_text = result["raw"]
             if result["parse_status"] != MANUAL_REQUIRED:
@@ -349,6 +354,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
                     log=f"{feedback}\n\n{review_text}",
                     diff=diff,
                     ceiling_hit="max_wall_clock_sec",
+                    **_tele,
                 )
             if result["parse_status"] == MANUAL_REQUIRED:
                 return PhaseResult(
@@ -442,7 +448,7 @@ def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
             f"returncode={result['returncode']}\n"
             f"stderr (truncated):\n{result['stderr'][:2000]}"
         )
-        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff)
+        return PhaseResult(status="error", feedback=feedback, log=feedback, diff=diff, **_tdd_tele)
 
     decision = parse_review_decision(review_text)
     if decision == "APPROVED":

@@ -888,3 +888,116 @@ def test_manual_plan_review_still_emits_no_telemetry(tmp_path):
 
     assert result["status"] == "approved"
     assert "provider" not in result
+
+
+# ---------------------------------------------------------------------------
+# 9. #172 review IR-001 / IR-002 — post-invocation error paths and attribution
+# ---------------------------------------------------------------------------
+
+
+def _rc_patches(tmp_path, rwf_return, *, fp_return=None):
+    from unittest.mock import MagicMock, patch
+
+    stack = [
+        patch("phase_runners.review_code.get_reviewer_adapter", return_value=MagicMock()),
+        patch("phase_runners.review_code.review_with_fallback", return_value=rwf_return),
+        patch("phase_runners.review_code.compute_repo_diff", return_value=""),
+        patch("phase_runners.review_code.repo_root", return_value=tmp_path),
+        patch("phase_runners.review_code.git_rev_parse", return_value="deadbeef"),
+        patch("phase_runners.review_code._is_ancestor", return_value=False),
+        patch("phase_runners.review_code._incremental_diff_nonempty", return_value=False),
+    ]
+    if fp_return is not None:
+        stack.append(patch("phase_runners.review_code.review_with_fallback_for_provider", return_value=fp_return))
+    return stack
+
+
+def _rc_state(**extra):
+    s = {
+        "mode": "agent-pair",
+        "base_branch": "main",
+        "models": {"implementer": "claude-sonnet-4-6", "reviewer": "codex"},
+        "review_items": [],
+    }
+    s.update(extra)
+    return s
+
+
+def test_review_code_ceiling_abort_after_dispatch_still_records(tmp_path):
+    """IR-001: the POST-dispatch wall-clock ceiling return happens AFTER a reviewer
+    ran, so it must still record the round. Otherwise a ceiling-aborted review
+    vanishes from telemetry and review_rounds under-counts.
+
+    Distinct from the PRE-dispatch skip, which correctly records nothing because no
+    reviewer was invoked. The monotonic sequence forces accrual past the ceiling
+    during the dispatch, which is what selects the post-dispatch branch.
+    """
+    import contextlib
+    from unittest.mock import patch
+
+    import phase_runners.review_code as review_code
+
+    (tmp_path / ".redteam").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".redteam" / "config.toml").write_text(
+        "[models]\nreviewer = 'codex'\n\n[models.review_ceilings]\nmax_wall_clock_sec = 10\n",
+        encoding="utf-8",
+    )
+    # Start just below; t0=0.0 → t1=5.0 accrues 5.0, total 14.0 >= 10.
+    state = _rc_state(review_code_wall_clock_sec=9.0)
+    seq = iter([0.0, 5.0])
+    with contextlib.ExitStack() as st:
+        for p in _rc_patches(tmp_path, _ok_review("CHANGES_REQUESTED")):
+            st.enter_context(p)
+        mock_time = st.enter_context(patch("phase_runners.review_code.time"))
+        mock_time.monotonic = lambda: next(seq)
+        result = review_code.run(tmp_path, state)
+
+    assert result.get("ceiling_hit") == "max_wall_clock_sec"
+    assert result["provider"] == "codex", "a reviewer ran; the round must still be recorded"
+
+
+def test_review_code_staged_first_pass_records_the_provider_that_ran(tmp_path):
+    """IR-002: a non-APPROVED first-pass result is returned as-is, so telemetry must
+    name the FIRST-PASS provider, not the configured frontier one."""
+    import contextlib
+
+    import phase_runners.review_code as review_code
+
+    (tmp_path / ".redteam").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".redteam" / "config.toml").write_text(
+        "[models]\nreviewer = 'codex'\n\n[models.review_stages]\nfirst_pass_reviewer = 'claude'\nescalate_after = 5\n",
+        encoding="utf-8",
+    )
+    fp = dict(_ok_review("CHANGES_REQUESTED"))
+    fp["provider_used"] = "claude"  # set by the adapter layer for the actual runner
+    state = _rc_state(implement_round_count=1)
+    with contextlib.ExitStack() as st:
+        for p in _rc_patches(tmp_path, _ok_review("APPROVED"), fp_return=fp):
+            st.enter_context(p)
+        result = review_code.run(tmp_path, state)
+
+    assert result["status"] == "changes_requested"
+    assert result["provider"] == "claude", "first-pass round must not be labelled with the frontier provider"
+
+
+def test_fallback_result_reports_the_fallback_provider(tmp_path):
+    """IR-002: when an automatic fallback produced the review, provider_used names
+    the fallback — attributing it to the configured primary records a wrong label."""
+    import contextlib
+
+    import phase_runners.plan_review as plan_review
+
+    (tmp_path / "outcome.md").write_text("x\n", encoding="utf-8")
+    fb = dict(_ok_review("APPROVED"))
+    fb["fallback_audit"] = "primary 'codex' failed. Fell back to 'claude'."
+    fb["provider_used"] = "claude"
+    from unittest.mock import MagicMock, patch
+
+    with contextlib.ExitStack() as st:
+        st.enter_context(patch("phase_runners.plan_review.get_reviewer_adapter", return_value=MagicMock()))
+        st.enter_context(patch("phase_runners.plan_review.review_with_fallback", return_value=fb))
+        st.enter_context(patch("phase_runners.plan_review.compute_repo_diff", return_value=""))
+        st.enter_context(patch("phase_runners.plan_review.repo_root", return_value=tmp_path))
+        result = plan_review.run(tmp_path, {"mode": "agent-pair", "models": {"reviewer": "codex"}})
+
+    assert result["provider"] == "claude"
