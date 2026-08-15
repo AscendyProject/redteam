@@ -1,0 +1,14 @@
+{
+  "goal": "Make test quality enforceable in agent-pair mode by wiring test_conventions_file into implement/review_code and tightening the Required Check that reviews new tests, without weakening the gate.",
+  "ceilings": {
+    "max_tasks": 2
+  },
+  "tasks": {
+    "task-001-wire-conventions-into-agent-pair": {
+      "depends_on": []
+    },
+    "task-002-tighten-would-have-failed-rule": {
+      "depends_on": ["task-001-wire-conventions-into-agent-pair"]
+    }
+  }
+}
