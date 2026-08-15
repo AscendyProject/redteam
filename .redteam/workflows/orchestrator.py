@@ -2262,6 +2262,17 @@ def _persist_standalone_review(rr: Path, raw: str, head_sha: str) -> str:
                     fh.write(raw)
             except FileExistsError:
                 continue
+            except OSError:
+                # The exclusive create succeeded but the write did not — a disk or
+                # quota failure can leave a TRUNCATED file sitting at the
+                # authoritative archive name, where it would later read as a
+                # complete audit record. Remove it: a missing archive is honest,
+                # a half one is not.
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                raise
             written = candidate
             break
     except OSError:

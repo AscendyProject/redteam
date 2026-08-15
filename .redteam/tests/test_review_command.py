@@ -487,3 +487,59 @@ def test_archive_name_is_reserved_atomically_against_a_racing_process(monkeypatc
     others = [p for p in reviews.glob("*.md") if p != taken]
     assert len(others) == 1
     assert "REVIEW_DECISION: APPROVED" in others[0].read_text(encoding="utf-8")
+
+
+def test_a_failed_write_leaves_no_truncated_archive(monkeypatch, tmp_path) -> None:
+    """#162 review IR-001: a partial write must not survive at the archive name.
+
+    The exclusive create can succeed and the WRITE still fail — disk or quota
+    exhaustion — leaving a truncated file at the authoritative filename where it
+    would later read as a completed audit record. A missing archive is honest; a
+    half one is not. The earlier failure test only broke mkdir, so it never
+    reached this path.
+    """
+    orch = _load_orchestrator_module()
+    (tmp_path / ".redteam").mkdir()
+    monkeypatch.setattr(orch, "git_rev_parse", lambda ref, repo: "head1234")
+    monkeypatch.setattr(orch, "get_reviewer_adapter", lambda state: _fake_adapter("APPROVED"))
+    monkeypatch.setattr(orch, "review_with_fallback", MagicMock(return_value=_result("APPROVED")))
+
+    real_open = orch.Path.open
+
+    class _PartialWriter:
+        """Creates the file for real, then fails mid-write."""
+
+        def __init__(self, fh):
+            self._fh = fh
+
+        def write(self, data):
+            self._fh.write(data[: len(data) // 2])  # a partial record lands on disk
+            raise OSError("no space left on device")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+            return False
+
+    def _open(self, mode="r", *a, **kw):
+        fh = real_open(self, mode, *a, **kw)
+        if "x" in mode and self.suffix == ".md":
+            return _PartialWriter(fh)
+        return fh
+
+    monkeypatch.setattr(orch.Path, "open", _open)
+
+    rc = orch.cmd_review(repo=tmp_path)
+
+    assert rc == 0, "a persistence failure must not turn a completed review into a failure"
+    leftovers = list((tmp_path / ".redteam" / "reviews").glob("*.md"))
+    assert leftovers == [], f"a truncated archive survived: {leftovers}"
+
+    # Contrast: with writes working, a run DOES archive. Asserted here because
+    # "no .md files" is trivially true where no archive feature exists at all, so
+    # the cleanup half cannot discriminate on its own.
+    monkeypatch.setattr(orch.Path, "open", real_open)
+    assert orch.cmd_review(repo=tmp_path) == 0
+    assert len(list((tmp_path / ".redteam" / "reviews").glob("*.md"))) == 1
