@@ -331,3 +331,55 @@ def test_genuine_review_text_cannot_spoof_fallback_audit(monkeypatch, tmp_path):
 
     st = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert st.get("review_audit", []) == []  # spoofed marker did not create an audit entry
+
+
+# ---- provider attribution through the ladder (#172) ----
+
+
+def test_provider_used_names_the_primary_on_success(monkeypatch):
+    """A successful primary is attributed to the configured reviewer."""
+    primary = _fake("APPROVED")
+    monkeypatch.setattr(adapters, "get_reviewer_adapter", lambda s: primary)
+    r = _run(_state(reviewer="codex"))
+    assert r["provider_used"] == "codex"
+
+
+def test_provider_used_names_the_fallback_when_it_produced_the_result(monkeypatch):
+    """A trusted fallback result is attributed to the fallback, not the primary."""
+    primary = _fake("MISSING", parse_status="error", raw="primary down")
+    fb = _fake("APPROVED", raw="REVIEW_DECISION: APPROVED", name="codex")
+    monkeypatch.setattr(adapters, "get_reviewer_adapter", lambda s: primary)
+    monkeypatch.setattr(adapters, "_REVIEWER_ADAPTERS", {"codex": lambda: fb, "claude": lambda: fb})
+    r = _run(_state(implementer="claude-sonnet-4-6", reviewer="claude", fallback="codex"))
+    assert r["provider_used"] == "codex"
+
+
+def test_provider_used_distinguishes_fallback_ran_from_fallback_refused(monkeypatch):
+    """Attribution tracks whether the fallback actually RAN.
+
+    Exhausted ladder: the primary fails, the fallback runs and also fails. The
+    last model actually invoked is the fallback, so attributing the
+    manual_required result to the configured primary would name a provider that
+    is not responsible for it and would corrupt provider-level failure metrics.
+
+    Both halves are asserted in one test on purpose: the refused half alone is
+    unchanged behaviour (nothing was attributed before this change either), so it
+    cannot stand as its own regression test. Paired with the ran half — which is
+    new — the whole discriminates while still pinning that a fallback rejected
+    BEFORE invocation must not be attributed.
+    """
+    primary = _fake("MISSING", parse_status="error", raw="codex infra error")
+    fb_ran = _fake("MISSING", parse_status="unparseable", raw="garbage", name="claude")
+    monkeypatch.setattr(adapters, "get_reviewer_adapter", lambda s: primary)
+    monkeypatch.setattr(adapters, "_REVIEWER_ADAPTERS", {"codex": lambda: fb_ran, "claude": lambda: fb_ran})
+    ran = _run(_state(implementer="codex", reviewer="codex", fallback="claude"))
+
+    # Refused before running (self-review guard) → no attribution, so the caller
+    # correctly defaults to the configured primary.
+    fb_refused = _fake("APPROVED")
+    monkeypatch.setattr(adapters, "_REVIEWER_ADAPTERS", {"codex": lambda: fb_refused, "claude": lambda: fb_refused})
+    refused = _run(_state(implementer="claude-sonnet-4-6", reviewer="codex", fallback="claude"))
+
+    assert ran["parse_status"] == adapters.MANUAL_REQUIRED
+    assert fb_ran.review.called and ran["provider_used"] == "claude"
+    assert not fb_refused.review.called and "provider_used" not in refused
