@@ -7,6 +7,167 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-16
+
+This release ships the **#146 Phase 1 benchmark MVP** and is otherwise dominated
+by a **downstream bug-report wave** that turned into a sustained pass over
+review-artifact honesty. A vendored consumer on 0.4.0 filed seven issues; three
+were already fixed upstream and closed as such, and the remaining four exposed
+real gaps in what the harness records about its own reviews — which model
+produced a verdict, which commit it judged, whether a metric was measured at all.
+The third autonomous `/redteam:goal` run (batch `test-quality-gate`) shipped the
+test-quality half. Everything is additive except the benchmark record schema
+(v1 → v2), which has no deployed data to migrate.
+
+### Added
+- **#146 Phase 1 benchmark MVP (#148, #150, #154, #163).** `orchestrator
+  benchmark <set-root> [--dry-run]` and `orchestrator benchmark-report
+  <set-root>` run named model-combination configs from
+  `.redteam/benchmarks/<set>/benchmark.toml` over a task set, append
+  deterministic records to `results.jsonl`, and print a side-by-side markdown
+  diff. Deterministic metrics only — sample size, approval rate, review rounds,
+  retry/rescue/scope-creep, wall-clock, Claude cost per approved task. **No
+  Pareto frontier, no single "score", no recommended winner**: the report is a
+  tradeoff table an operator reads, per the accepted MVP-first design
+  (`docs/decisions/2026-07-13-benchmark-design.md`). Runs are isolated
+  (subprocess + repo tempcopy, `create_pr` neutralised, no `origin` remote),
+  resumable, and budget-fenced. Phase 0 (#150) persists per-phase
+  model/cost/duration/outcome to `state["phase_telemetry"]`. Cost honesty is
+  structural: the Codex transport is stdout-only, so Codex-role phases record
+  `null`, never an estimate. Phase 2 (Pareto, `recommend-models --profile`,
+  LLM-judge scorers) remains deferred — #146 stays open for it.
+- **Standalone reviews declare their mode and pin their range (#166, #177).**
+  `orchestrator review` prepends a harness-emitted provenance header naming the
+  mode, the reviewed commit, the base, and the reviewer. A standalone verdict
+  asserts strictly less than an in-pipeline one — #103 suspends the
+  verification and `outcome.md` Required Checks because no task directory
+  exists — yet both rendered identically while the exit code can gate CI. The
+  reviewer is now handed an immutable `<base_sha>...<head_sha>` range rather
+  than `main...HEAD`, so the range recorded and the range read are the same
+  object; movable refs left a window in which a branch could advance between
+  sampling and the reviewer invoking git. Endpoints are pinned independently,
+  and a HEAD that moves mid-review is reported rather than silently
+  re-attributed.
+- **Each standalone review is archived (#162, #178).** Reviews are written to
+  `.redteam/reviews/<utc-ts>-<short-sha>.md`, with `last_review.md` kept as a
+  copy. Previously every run overwrote a single file, so an operator saw one
+  verdict with no way to know it was one of several — which is what made the
+  reported run-to-run variance invisible. Repeated reviews of the *same* commit
+  now sit side by side; the archive name is reserved by exclusive create, and a
+  failed write removes its partial file rather than leaving a truncated record
+  at the authoritative name. This is #162's **observability half only**; the
+  gate change it also proposes (reproduce-before-block, or majority-of-N) is
+  deliberately not attempted — it alters review-gate semantics and multiplies
+  reviewer cost, and should be decided on recorded evidence rather than a single
+  anecdote. #162 stays open for that.
+
+### Changed
+- **The "would have failed before" Required Check is tightened in both
+  directions (#159, #161, #174).** The rule was simultaneously too weak and too
+  strong: a *source-text guard* (read the file, assert a substring) satisfied it
+  trivially while never executing the module — a consumer shipped a component
+  that never mounted with three such tests green — and a *preventive suite*
+  (smoke/characterization, green by construction) could never satisfy it,
+  leaving deletion or gate-override as the only exits. It now has three named
+  clauses: **A** flags source-text assertions that bypass an available execution
+  path (the vacuity is the bypass, not the assertion); **B** gives preventive
+  suites a *stricter* criterion — an executable demonstration via a deliberately
+  broken fixture, in the same file, through the same code path, breaking the
+  behaviour the suite claims to protect; **C** is a narrow per-artifact
+  exemption for artifacts with no in-repo execution path, established by naming
+  that artifact's consumers, never by file class or glob. No project-owned file
+  may override any clause — a consumer's attempt to encode the exception in
+  `project-context.md` was correctly refused by the reviewer, which is why this
+  had to be fixed in the harness.
+- **Plan fidelity is verified per item (#133, #180).** The reviewer was already
+  given `outcome.md` and already told to check the implementation against it,
+  but the one-line instruction produced no Done-when findings across ~19
+  observed review rounds. It now demands the shape reviewers demonstrably
+  comply with elsewhere in the same prompt: locate the Done-when list,
+  adjudicate **each item** on its own line as met or unmet, flag an unmet item
+  `severity:major`, and when no list exists say so and judge against the Goal
+  rather than skipping silently. Task-scoped — the standalone suspension is
+  untouched and regression-tested.
+- **Reviewer phases now emit telemetry (#172, #176).** `review_code` and
+  `plan_review` invoke a model but wrote no `phase_telemetry` entry, so the
+  benchmark's `review_rounds` was structurally always 0 — a task re-dispatched
+  twice on reviewer feedback still reported zero rounds. The materialization
+  sentinel is broadened from "a worker was invoked" to "a model was invoked".
+  Attribution matters more than the count: a new structured `provider_used`
+  records the provider that **actually produced** the result, since a staged
+  first-pass, an automatic fallback, and an exhausted fallback each run someone
+  other than the configured reviewer. Values a reviewer transport cannot report
+  stay `null`. `rescue` is unchanged and still emits nothing — it invokes no
+  model, it validates a manually produced report.
+- **Benchmark record schema is v2 (#172, #179).** `rescue_count` is nullable and
+  sourced from a new durable `rescue_total_count`, incremented only past the
+  rescue ceiling check so a refused terminal attempt is not counted;
+  `rescue_entry_count` keeps its exact budget semantics (it bounds the #87
+  runaway) and is untouched. A v1 record's `rescue_count: 0` was a *fabricated*
+  zero — the old extractor counted `rescue` telemetry the engine never writes —
+  so v1 values are excluded from both numerator and denominator, and the rate
+  divides by measured records only. No deployed data needs migrating: the
+  benchmark had not yet been run for real when this shipped.
+- **`test_conventions_file` reaches agent-pair mode (#160, #171).** The project's
+  test conventions were injected only into `write_test.py` / `verify_test.py`,
+  both TDD-only phases that agent-pair skips — so in the default mode, where the
+  implementer writes the tests, the document was dead config and the reviewer
+  had nothing to judge tests against. Now injected into `implement.py` and
+  `review_code.py`; TDD injection is unchanged and regression-tested.
+- **CI pins the lint/test toolchain (#164).** `pip install ruff pytest` resolved
+  to whatever had shipped to PyPI at job time, so ruff 0.16 turned `main` red
+  with 158 findings in untouched files while pinned local venvs stayed green —
+  the gate's verdict was decided outside version control. `ruff` and `pytest`
+  are pinned in `ci.yml` and pyproject's `dev` extra; bump them deliberately.
+
+### Fixed
+- **A sibling task's `pr_url.txt` no longer trips the pre-worker floors (#158,
+  #173).** `create_pr` writes it and never commits it, so in a stacked goal run
+  every task after the first saw its parent's copy as an untracked outside-scope
+  path and `_cross_run_trust_root_floor` failed closed **before the worker ran** —
+  on a file the harness itself had just produced. Observed twice, including a
+  task deferred after `plan_review` had already approved it. The basename joins
+  `_SIBLING_BASENAME_ALLOWLIST` next to `pr.md`/`state.json`; every structural
+  guard is unchanged (exact basename, top level of a sibling dir, same batch's
+  `tasks/` root), and both floors share one predicate so they cannot drift.
+- **`phase_telemetry` records the model (#168, #175).** `model` was `null` on
+  every entry ever written, for both providers, while `cost_usd` and
+  `duration_sec` from the same object were populated. The value lives on the
+  Claude CLI's `system`/`init` event — the one that prints `init (model=…)` — but
+  `run_claude` retained only the final `result` event, which carries no model.
+  It is now captured during the stream and surfaced as `init_model`. The unit
+  test could not have caught this: its fixture fabricated the key on a `result`
+  dict, so the adapter was asserted to forward a field production never emits.
+- **Codex review no longer falls back to manual under the read-only sandbox
+  (#144, #147).** The review prompts instructed writing the review file and a
+  `.done` sentinel, which the read-only adapter forbids, so Codex burned turns
+  on blocked writes until the adapter timed out into `reviewer_fallback`.
+  `## Output` is now channel-aware: the headless path outputs to stdout only,
+  the manual path keeps the file instructions. Raw `codex exec` stderr remains
+  deliberately unexposed (IR-002 — it can carry credentials).
+- **`_plan_affected_files` parses the standard Affected-files bullet (#149,
+  #151).** The parser stripped a backtick *run*, so `` - `path` — reason ``
+  yielded `` path` — reason `` and a legitimately plan-declared path was not
+  exempted, tripping the floor. It now extracts the first backtick span and
+  discards trailing prose; bare paths are cut at the first separator.
+- **A verification command missing from PATH fails closed legibly (#152,
+  #153).** A command that passed the allowlist but was not resolvable raised a
+  raw `FileNotFoundError` that the batch driver reported as an opaque
+  `error: FileNotFoundError`. It now returns a non-zero code naming the command
+  and pointing at the project verify wrapper.
+
+### Notes
+- **Stacked-merge hazard, observed.** #155/#156 were merged into their parent
+  branches rather than `main` — all three Phase 1 PRs merged inside 24 seconds,
+  so GitHub never retargeted the stacked bases — and the runner, report and CLI
+  sat stranded off `main` until #163 recovered them. After squash-merging a
+  parent, **verify the child PR's base actually retargeted to `main` before
+  merging it**; the trap nearly recurred on #174 in the same session.
+- Consumer issues #144, #149 and #165 were filed against a vendored 0.4.0 tree
+  and were already fixed upstream. A vendored `.redteam/` is a copy: it updates
+  only when `install.py` is re-run. `install.py --check` reports the vendored
+  version.
+
 ## [0.8.0] - 2026-07-07
 
 This release is dominated by **goal mode becoming autonomous and then proving
@@ -403,7 +564,8 @@ Initial public release: the standalone, Apache-2.0 redteam harness extracted fro
 its origin monorepo — stdlib-only engine, prompts, agent skeletons, installer, and
 Claude Code plugin packaging, with tier-aware routing (#13).
 
-[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/AscendyProject/redteam/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/AscendyProject/redteam/compare/v0.8.0...v0.9.0
 [0.5.1]: https://github.com/AscendyProject/redteam/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AscendyProject/redteam/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AscendyProject/redteam/compare/v0.3.0...v0.4.0
