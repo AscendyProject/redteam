@@ -46,8 +46,26 @@ if TYPE_CHECKING:
 # Config constants
 # ---------------------------------------------------------------------------
 
-_KNOWN_TOP_LEVEL = frozenset({"repetitions", "budget_usd", "configs"})
+_KNOWN_TOP_LEVEL = frozenset({"repetitions", "budget_usd", "configs", "copy_exclude"})
 _KNOWN_ROLES = frozenset({"planner", "implementer", "reviewer", "rescue"})
+
+# Snapshot exclusions for run_one's copytree, split by whether a set may override them.
+#
+# Mandatory — never overridable, because dropping one breaks isolation or correctness:
+#   .git          the tempcopy is `git init`'d fresh on 'main'; real history would hand
+#                 the pre-implement floors a trust root from the operator's own repo.
+#   batches       the run seeds its own batch; real batch state would be re-entered.
+#   results{,.jsonl}  the run writes its own records.
+_MANDATORY_COPY_EXCLUDE = (".git", "batches", "results", "results.jsonl")
+
+# Default — size optimizations a set MAY override via `copy_exclude` in benchmark.toml.
+# Excluding `venv`/`.venv` silently breaks a verify_command that depends on a
+# project-local virtualenv: the tools are not on PATH in the tempcopy, so every
+# verification exec fails with 127 and the task churns to `deferred` at full cost
+# while its metrics describe a broken environment rather than a model combination
+# (#185). These names are also Python-stack fingerprints, which belong in
+# project-owned config rather than the engine.
+DEFAULT_COPY_EXCLUDE = ("venv", ".venv", "__pycache__", "*.egg-info")
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +90,18 @@ class BenchmarkSet:
         configs:     Ordered mapping of config-name → {role: model-id} overrides.
                      Declaration order from benchmark.toml is preserved.
         task_ids:    Sorted tuple of task ids that have a non-empty input.md.
+        copy_exclude: Overridable half of run_one's snapshot exclusions, defaulting
+                     to DEFAULT_COPY_EXCLUDE. _MANDATORY_COPY_EXCLUDE is always
+                     applied on top, so a set cannot drop `.git` / `batches` /
+                     `results`. A set whose verify_command needs a project-local
+                     virtualenv omits `venv`/`.venv` here to have it copied (#185).
     """
 
     repetitions: int
     budget_usd: float | None
     configs: dict[str, dict[str, str]]
     task_ids: tuple[str, ...]
+    copy_exclude: tuple[str, ...] = DEFAULT_COPY_EXCLUDE
 
 
 def load_benchmark_set(set_root: Path) -> BenchmarkSet:
@@ -91,6 +115,7 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
     - budget_usd: bool, non-number, or <= 0
     - zero [configs.*] tables
     - configs.<name>.<role> value: bool, non-string, empty, or whitespace-only string
+    - copy_exclude: not a list, or an element that is bool, non-string, or blank
     - tasks tree with no non-empty input.md
     """
     toml_path = set_root / "benchmark.toml"
@@ -151,6 +176,23 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
             role_overrides[role] = value
         configs[cfg_name] = role_overrides
 
+    # copy_exclude — optional; replaces DEFAULT_COPY_EXCLUDE. An explicit empty list is
+    # honoured (it still leaves _MANDATORY_COPY_EXCLUDE in force), so `is None` rather
+    # than falsiness decides whether the default applies.
+    exclude_raw = data.get("copy_exclude")
+    if exclude_raw is None:
+        copy_exclude = DEFAULT_COPY_EXCLUDE
+    else:
+        if not isinstance(exclude_raw, list):
+            raise ValueError(f"copy_exclude must be a list of strings, got {exclude_raw!r}.")
+        for item in exclude_raw:
+            if isinstance(item, bool) or not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    f"copy_exclude entries must be non-empty strings "
+                    f"(bool, non-string and blank values rejected), got {item!r}."
+                )
+        copy_exclude = tuple(exclude_raw)
+
     # task_ids — enumerate non-empty input.md files; at least one required
     tasks_dir = set_root / "tasks"
     task_ids: list[str] = []
@@ -172,6 +214,7 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
         budget_usd=budget,
         configs=configs,
         task_ids=tuple(sorted(task_ids)),
+        copy_exclude=copy_exclude,
     )
 
 
@@ -458,6 +501,9 @@ def run_one(
     """
     real_repo = _repo_root()
     real_config = tomllib.loads((real_repo / ".redteam" / "config.toml").read_text(encoding="utf-8"))
+    # The set owns the overridable half of the snapshot exclusions, so it is read here
+    # rather than threaded through run_benchmark's injectable run_one seam.
+    copy_exclude = load_benchmark_set(set_root).copy_exclude
 
     started_at = _utc_now_iso()
     t_start = time.monotonic()
@@ -465,20 +511,12 @@ def run_one(
     with tempfile.TemporaryDirectory(dir=workspace) as td:
         tempcopy = Path(td) / "repo"
 
-        # Step 1: snapshot harness tree (exclude .git, venv, existing batches, results)
+        # Step 1: snapshot harness tree. Mandatory exclusions are unioned in last so a
+        # set's copy_exclude cannot drop .git / batches / results (#185).
         shutil.copytree(
             str(real_repo),
             str(tempcopy),
-            ignore=shutil.ignore_patterns(
-                ".git",
-                "venv",
-                ".venv",
-                "__pycache__",
-                "batches",
-                "results",
-                "results.jsonl",
-                "*.egg-info",
-            ),
+            ignore=shutil.ignore_patterns(*copy_exclude, *_MANDATORY_COPY_EXCLUDE),
         )
 
         # Step 2: git init on main, no origin remote
