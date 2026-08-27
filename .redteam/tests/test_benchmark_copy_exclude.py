@@ -58,8 +58,15 @@ def _fake_repo(root: Path) -> Path:
     (root / ".redteam").mkdir(parents=True)
     shutil.copy(str(bm._repo_root() / ".redteam" / "config.toml"), str(root / ".redteam" / "config.toml"))
 
+    # A venv shaped like a real one: activate exports an absolute VIRTUAL_ENV and
+    # console scripts carry an absolute shebang. Both are what make a copied venv
+    # non-relocatable, so they are modelled rather than stubbed.
     (root / "venv" / "bin").mkdir(parents=True)
     (root / "venv" / "bin" / "ruff").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "venv" / "bin" / "activate").write_text(
+        f'export VIRTUAL_ENV={root / "venv"}\nexport PATH="$VIRTUAL_ENV/bin:$PATH"\n', encoding="utf-8"
+    )
+    (root / "venv" / "bin" / "pytest").write_text(f"#!{root / 'venv' / 'bin' / 'python'}\n", encoding="utf-8")
     (root / ".venv").mkdir()
     (root / ".venv" / "marker").write_text("x", encoding="utf-8")
     (root / "__pycache__").mkdir()
@@ -80,11 +87,13 @@ def _fake_repo(root: Path) -> Path:
 
 def _snapshot_via_run_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, set_root: Path, name: str = "repo"
-) -> set[str]:
-    """Run run_one against a fake repo; return the repo-relative paths that were copied.
+) -> types.SimpleNamespace:
+    """Run run_one against a fake repo; report what landed in the snapshot.
 
-    The tempcopy is deleted when run_one returns, so the spy records the snapshot's
-    contents while it still exists. `name` keeps repeated calls in one test isolated.
+    Returns .paths (repo-relative names copied), .texts (contents of the venv entry
+    points, plus "__root__" = the snapshot dir) and .origin (the fake repo). The
+    tempcopy is deleted when run_one returns, so the spy records while it still
+    exists. `name` keeps repeated calls in one test isolated.
     """
     repo = _fake_repo(tmp_path / name)
     monkeypatch.setattr(bm, "_repo_root", lambda: repo)
@@ -97,11 +106,17 @@ def _snapshot_via_run_one(
     )
 
     copied: set[str] = set()
+    texts: dict[str, str] = {}
 
     def spy(src, dst, **kwargs):
         result = shutil.copytree(src, dst, **kwargs)
         root = Path(dst)
         copied.update(str(p.relative_to(root)) for p in root.rglob("*"))
+        # Read while the snapshot still exists — run_one deletes it on return.
+        for rel in ("venv/bin/activate", "venv/bin/pytest"):
+            if (root / rel).is_file():
+                texts[rel] = (root / rel).read_text(encoding="utf-8")
+        texts["__root__"] = str(root)
         return result
 
     # Swap the module reference benchmark.py holds, not shutil.copytree itself:
@@ -123,7 +138,7 @@ def _snapshot_via_run_one(
         config_overrides={"planner": "model-x"},
         workspace=workspace,
     )
-    return copied
+    return types.SimpleNamespace(paths=copied, texts=texts, origin=repo)
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +165,8 @@ def test_copy_exclude_is_what_flips_the_virtualenv_into_the_snapshot(
     opt_in_set = tmp_path / "bset-optin"
     _write_set(opt_in_set, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
 
-    default_copy = _snapshot_via_run_one(tmp_path, monkeypatch, default_set, name="repo-default")
-    opt_in_copy = _snapshot_via_run_one(tmp_path, monkeypatch, opt_in_set, name="repo-optin")
+    default_copy = _snapshot_via_run_one(tmp_path, monkeypatch, default_set, name="repo-default").paths
+    opt_in_copy = _snapshot_via_run_one(tmp_path, monkeypatch, opt_in_set, name="repo-optin").paths
 
     # Control: saying nothing keeps the pre-#185 snapshot, so a set that has not
     # opted in does not silently start copying a 51M virtualenv into every run.
@@ -181,12 +196,55 @@ def test_mandatory_exclusions_survive_a_copy_exclude_that_omits_them(
     set_root = tmp_path / "bset"
     _write_set(set_root, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
 
-    copied = _snapshot_via_run_one(tmp_path, monkeypatch, set_root)
+    copied = _snapshot_via_run_one(tmp_path, monkeypatch, set_root).paths
 
     assert not any(p == ".git" or p.startswith(".git/") for p in copied)
     assert not any(p.startswith("batches") for p in copied)
     assert not any(p.startswith("results") for p in copied)
     assert "results.jsonl" not in copied
+
+
+def test_copied_virtualenv_still_resolves_to_the_original_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#185 review IR-001: pin how far the snapshot's isolation actually reaches.
+
+    Copying a venv does NOT make it relocatable — bin/activate exports an absolute
+    VIRTUAL_ENV and console scripts carry an absolute shebang, both baked at
+    creation time. So verification inside the snapshot executes the HOST's
+    interpreter and tools. Measured against this repo's real venv:
+
+        VIRTUAL_ENV=/Users/kh/Documents/redteam/venv
+        which pytest=/Users/kh/Documents/redteam/venv/bin/pytest
+        sys.executable=/Users/kh/Documents/redteam/venv/bin/python
+
+    Asserting that here rather than only in a docstring makes the boundary
+    executable: whoever later makes the copy relocatable — or switches to
+    provisioning an environment inside the snapshot — trips this test and is forced
+    to update the isolation claim in run_one's docstring along with it.
+
+    It is deliberately NOT a test that the tools resolve *inside* the snapshot;
+    that would assert something false. See the PR discussion for why the two
+    achievable-looking remedies are not: rewriting the absolute paths is the
+    unreliable trick upstream removed with `virtualenv --relocatable`, and
+    provisioning a fresh environment needs a stack-specific install command the
+    engine must not encode.
+    """
+    set_root = tmp_path / "bset"
+    _write_set(set_root, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
+
+    snap = _snapshot_via_run_one(tmp_path, monkeypatch, set_root)
+
+    origin_venv = str(snap.origin / "venv")
+    snapshot_venv = snap.texts["__root__"] + "/venv"
+    assert origin_venv != snapshot_venv, "fixture bug: the snapshot must be a different directory"
+
+    # The copy is present (so verify.sh takes its activate branch at all) ...
+    assert "venv/bin/activate" in snap.texts
+    # ... but every entry point still points at the environment it was created in.
+    assert f"VIRTUAL_ENV={origin_venv}" in snap.texts["venv/bin/activate"]
+    assert snapshot_venv not in snap.texts["venv/bin/activate"]
+    assert snap.texts["venv/bin/pytest"].startswith(f"#!{origin_venv}/bin/python")
 
 
 # ---------------------------------------------------------------------------

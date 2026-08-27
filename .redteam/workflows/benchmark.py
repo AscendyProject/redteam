@@ -495,6 +495,19 @@ def run_one(
     7. Read state.json from the snapshot; call extract_metrics; build record.
     8. TemporaryDirectory context manager auto-deletes the snapshot on exit.
 
+    Bound on that isolation (#185): the snapshot isolates the *repo*, not the
+    *toolchain*. A set that opts its virtualenv into the copy (see copy_exclude)
+    gets a venv whose bin/activate and console-script shebangs still hold the
+    ORIGINAL absolute prefix, so verification executes the host's interpreter and
+    tools, not the snapshot's. Measured, not assumed — see
+    test_copied_virtualenv_still_resolves_to_the_original_prefix. Making the copy
+    relocatable is unreliable (upstream removed `virtualenv --relocatable`), and
+    provisioning a fresh environment inside the snapshot needs a stack-specific
+    install command the engine must not encode. The toolchain is therefore shared
+    across every run of a sweep — constant, so it cannot confound a between-config
+    comparison, but it is not hermetic and a run that installs packages would reach
+    the operator's environment.
+
     wall_clock_sec is measured via time.monotonic() around the subprocess call, NOT
     re-derived from telemetry sums (which miss non-worker phases like plan_review).
     started_at / finished_at are ISO-8601 UTC strings.
