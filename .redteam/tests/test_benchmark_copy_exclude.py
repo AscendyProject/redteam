@@ -78,13 +78,15 @@ def _fake_repo(root: Path) -> Path:
     return root
 
 
-def _snapshot_via_run_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, set_root: Path) -> set[str]:
+def _snapshot_via_run_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, set_root: Path, name: str = "repo"
+) -> set[str]:
     """Run run_one against a fake repo; return the repo-relative paths that were copied.
 
     The tempcopy is deleted when run_one returns, so the spy records the snapshot's
-    contents while it still exists.
+    contents while it still exists. `name` keeps repeated calls in one test isolated.
     """
-    repo = _fake_repo(tmp_path / "repo")
+    repo = _fake_repo(tmp_path / name)
     monkeypatch.setattr(bm, "_repo_root", lambda: repo)
     monkeypatch.setattr(
         bm,
@@ -111,7 +113,7 @@ def _snapshot_via_run_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, set_r
         types.SimpleNamespace(copytree=spy, ignore_patterns=shutil.ignore_patterns, copy2=shutil.copy2),
     )
 
-    workspace = tmp_path / "workspace"
+    workspace = tmp_path / f"workspace-{name}"
     workspace.mkdir()
     bm.run_one(
         set_root=set_root,
@@ -129,56 +131,62 @@ def _snapshot_via_run_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, set_r
 # ---------------------------------------------------------------------------
 
 
-def test_set_opts_into_its_virtualenv_but_cannot_drop_the_mandatory_exclusions(
+def test_copy_exclude_is_what_flips_the_virtualenv_into_the_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#185: `copy_exclude` restores the venv, and the mandatory half survives it.
+    """#185: the same repo, snapshotted twice, differs only by the set's `copy_exclude`.
 
-    The venv half fails against pre-change code, where `venv`/`.venv` were
+    Both halves are asserted here rather than in two tests because the default half
+    on its own merely characterizes pre-change behaviour (#185 review IR-001) — it
+    passes against the old hardcoded list. Run as a contrast against an identical
+    fake repo, it becomes the control that proves the new key is the cause: nothing
+    about the repo changed between the two snapshots, only the toml.
+
+    The opt-in half fails against pre-change code, where `venv`/`.venv` were
     hardcoded into the ignore patterns and no set could get them copied.
+    """
+    default_set = tmp_path / "bset-default"
+    _write_set(default_set)
+    opt_in_set = tmp_path / "bset-optin"
+    _write_set(opt_in_set, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
 
-    The mandatory half is asserted in the same test on purpose: the set below
-    deliberately omits `.git`, `batches`, `results` and `results.jsonl` from its
-    `copy_exclude`, so if the new key simply replaced the whole list, real git
-    history and real batch state would land in the tempcopy — a trust root and a
-    resumable batch the run must never see. Alone that assertion could not
-    discriminate (pre-change they were excluded too); paired with the venv half it
-    pins that the override widened exactly as far as intended and no further.
+    default_copy = _snapshot_via_run_one(tmp_path, monkeypatch, default_set, name="repo-default")
+    opt_in_copy = _snapshot_via_run_one(tmp_path, monkeypatch, opt_in_set, name="repo-optin")
+
+    # Control: saying nothing keeps the pre-#185 snapshot, so a set that has not
+    # opted in does not silently start copying a 51M virtualenv into every run.
+    assert not any(p.startswith("venv") or p.startswith(".venv") for p in default_copy)
+    # Treatment: the only difference is the toml key.
+    assert "venv/bin/ruff" in opt_in_copy
+    assert ".venv/marker" in opt_in_copy
+
+    # Both snapshots are otherwise the same, and both still honour __pycache__ —
+    # the opt-in set kept it, so the override is a replacement, not a blanket off-switch.
+    for copied in (default_copy, opt_in_copy):
+        assert "src/app.py" in copied
+        assert not any(p.startswith("__pycache__") for p in copied)
+
+
+def test_mandatory_exclusions_survive_a_copy_exclude_that_omits_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A set cannot drop `.git` / `batches` / `results` by leaving them out.
+
+    The set below lists only `__pycache__`, so if the new key simply replaced the
+    whole list, real git history and real batch state would land in the tempcopy —
+    a trust root for the pre-implement floors and a resumable batch the run must
+    never see. The fake repo carries a real-looking file in each of those paths, so
+    this fails against a replacement-semantics implementation.
     """
     set_root = tmp_path / "bset"
     _write_set(set_root, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
 
     copied = _snapshot_via_run_one(tmp_path, monkeypatch, set_root)
 
-    # Opted in: the virtualenv is present, so a venv-based verify_command works.
-    assert "venv/bin/ruff" in copied
-    assert ".venv/marker" in copied
-    # Still honoured from the set's own list.
-    assert not any(p.startswith("__pycache__") for p in copied)
-    # Mandatory, despite being absent from copy_exclude.
     assert not any(p == ".git" or p.startswith(".git/") for p in copied)
     assert not any(p.startswith("batches") for p in copied)
     assert not any(p.startswith("results") for p in copied)
     assert "results.jsonl" not in copied
-    # Ordinary sources are unaffected.
-    assert "src/app.py" in copied
-
-
-def test_default_set_still_excludes_the_virtualenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Omitting `copy_exclude` keeps the pre-#185 snapshot exactly.
-
-    The fix is opt-in: a set that says nothing must not silently start copying a
-    51M virtualenv into every run.
-    """
-    set_root = tmp_path / "bset"
-    _write_set(set_root)
-
-    copied = _snapshot_via_run_one(tmp_path, monkeypatch, set_root)
-
-    assert not any(p.startswith("venv") for p in copied)
-    assert not any(p.startswith(".venv") for p in copied)
-    assert not any(p.startswith("__pycache__") for p in copied)
-    assert "src/app.py" in copied
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +223,18 @@ def test_copy_exclude_parsing_default_override_and_empty(tmp_path: Path) -> None
 )
 def test_copy_exclude_rejects_malformed_values(tmp_path: Path, line: str) -> None:
     """Bad shapes fail loudly at load time, before any money is spent — a silently
-    ignored typo here would produce a snapshot nobody intended."""
+    ignored typo here would produce a snapshot nobody intended.
+
+    #185 review IR-001: the match is pinned to the *type-validation* messages, not
+    the substring "copy_exclude". Pre-change the key was unknown at top level, so a
+    loose match was satisfied by "Unknown top-level key(s) ... ['copy_exclude']" —
+    the test passed for the wrong reason and proved nothing about the new
+    validation running. That the key is otherwise accepted is established
+    independently by test_copy_exclude_parsing_default_override_and_empty, which
+    parses a valid list and itself fails pre-change on the unknown-key rejection.
+    """
     set_root = tmp_path / "bset"
     _write_set(set_root, copy_exclude_line=line)
 
-    with pytest.raises(ValueError, match="copy_exclude"):
+    with pytest.raises(ValueError, match=r"copy_exclude (must be a list of strings|entries must be non-empty strings)"):
         load_benchmark_set(set_root)
