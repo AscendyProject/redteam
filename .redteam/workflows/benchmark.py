@@ -65,6 +65,11 @@ _MANDATORY_COPY_EXCLUDE = (".git", "batches", "results", "results.jsonl")
 # while its metrics describe a broken environment rather than a model combination
 # (#185). These names are also Python-stack fingerprints, which belong in
 # project-owned config rather than the engine.
+#
+# `copy_exclude` has REPLACEMENT semantics, not merge: whatever a set lists is the
+# whole overridable half. Listing a path the run needs — or omitting one that makes
+# the snapshot enormous — is operator-controlled and fails loudly at run time rather
+# than silently skewing a record.
 DEFAULT_COPY_EXCLUDE = ("venv", ".venv", "__pycache__", "*.egg-info")
 
 
@@ -379,6 +384,31 @@ def extract_metrics(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _opted_in_host_paths(real_repo: Path, copy_exclude: tuple[str, ...]) -> list[Path]:
+    """Real-repo directories the set removed from DEFAULT_COPY_EXCLUDE.
+
+    Derived from config — the names are whatever the operator dropped — so the engine
+    needs no stack knowledge to identify which host resources a set opted into
+    snapshotting. Glob patterns are skipped: they name file classes, not a resource
+    whose mutation would carry across runs.
+    """
+    names = [n for n in DEFAULT_COPY_EXCLUDE if n not in copy_exclude and "*" not in n]
+    return [real_repo / n for n in names if (real_repo / n).is_dir()]
+
+
+def _fingerprint_paths(paths: list[Path]) -> dict[str, tuple[int, int]]:
+    """size + mtime_ns per entry, for detecting mutation of an opted-in host path."""
+    out: dict[str, tuple[int, int]] = {}
+    for root in paths:
+        for p in root.rglob("*"):
+            try:
+                st = p.lstat()
+            except OSError:  # raced or unreadable — absence is itself a difference
+                continue
+            out[str(p)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
 def _repo_root() -> Path:
     """Real repo root. benchmark.py lives at <repo>/.redteam/workflows/benchmark.py."""
     return Path(__file__).resolve().parents[2]
@@ -504,9 +534,12 @@ def run_one(
     relocatable is unreliable (upstream removed `virtualenv --relocatable`), and
     provisioning a fresh environment inside the snapshot needs a stack-specific
     install command the engine must not encode. The toolchain is therefore shared
-    across every run of a sweep — constant, so it cannot confound a between-config
-    comparison, but it is not hermetic and a run that installs packages would reach
-    the operator's environment.
+    across every run of a sweep. It is constant — and so cannot confound a
+    between-config comparison — ONLY for tasks that do not mutate it; a task that
+    installs, upgrades or removes a package changes the environment later configs
+    are measured in, making results order-dependent (#185 review IR-002). That
+    cannot be prevented generically, so it is detected instead: an opted-in host
+    path is fingerprinted around the run and a mutation is reported loudly.
 
     wall_clock_sec is measured via time.monotonic() around the subprocess call, NOT
     re-derived from telemetry sums (which miss non-worker phases like plan_review).
@@ -572,6 +605,15 @@ def run_one(
         driver_text = _BENCH_DRIVER_TEMPLATE.format(batch_dir_repr=repr(str(batch_dir)))
         driver_path.write_text(driver_text, encoding="utf-8")
 
+        # An opted-in host path (a virtualenv, typically) is shared by every run of a
+        # sweep and is NOT protected by the tempcopy, so a task that installs, upgrades
+        # or removes a package mutates the environment later configs are measured in.
+        # That contamination is order-dependent and would otherwise be invisible in the
+        # records; the engine cannot prevent it generically, but it can refuse to be
+        # silent about it (#185 review IR-002).
+        host_paths = _opted_in_host_paths(real_repo, copy_exclude)
+        host_before = _fingerprint_paths(host_paths)
+
         # Step 6: run driver subprocess (cwd=tempcopy so repo_root() resolves correctly)
         subprocess.run(
             [sys.executable, "-u", str(driver_path)],
@@ -585,6 +627,19 @@ def run_one(
         t_end = time.monotonic()
         finished_at = _utc_now_iso()
         wall_clock_sec = t_end - t_start
+
+        host_after = _fingerprint_paths(host_paths)
+        if host_after != host_before:
+            changed = len(set(host_before.items()) ^ set(host_after.items()))
+            print(
+                f"benchmark: WARNING — {config_name}/{task_id}/rep={repetition} mutated "
+                f"{changed} entr{'y' if changed == 1 else 'ies'} under an opted-in host path "
+                f"({', '.join(str(p) for p in host_paths)}). That path is shared by every run "
+                f"of this sweep and is not covered by the tempcopy, so later configs were "
+                f"measured in a different environment and these results are order-dependent. "
+                f"Treat the comparison as contaminated.",
+                file=sys.stderr,
+            )
 
         # Step 7: read state.json and extract metrics
         state_path = task_dir_in_batch / "state.json"

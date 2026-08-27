@@ -86,7 +86,11 @@ def _fake_repo(root: Path) -> Path:
 
 
 def _snapshot_via_run_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, set_root: Path, name: str = "repo"
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    set_root: Path,
+    name: str = "repo",
+    on_driver_run=None,
 ) -> types.SimpleNamespace:
     """Run run_one against a fake repo; report what landed in the snapshot.
 
@@ -97,13 +101,15 @@ def _snapshot_via_run_one(
     """
     repo = _fake_repo(tmp_path / name)
     monkeypatch.setattr(bm, "_repo_root", lambda: repo)
-    monkeypatch.setattr(
-        bm,
-        "subprocess",
-        types.SimpleNamespace(
-            run=lambda args, **kw: real_subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
-        ),
-    )
+
+    def _fake_run(args, **kw):
+        # Stand in for the driver: let a test simulate a task that mutates the
+        # operator's environment (a `pip install`, say) while it "runs".
+        if on_driver_run is not None and any("_bench_driver.py" in str(a) for a in args):
+            on_driver_run(repo)
+        return real_subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bm, "subprocess", types.SimpleNamespace(run=_fake_run))
 
     copied: set[str] = set()
     texts: dict[str, str] = {}
@@ -182,22 +188,32 @@ def test_copy_exclude_is_what_flips_the_virtualenv_into_the_snapshot(
         assert not any(p.startswith("__pycache__") for p in copied)
 
 
-def test_mandatory_exclusions_survive_a_copy_exclude_that_omits_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A set cannot drop `.git` / `batches` / `results` by leaving them out.
+def test_mandatory_exclusions_survive_a_total_opt_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A set cannot drop `.git` / `batches` / `results`, even by excluding nothing.
 
-    The set below lists only `__pycache__`, so if the new key simply replaced the
-    whole list, real git history and real batch state would land in the tempcopy —
-    a trust root for the pre-implement floors and a resumable batch the run must
-    never see. The fake repo carries a real-looking file in each of those paths, so
-    this fails against a replacement-semantics implementation.
+    `copy_exclude = []` is the strongest form of the question and is what makes this
+    discriminate in both directions (#185 review IR-001) — an earlier version listed
+    `__pycache__` and merely characterized the old hardcoded list:
+
+    - against the PARENT revision, the empty list is an unknown top-level key, so
+      load fails and the `__pycache__` assertion below could never hold;
+    - against a REPLACEMENT-semantics implementation (the union with
+      _MANDATORY_COPY_EXCLUDE dropped), the effective list is empty, so real git
+      history and real batch state land in the tempcopy — a trust root for the
+      pre-implement floors and a resumable batch the run must never see.
+
+    The fake repo carries a real-looking file in each of those paths so the failure
+    is about content, not a missing directory.
     """
     set_root = tmp_path / "bset"
-    _write_set(set_root, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
+    _write_set(set_root, copy_exclude_line="copy_exclude = []\n")
 
     copied = _snapshot_via_run_one(tmp_path, monkeypatch, set_root).paths
 
+    # The empty list really was honoured: everything optional is now copied.
+    assert "__pycache__/stale.pyc" in copied
+    assert "venv/bin/ruff" in copied
+    # And the mandatory half still holds regardless.
     assert not any(p == ".git" or p.startswith(".git/") for p in copied)
     assert not any(p.startswith("batches") for p in copied)
     assert not any(p.startswith("results") for p in copied)
@@ -245,6 +261,85 @@ def test_copied_virtualenv_still_resolves_to_the_original_prefix(
     assert f"VIRTUAL_ENV={origin_venv}" in snap.texts["venv/bin/activate"]
     assert snapshot_venv not in snap.texts["venv/bin/activate"]
     assert snap.texts["venv/bin/pytest"].startswith(f"#!{origin_venv}/bin/python")
+
+
+# ---------------------------------------------------------------------------
+# Contamination of an opted-in host path (#185 review IR-002)
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_that_mutates_the_opted_in_host_path_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A task that installs into the shared venv makes the sweep order-dependent.
+
+    The opted-in path is NOT covered by the tempcopy: it is the operator's own
+    directory, shared by every run. A dependency-upgrade task — or any task whose
+    verification installs something — changes the environment later configs are
+    measured in, so a ranking could reflect contamination rather than the models.
+    The engine cannot prevent this generically (provisioning a per-run toolchain
+    needs a stack-specific install command), so it must at least not be silent.
+
+    The clean-run half is asserted alongside on purpose: an "it warns" test alone
+    would also pass against an implementation that warns unconditionally, which
+    would train the operator to ignore the warning.
+    """
+    set_root = tmp_path / "bset"
+    _write_set(set_root, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
+
+    # Clean run: nothing touches the host venv.
+    _snapshot_via_run_one(tmp_path, monkeypatch, set_root, name="repo-clean")
+    assert "WARNING" not in capsys.readouterr().err
+
+    # Contaminating run: the "task" writes into the operator's venv, as `pip
+    # install` would.
+    def _pip_install(repo: Path) -> None:
+        (repo / "venv" / "lib").mkdir(parents=True, exist_ok=True)
+        (repo / "venv" / "lib" / "newpkg.py").write_text("x = 1\n", encoding="utf-8")
+
+    _snapshot_via_run_one(tmp_path, monkeypatch, set_root, name="repo-dirty", on_driver_run=_pip_install)
+
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "order-dependent" in err
+    assert "contaminated" in err
+
+
+def test_mutation_outside_an_opted_in_path_is_not_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Only opted-in paths are watched, so a default set stays quiet.
+
+    A default set never exposes the venv to the run, so writing there cannot be
+    attributed to it — and warning on every unrelated repo write would be noise.
+    """
+    set_root = tmp_path / "bset"
+    _write_set(set_root)  # no copy_exclude: nothing opted in
+
+    def _write_into_venv(repo: Path) -> None:
+        (repo / "venv" / "bin" / "extra").write_text("x", encoding="utf-8")
+
+    _snapshot_via_run_one(tmp_path, monkeypatch, set_root, on_driver_run=_write_into_venv)
+
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_opted_in_host_paths_are_derived_from_the_config_not_hardcoded(tmp_path: Path) -> None:
+    """The watched set is whatever the operator dropped from DEFAULT_COPY_EXCLUDE.
+
+    That is what keeps the detector project-agnostic: no "is this a virtualenv?"
+    sniffing in the engine. Glob patterns are skipped — they name a file class, not
+    a resource whose mutation carries across runs.
+    """
+    repo = _fake_repo(tmp_path / "repo")
+
+    assert bm._opted_in_host_paths(repo, DEFAULT_COPY_EXCLUDE) == []
+    assert bm._opted_in_host_paths(repo, ("venv", ".venv", "*.egg-info")) == [repo / "__pycache__"]
+    assert bm._opted_in_host_paths(repo, ()) == [
+        repo / "venv",
+        repo / ".venv",
+        repo / "__pycache__",
+    ]
 
 
 # ---------------------------------------------------------------------------
