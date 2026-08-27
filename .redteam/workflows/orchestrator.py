@@ -543,6 +543,37 @@ def _archive_review_round(task_dir: Path, filename: str) -> None:
     path.replace(task_dir / f"{stem}.round{n}{suffix}")
 
 
+def _preserve_outcome_for_amend(task_dir: Path, state: dict[str, Any]) -> None:
+    """Snapshot outcome.md and mark the next plan_outcome as an AMEND (#183).
+
+    On a plan_review backtrack the planner used to regenerate outcome.md from
+    scratch, which destroys any edit a human made between rounds — the documented
+    "fix, then `orchestrator resume`" escape from a stuck planner — and reopens
+    findings state.json already tracked as resolved. A run cannot converge once a
+    human co-authors the artifact.
+
+    COPIES rather than moves, unlike _archive_review_round: a review file must be
+    vacated so the next round writes fresh, but outcome.md has to stay in place
+    for the planner to amend it. The copy is the recoverable history; the original
+    is the working document.
+    """
+    path = task_dir / "outcome.md"
+    if not path.exists():
+        return
+    n = 1
+    while (task_dir / f"outcome.round{n}.md").exists():
+        n += 1
+    try:
+        (task_dir / f"outcome.round{n}.md").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError:
+        # Best-effort history: losing the snapshot must not block the backtrack.
+        pass
+    # Read by plan_outcome. Set on the backtrack itself rather than inferred from
+    # "outcome.md exists", which cannot tell a review rejection from a planner
+    # error-retry that left a half-written file worth discarding.
+    state["plan_outcome_amend"] = True
+
+
 def _clear_manual_phase_artifacts(task_dir: Path, phase: str) -> None:
     _clear_manual_sentinel(task_dir, phase)
     review_files = {
@@ -1674,6 +1705,8 @@ def process_task(
             if phase in completed:
                 completed.remove(phase)
             _clear_manual_phase_artifacts(task_dir, phase)
+            if worker_phase == "plan_outcome":
+                _preserve_outcome_for_amend(task_dir, state)
             state["next_phase"] = worker_phase
         # else: stay on current phase (worker retry path or error retry)
         save_state(task_dir, state)
