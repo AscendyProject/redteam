@@ -560,11 +560,21 @@ def _preserve_outcome_for_amend(task_dir: Path, state: dict[str, Any]) -> None:
     path = task_dir / "outcome.md"
     if not path.exists():
         return
-    n = 1
-    while (task_dir / f"outcome.round{n}.md").exists():
-        n += 1
     try:
-        (task_dir / f"outcome.round{n}.md").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        body = path.read_text(encoding="utf-8")
+        # Reserve the destination by EXCLUSIVE CREATE, never exists()-then-write.
+        # A task dir holds agent-produced artifacts, so a planted DANGLING symlink
+        # (outcome.round1.md -> ../../elsewhere) reports exists() == False and
+        # write_text() would follow it and write outside the task dir. O_EXCL
+        # refuses a symlink outright — it raises EEXIST without following — so a
+        # planted link merely costs us the next slot number.
+        for n in range(1, 1000):
+            try:
+                with (task_dir / f"outcome.round{n}.md").open("x", encoding="utf-8") as fh:
+                    fh.write(body)
+            except FileExistsError:
+                continue
+            break
     except OSError:
         # Best-effort history: losing the snapshot must not block the backtrack.
         pass

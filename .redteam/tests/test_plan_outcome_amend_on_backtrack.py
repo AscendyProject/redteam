@@ -273,20 +273,38 @@ def test_revise_plan_decision_preserves_the_human_edit(monkeypatch, tmp_path):
     saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
     assert saved.get("plan_outcome_amend") is True
 
-
-def test_approve_decision_does_not_flag_an_amend(monkeypatch, tmp_path):
-    """Scoping: APPROVE proceeds to implement and must not mark the plan for
-    amendment — only routes back to plan_outcome do."""
-    orch = _orch()
-    task_dir = _ask_user_task(tmp_path, "APPROVE")
-    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
-    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
+    # Contrast, asserted here rather than as its own test: APPROVE routes to
+    # implement and must NOT snapshot. Alone that is non-discriminating — the
+    # pre-change orchestrator also created no outcome.round*.md on APPROVE — but
+    # paired with the REVISE_PLAN half it pins that the guard did not widen into
+    # "every ask_user decision snapshots".
+    approve_dir = _ask_user_task(tmp_path / "second", "APPROVE")
     monkeypatch.setitem(
         orch.PHASE_RUNNERS,
         "implement",
         lambda td, st: {"status": "ask_user", "feedback": "halt", "log": "", "diff": ""},
     )
+    orch.process_task(approve_dir)
+    assert not list(approve_dir.glob("outcome.round*.md"))
 
-    orch.process_task(task_dir)
 
-    assert not list(task_dir.glob("outcome.round*.md"))
+def test_snapshot_refuses_a_planted_symlink_destination(tmp_path):
+    """#183 review IR-002: a dangling symlink must not redirect the snapshot.
+
+    A task dir holds agent-produced artifacts, so a planted
+    `outcome.round1.md -> ../../outside` reports exists() == False; an
+    exists()-then-write would follow it and create a file outside the task dir.
+    Exclusive create refuses a symlink without following it, so the snapshot
+    simply takes the next slot and nothing outside is touched.
+    """
+    orch = _orch()
+    outside = tmp_path / "OUTSIDE.txt"
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "outcome.md").write_text("real plan\n", encoding="utf-8")
+    (task_dir / "outcome.round1.md").symlink_to(outside)  # dangling, exists() is False
+
+    orch._preserve_outcome_for_amend(task_dir, {})
+
+    assert not outside.exists(), "the snapshot must not be written through the symlink"
+    assert (task_dir / "outcome.round2.md").read_text(encoding="utf-8") == "real plan\n"
