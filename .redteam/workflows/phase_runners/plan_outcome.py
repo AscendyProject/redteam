@@ -21,9 +21,33 @@ AGENT_NAME = "outcome-planner"
 
 def run(task_dir: Path, state: dict[str, Any]) -> PhaseResult:
     proj = project_config()
-    base = (
-        f"Plan outcome.md for the task at: {task_dir}\n"
-        f"Read the brief at {task_dir}/input.md and produce {task_dir}/outcome.md.\n"
+    outcome_path = task_dir / "outcome.md"
+    # AMEND mode (#183): set by the orchestrator on a plan_review backtrack. The
+    # planner previously regenerated outcome.md wholesale, discarding any human
+    # edit made between rounds — the documented "fix, then resume" escape — and
+    # reopening findings state.json already tracked as resolved, so the loop could
+    # not converge once a human co-authored the document. The flag comes from the
+    # backtrack rather than from "outcome.md exists", which cannot distinguish a
+    # review rejection from a planner error-retry that left a file worth discarding.
+    amending = bool(state.get("plan_outcome_amend")) and outcome_path.exists() and outcome_path.stat().st_size > 0
+
+    if amending:
+        base = (
+            f"AMEND the existing plan at {task_dir}/outcome.md for the task at: {task_dir}\n"
+            f"That file already exists and MAY CONTAIN HUMAN EDITS — treat it as the current "
+            f"document, not a draft to replace. Do NOT regenerate it from scratch.\n"
+            f"Apply ONLY the changes the review findings below require, and leave every other "
+            f"section byte-identical. Re-deriving an untouched section risks silently reopening a "
+            f"finding that was already resolved.\n"
+            f"The brief is at {task_dir}/input.md (context; the plan itself is outcome.md).\n"
+        )
+    else:
+        base = (
+            f"Plan outcome.md for the task at: {task_dir}\n"
+            f"Read the brief at {task_dir}/input.md and produce {task_dir}/outcome.md.\n"
+        )
+
+    base += (
         f"Project context (hard rules + architecture facts): {proj.context_file}.\n"
         f"Source dirs: {', '.join(proj.source_dirs)}. Test dir: {proj.test_dir}. "
         f"New test files must match the pattern `{proj.test_file_glob}`.\n"
