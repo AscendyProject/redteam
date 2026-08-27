@@ -18,6 +18,7 @@ snapshot rather than about the opaque ignore callable.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess as real_subprocess
 import sys
@@ -31,7 +32,7 @@ if str(_WF) not in sys.path:
 import pytest  # noqa: E402
 
 import benchmark as bm  # noqa: E402
-from benchmark import DEFAULT_COPY_EXCLUDE, load_benchmark_set  # noqa: E402
+from benchmark import DEFAULT_COPY_EXCLUDE, build_report, load_benchmark_set  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +137,7 @@ def _snapshot_via_run_one(
 
     workspace = tmp_path / f"workspace-{name}"
     workspace.mkdir()
-    bm.run_one(
+    record = bm.run_one(
         set_root=set_root,
         config_name="default",
         task_id="task-001",
@@ -144,7 +145,7 @@ def _snapshot_via_run_one(
         config_overrides={"planner": "model-x"},
         workspace=workspace,
     )
-    return types.SimpleNamespace(paths=copied, texts=texts, origin=repo)
+    return types.SimpleNamespace(paths=copied, texts=texts, origin=repo, record=record)
 
 
 # ---------------------------------------------------------------------------
@@ -280,48 +281,108 @@ def test_a_run_that_mutates_the_opted_in_host_path_is_reported(
     The engine cannot prevent this generically (provisioning a per-run toolchain
     needs a stack-specific install command), so it must at least not be silent.
 
-    The clean-run half is asserted alongside on purpose: an "it warns" test alone
-    would also pass against an implementation that warns unconditionally, which
-    would train the operator to ignore the warning.
+    Three cases in one test (#185 review IR-002). The two negatives are
+    green-by-construction on their own — the parent revision warns for nothing, so
+    "no warning appears" passes there for free — and only earn their keep as
+    controls around the positive: same mutation, different opt-in, opposite result.
+    Together they pin that the detector fires on the real condition and not on
+    "always" or on "any write anywhere".
     """
-    set_root = tmp_path / "bset"
-    _write_set(set_root, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
 
-    # Clean run: nothing touches the host venv.
-    _snapshot_via_run_one(tmp_path, monkeypatch, set_root, name="repo-clean")
-    assert "WARNING" not in capsys.readouterr().err
-
-    # Contaminating run: the "task" writes into the operator's venv, as `pip
-    # install` would.
     def _pip_install(repo: Path) -> None:
+        """Stand-in for a task whose verification installs into the shared venv."""
         (repo / "venv" / "lib").mkdir(parents=True, exist_ok=True)
         (repo / "venv" / "lib" / "newpkg.py").write_text("x = 1\n", encoding="utf-8")
 
-    _snapshot_via_run_one(tmp_path, monkeypatch, set_root, name="repo-dirty", on_driver_run=_pip_install)
+    opted_in = tmp_path / "bset-optin"
+    _write_set(opted_in, copy_exclude_line='copy_exclude = ["__pycache__"]\n')
+    default = tmp_path / "bset-default"
+    _write_set(default)  # nothing opted in
 
+    # 1 — opted in, nothing mutated: silent, and the record says so.
+    clean = _snapshot_via_run_one(tmp_path, monkeypatch, opted_in, name="repo-clean")
+    assert "WARNING" not in capsys.readouterr().err
+    assert clean.record["host_mutated"] is False
+
+    # 2 — opted in and mutated: reported, and durably marked in the record so the
+    # report layer can exclude it long after the warning has scrolled away.
+    dirty = _snapshot_via_run_one(tmp_path, monkeypatch, opted_in, name="repo-dirty", on_driver_run=_pip_install)
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert "order-dependent" in err
-    assert "contaminated" in err
+    assert dirty.record["host_mutated"] is True
+    assert dirty.record["schema_version"] == 3
+
+    # 3 — same mutation, but the set never opted the venv in, so the run had no
+    # access to it and the change cannot be attributed to it. Warning on every
+    # unrelated write would train the operator to ignore the warning.
+    outside = _snapshot_via_run_one(tmp_path, monkeypatch, default, name="repo-outside", on_driver_run=_pip_install)
+    assert "WARNING" not in capsys.readouterr().err
+    assert outside.record["host_mutated"] is False
 
 
-def test_mutation_outside_an_opted_in_path_is_not_reported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
-) -> None:
-    """Only opted-in paths are watched, so a default set stays quiet.
+def test_contaminated_records_are_excluded_from_the_report(tmp_path: Path) -> None:
+    """A marked record must not be averaged into a config's metrics.
 
-    A default set never exposes the venv to the run, so writing there cannot be
-    attributed to it — and warning on every unrelated repo write would be noise.
+    This is the half that makes the mark worth having: the warning is transient,
+    but results.jsonl is what a comparison is drawn from days later. A contaminated
+    run was measured in an environment a sibling changed, so including it would
+    rank configurations partly by dispatch order. The exclusion is surfaced in the
+    sample cell rather than silently shrinking the sample.
+    """
+    clean = {"config": "alpha", "outcome": "done", "review_rounds": 2, "schema_version": 3, "host_mutated": False}
+    dirty = {"config": "alpha", "outcome": "done", "review_rounds": 40, "schema_version": 3, "host_mutated": True}
+    # Pre-v3: no host_mutated key at all. "Not checked" must not read as "dirty".
+    legacy = {"config": "alpha", "outcome": "done", "review_rounds": 2, "schema_version": 2}
+
+    report = build_report(["alpha"], [clean, dirty, legacy])
+
+    assert "2.00" in report, "the two uncontaminated records set the average"
+    assert "14.67" not in report, "the contaminated record must not be averaged in"
+    assert "+1 contaminated, excluded" in report
+
+
+def test_run_benchmark_aborts_the_sweep_on_contamination(tmp_path: Path) -> None:
+    """Fail closed: stop dispatching once the shared environment has changed.
+
+    Every later run would be measured in the mutated environment, so continuing
+    spends real money producing order-dependent numbers. The contaminating record
+    is still appended first — it is evidence, and dropping it would leave the
+    operator with a gap and no explanation.
     """
     set_root = tmp_path / "bset"
-    _write_set(set_root)  # no copy_exclude: nothing opted in
+    _write_set(set_root)
+    (set_root / "tasks" / "task-002").mkdir(parents=True)
+    (set_root / "tasks" / "task-002" / "input.md").write_text("second", encoding="utf-8")
 
-    def _write_into_venv(repo: Path) -> None:
-        (repo / "venv" / "bin" / "extra").write_text("x", encoding="utf-8")
+    calls: list[str] = []
 
-    _snapshot_via_run_one(tmp_path, monkeypatch, set_root, on_driver_run=_write_into_venv)
+    def _run_one(set_root, config_name, task_id, repetition, *, config_overrides, workspace):
+        calls.append(task_id)
+        return {
+            "schema_version": 3,
+            "config": config_name,
+            "task": task_id,
+            "repetition": repetition,
+            "outcome": "done",
+            "review_rounds": 1,
+            "retry_count": 0,
+            "rescue_count": 0,
+            "scope_creep_count": 0,
+            "wall_clock_sec": 1.0,
+            "claude_cost_usd": 0.1,
+            "host_mutated": task_id == "task-001",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:01+00:00",
+        }
 
-    assert "WARNING" not in capsys.readouterr().err
+    rc = bm.run_benchmark(set_root, run_one=_run_one)
+
+    assert rc == 4, "contamination must be distinguishable from normal completion and from a budget abort"
+    assert calls == ["task-001"], "the sweep must not continue into the mutated environment"
+    written = [json.loads(line) for line in (set_root / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(written) == 1
+    assert written[0]["host_mutated"] is True
 
 
 def test_opted_in_host_paths_are_derived_from_the_config_not_hardcoded(tmp_path: Path) -> None:

@@ -2735,7 +2735,8 @@ def cmd_config(repo: Path | None = None) -> int:
 def cmd_benchmark(set_root: Path, *, dry_run: bool = False) -> int:
     """Dispatch to benchmark.run_benchmark.
 
-    Returns the exit code from run_benchmark (0 = complete, 3 = budget abort).
+    Returns the exit code from run_benchmark (0 = complete, 3 = budget abort,
+    4 = contamination abort).
     Does NOT touch batch state, _run_pipeline, or create_pr.
     """
     return benchmark.run_benchmark(set_root, dry_run=dry_run)

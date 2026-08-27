@@ -231,7 +231,7 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
 class BenchmarkRecord(TypedDict):
     """One result record written to results.jsonl.
 
-    schema_version = 2. Fields are deterministic; never fabricate values:
+    schema_version = 3. Fields are deterministic; never fabricate values:
     claude_cost_usd is None when only Codex-role phases ran.
 
     v1 → v2 (#172): rescue_count became nullable and its meaning changed. A v1
@@ -239,9 +239,13 @@ class BenchmarkRecord(TypedDict):
     that the engine never writes — a fabricated zero, not a measurement. The
     version bump is what lets a reader tell the two apart; without it a stored 0
     is ambiguous and aggregation silently treats it as measured.
+
+    v2 → v3 (#185): host_mutated added. A v1/v2 record predates the check, so its
+    absence means "not checked", not "clean" — the same distinction v2 drew for
+    rescue_count. Only an explicit True excludes a record from aggregation.
     """
 
-    schema_version: int  # 1 = pre-#172 (rescue_count fabricated as 0); 2 = current
+    schema_version: int  # 1 = pre-#172 (rescue_count fabricated as 0); 2 = pre-#185; 3 = current
     config: str  # [configs.<name>] key from benchmark.toml
     task: str  # task id (subdir name under tasks/)
     repetition: int  # 1-indexed
@@ -256,6 +260,11 @@ class BenchmarkRecord(TypedDict):
     scope_creep_count: int  # floor-trip count
     wall_clock_sec: float
     claude_cost_usd: float | None  # None when only Codex-role phases ran
+    # True = this run changed an opted-in host path (see copy_exclude), so it was
+    # measured in — and left behind — a different environment than its siblings;
+    # the sweep is order-dependent from here on. None = not measured (the run never
+    # got far enough to attribute a change), which is NOT the same as False (#185).
+    host_mutated: bool | None
     started_at: str  # ISO-8601 UTC string
     finished_at: str  # ISO-8601 UTC string
 
@@ -629,7 +638,8 @@ def run_one(
         wall_clock_sec = t_end - t_start
 
         host_after = _fingerprint_paths(host_paths)
-        if host_after != host_before:
+        host_mutated = host_after != host_before
+        if host_mutated:
             changed = len(set(host_before.items()) ^ set(host_after.items()))
             print(
                 f"benchmark: WARNING — {config_name}/{task_id}/rep={repetition} mutated "
@@ -659,7 +669,7 @@ def run_one(
             }
 
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "config": config_name,
             "task": task_id,
             "repetition": repetition,
@@ -670,6 +680,7 @@ def run_one(
             "scope_creep_count": metrics["scope_creep_count"],
             "wall_clock_sec": wall_clock_sec,  # monotonic-measured; NOT telemetry sum
             "claude_cost_usd": metrics["claude_cost_usd"],
+            "host_mutated": host_mutated,
             "started_at": started_at,
             "finished_at": finished_at,
         }
@@ -697,6 +708,8 @@ def run_benchmark(
     Returns:
       0   — normal completion (including after run_one errors that are caught + continued)
       3   — budget abort (a pending dispatch would exceed set.budget_usd)
+      4   — contamination abort (a run mutated an opted-in host path, so the
+            environment later configs would be measured in has changed; #185)
     """
     bset = load_benchmark_set(set_root)
     results_path = set_root / "results.jsonl"
@@ -773,7 +786,7 @@ def run_benchmark(
         except Exception:
             now = _utc_now_iso()
             record = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "config": cfg,
                 "task": tid,
                 "repetition": rep,
@@ -784,6 +797,7 @@ def run_benchmark(
                 "scope_creep_count": 0,
                 "wall_clock_sec": 0.0,
                 "claude_cost_usd": None,
+                "host_mutated": None,  # unmeasured: run_one raised before it could report
                 "started_at": now,
                 "finished_at": now,
             }
@@ -791,6 +805,21 @@ def run_benchmark(
         # Append immediately so Ctrl-C between runs still resumes cleanly
         append_record(results_path, record)
         this_inv_records.append(record)
+
+        # Fail closed on contamination (#185 review IR-001). The record is already
+        # durably marked, but continuing would spend real money measuring every
+        # later config in an environment the earlier one changed, and the resulting
+        # ranking would encode dispatch order. Stopping here also keeps the damage
+        # to one config rather than letting it spread across the sweep.
+        if record.get("host_mutated"):
+            print(
+                f"benchmark: aborting after {cfg}/{tid}/rep={rep}: it mutated an opted-in "
+                f"host path, so every later run would be measured in a different environment. "
+                f"The record is marked host_mutated and excluded from reports. Restore the "
+                f"environment before resuming.",
+                file=sys.stderr,
+            )
+            return 4
 
     return 0
 
@@ -822,13 +851,22 @@ def build_report(config_names: list[str], records: list[dict]) -> str:
             by_config[cfg].append(r)
 
     def _cells(name: str) -> dict[str, str]:
-        recs = by_config[name]
+        # A contaminated run was measured in an environment one of its siblings
+        # changed, so comparing it against them measures dispatch order (#185).
+        # Excluded from every metric rather than silently averaged in, and surfaced
+        # in the sample cell so the exclusion is visible instead of a quiet shrink.
+        # Only an explicit True excludes: a pre-v3 record has no host_mutated key,
+        # and "not checked" must not read as "clean".
+        contaminated = sum(1 for r in by_config[name] if r.get("host_mutated") is True)
+        recs = [r for r in by_config[name] if r.get("host_mutated") is not True]
         total = len(recs)
         done_count = sum(1 for r in recs if r.get("outcome") == "done")
         deferred_count = sum(1 for r in recs if r.get("outcome") == "deferred")
         error_count = sum(1 for r in recs if r.get("outcome") == "error")
 
         sample = f"{total} (done={done_count}, deferred={deferred_count}, error={error_count})"
+        if contaminated:
+            sample += f" +{contaminated} contaminated, excluded"
         if total == 0:
             return {
                 "sample_size": sample,
