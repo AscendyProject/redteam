@@ -198,3 +198,95 @@ def test_snapshot_then_amend_preserves_the_human_edit_end_to_end():
         assert (task_dir / "outcome.md").read_text(encoding="utf-8") == human
         assert (task_dir / "outcome.round1.md").read_text(encoding="utf-8") == human
         assert "AMEND" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Every route back to plan_outcome, not just the CHANGES_REQUESTED backtrack
+# ---------------------------------------------------------------------------
+
+
+_OUTCOME_WITH_VERIFY = """# Outcome
+
+Human-edited section that must survive.
+
+## Verification
+
+```yaml
+commands:
+  - bash .redteam/scripts/verify.sh
+```
+"""
+
+
+def _ask_user_task(tmp_path: Path, decision: str) -> Path:
+    import json
+
+    task_dir = tmp_path / "batch" / "tasks" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "outcome.md").write_text(_OUTCOME_WITH_VERIFY, encoding="utf-8")
+    (task_dir / "ask_user_response.md").write_text(f"revise\n\nUSER_DECISION: {decision}\n", encoding="utf-8")
+    (task_dir / "ask_user.resolved").write_text("", encoding="utf-8")
+    state = {
+        "task_id": "task-001",
+        "mode": "agent-pair",
+        "phase": "ask_user",
+        "phases_completed": ["plan_outcome"],
+        "next_phase": "ask_user",
+        "verification": {},
+        "escape": {"ask_user": True, "reason": "carried-over blocker", "return_phase": "plan_review"},
+        "retries": {},
+        "max_retries_per_phase": 2,
+    }
+    (task_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return task_dir
+
+
+def test_revise_plan_decision_preserves_the_human_edit(monkeypatch, tmp_path):
+    """#183 review IR-001: `USER_DECISION: REVISE_PLAN` must snapshot and amend.
+
+    This is the path MOST likely to carry human edits — the operator was
+    explicitly asked to intervene and then chose to revise the plan — so
+    regenerating here discards exactly the work the escalation solicited. It
+    routes to plan_outcome outside the CHANGES_REQUESTED backtrack, so the first
+    fix missed it entirely.
+    """
+    import json
+
+    orch = _orch()
+    task_dir = _ask_user_task(tmp_path, "REVISE_PLAN")
+    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
+
+    seen: dict = {}
+
+    def fake_plan_outcome(td, st):
+        seen["amend"] = st.get("plan_outcome_amend")
+        return {"status": "ask_user", "feedback": "halt", "log": "", "diff": ""}
+
+    monkeypatch.setitem(orch.PHASE_RUNNERS, "plan_outcome", fake_plan_outcome)
+
+    orch.process_task(task_dir)
+
+    assert seen["amend"] is True, "the planner must be told to amend, not regenerate"
+    assert (task_dir / "outcome.md").read_text(encoding="utf-8") == _OUTCOME_WITH_VERIFY
+    assert (task_dir / "outcome.round1.md").read_text(encoding="utf-8") == _OUTCOME_WITH_VERIFY
+    saved = json.loads((task_dir / "state.json").read_text(encoding="utf-8"))
+    assert saved.get("plan_outcome_amend") is True
+
+
+def test_approve_decision_does_not_flag_an_amend(monkeypatch, tmp_path):
+    """Scoping: APPROVE proceeds to implement and must not mark the plan for
+    amendment — only routes back to plan_outcome do."""
+    orch = _orch()
+    task_dir = _ask_user_task(tmp_path, "APPROVE")
+    monkeypatch.setattr(orch, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(orch, "_ensure_task_branch", lambda *a, **k: "redteam/task-001")
+    monkeypatch.setitem(
+        orch.PHASE_RUNNERS,
+        "implement",
+        lambda td, st: {"status": "ask_user", "feedback": "halt", "log": "", "diff": ""},
+    )
+
+    orch.process_task(task_dir)
+
+    assert not list(task_dir.glob("outcome.round*.md"))

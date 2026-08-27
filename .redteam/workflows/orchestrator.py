@@ -1339,6 +1339,11 @@ def process_task(
                 elif user_decision == "REVISE_PLAN":
                     if isinstance(return_phase, str):
                         _clear_manual_phase_artifacts(task_dir, return_phase)
+                    # #183: this is the path MOST likely to carry human edits — the
+                    # operator was explicitly asked to intervene and then chose to
+                    # revise the plan. Regenerating here discards exactly the work
+                    # the escalation solicited.
+                    _preserve_outcome_for_amend(task_dir, state)
                     state["next_phase"] = "plan_outcome"
                 elif user_decision == "REVISE_IMPLEMENTATION":
                     if isinstance(return_phase, str):
@@ -1578,6 +1583,11 @@ def process_task(
                     if phase in completed:
                         completed.remove(phase)
                     _clear_manual_phase_artifacts(task_dir, phase)
+                    # #183: an APPROVED plan is being sent back over an unusable
+                    # Verification block. The rest of the document was just judged
+                    # good — regenerating all of it to fix one section is what
+                    # reopens resolved findings.
+                    _preserve_outcome_for_amend(task_dir, state)
                     state["next_phase"] = "plan_outcome"
                     save_state(task_dir, state)
                     continue
