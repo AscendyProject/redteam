@@ -7,6 +7,75 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-28
+
+A small release cut for one reason: **0.9.0's headline feature could not run.**
+Preparing the first real Phase 1 benchmark sweep — the sweep whose absence 0.9.0
+already flagged — surfaced a defect that made the runner unusable on any repo
+with a virtualenv-based gate, and the review of the fix then surfaced a second,
+worse one underneath it. Both are fixed here. Additive except the benchmark
+record schema (v2 → v3), which still has no deployed data to migrate.
+
+### Fixed
+- **The benchmark tempcopy excluded `venv`/`.venv`, so a venv-based gate failed
+  with exit 127 (#185, #186).** `run_one` hardcoded them into its `copytree`
+  exclusions, so a repo whose `verify_command` activates a project-local
+  virtualenv found no tools on `PATH` in the snapshot. Every verification exec
+  failed, the task churned through its retries to `deferred`, and the run cost
+  full price while recording metrics that described a broken environment rather
+  than a model combination — worse than no data, because the records looked
+  measured. Not repo-specific: any Python consumer with a venv-based gate hit it
+  identically (`node_modules` is not excluded, so JS/TS consumers were
+  unaffected). The exclusion list is now split — `.git`, `batches`, `results`
+  and `results.jsonl` are **mandatory** and unioned in after the set's own list,
+  because dropping `.git` would hand the pre-implement floors a trust root from
+  the operator's history and dropping the others would expose real batch state;
+  `venv`, `.venv`, `__pycache__` and `*.egg-info` are the **default** half a set
+  may replace via a new top-level `copy_exclude` key in `benchmark.toml`
+  (replacement semantics, not merge). Default behaviour is unchanged, so the
+  loosening is opt-in and recorded in the set's own toml. It also moves four
+  Python-stack fingerprints out of the engine into project-owned config.
+- **A contaminated benchmark run was indistinguishable from a clean one (#186,
+  review IR-001).** Opting a host path into the snapshot exposed a latent
+  failure mode: the copied virtualenv is *not* relocatable — `bin/activate` and
+  console-script shebangs hold the original absolute prefix — so verification
+  executes the host toolchain, which every run of a sweep shares. A task that
+  installs, upgrades or removes a package therefore changes the environment
+  later configs are measured in, and the resulting ranking encodes dispatch
+  order. The engine cannot prevent this generically (provisioning a per-run
+  toolchain needs a stack-specific install command that would put project
+  specifics back into the engine), so it detects it: opted-in host paths are
+  fingerprinted around the run, records carry `host_mutated` (**schema v2 →
+  v3**), `run_benchmark` aborts the sweep with **exit code 4** rather than
+  paying to measure a changed environment, and `build_report` excludes marked
+  records from every metric while showing the exclusion in the sample cell. As
+  with v2's `rescue_count`, a pre-v3 record has no such key and "not checked"
+  does not read as "clean" — only an explicit `true` excludes. The fingerprint
+  is size + `mtime_ns`: it catches an honest `pip install`, and is deliberately
+  not a tamper-proof control.
+- **A `plan_review` backtrack rewrote `outcome.md` instead of amending it
+  (#183, #184).** The planner regenerated the plan from scratch on every
+  backtrack, destroying any edit a human made between rounds — the documented
+  "fix, then `orchestrator resume`" escape — and reopening findings `state.json`
+  already tracked as resolved, so the loop could not converge once a human had
+  co-authored the document. Observed as six plan-review rounds ending in
+  `RESCUE_REQUIRED` because the loop, not the plan, was the defect. The
+  orchestrator now snapshots `outcome.md` to `outcome.round<n>.md` (exclusive
+  create, so a planted symlink cannot redirect the write outside the task dir)
+  and flags the next `plan_outcome` to amend in place. Applied at **all three**
+  routes back to the planner, not just the `CHANGES_REQUESTED` backtrack — the
+  `USER_DECISION: REVISE_PLAN` path is the one most likely to carry human edits,
+  since the operator was explicitly asked to intervene.
+
+### Notes
+- **The benchmark's isolation is bounded, and now says so.** The snapshot
+  isolates the *repo*, not the *toolchain*. `run_one`'s docstring claimed
+  isolation without qualification; it is now qualified, and the boundary is
+  pinned by a test rather than prose, so a future change that makes the copy
+  relocatable trips the test and forces the claim to be updated with it.
+- #146 Phase 1 **still has not run for real.** This release is what makes the
+  attempt possible; Phase 2 continues to wait on evidence from actual use.
+
 ## [0.9.0] - 2026-08-16
 
 This release ships the **#146 Phase 1 benchmark MVP** and is otherwise dominated
