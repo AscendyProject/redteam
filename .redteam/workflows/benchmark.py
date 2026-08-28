@@ -46,8 +46,31 @@ if TYPE_CHECKING:
 # Config constants
 # ---------------------------------------------------------------------------
 
-_KNOWN_TOP_LEVEL = frozenset({"repetitions", "budget_usd", "configs"})
+_KNOWN_TOP_LEVEL = frozenset({"repetitions", "budget_usd", "configs", "copy_exclude"})
 _KNOWN_ROLES = frozenset({"planner", "implementer", "reviewer", "rescue"})
+
+# Snapshot exclusions for run_one's copytree, split by whether a set may override them.
+#
+# Mandatory — never overridable, because dropping one breaks isolation or correctness:
+#   .git          the tempcopy is `git init`'d fresh on 'main'; real history would hand
+#                 the pre-implement floors a trust root from the operator's own repo.
+#   batches       the run seeds its own batch; real batch state would be re-entered.
+#   results{,.jsonl}  the run writes its own records.
+_MANDATORY_COPY_EXCLUDE = (".git", "batches", "results", "results.jsonl")
+
+# Default — size optimizations a set MAY override via `copy_exclude` in benchmark.toml.
+# Excluding `venv`/`.venv` silently breaks a verify_command that depends on a
+# project-local virtualenv: the tools are not on PATH in the tempcopy, so every
+# verification exec fails with 127 and the task churns to `deferred` at full cost
+# while its metrics describe a broken environment rather than a model combination
+# (#185). These names are also Python-stack fingerprints, which belong in
+# project-owned config rather than the engine.
+#
+# `copy_exclude` has REPLACEMENT semantics, not merge: whatever a set lists is the
+# whole overridable half. Listing a path the run needs — or omitting one that makes
+# the snapshot enormous — is operator-controlled and fails loudly at run time rather
+# than silently skewing a record.
+DEFAULT_COPY_EXCLUDE = ("venv", ".venv", "__pycache__", "*.egg-info")
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +95,18 @@ class BenchmarkSet:
         configs:     Ordered mapping of config-name → {role: model-id} overrides.
                      Declaration order from benchmark.toml is preserved.
         task_ids:    Sorted tuple of task ids that have a non-empty input.md.
+        copy_exclude: Overridable half of run_one's snapshot exclusions, defaulting
+                     to DEFAULT_COPY_EXCLUDE. _MANDATORY_COPY_EXCLUDE is always
+                     applied on top, so a set cannot drop `.git` / `batches` /
+                     `results`. A set whose verify_command needs a project-local
+                     virtualenv omits `venv`/`.venv` here to have it copied (#185).
     """
 
     repetitions: int
     budget_usd: float | None
     configs: dict[str, dict[str, str]]
     task_ids: tuple[str, ...]
+    copy_exclude: tuple[str, ...] = DEFAULT_COPY_EXCLUDE
 
 
 def load_benchmark_set(set_root: Path) -> BenchmarkSet:
@@ -91,6 +120,7 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
     - budget_usd: bool, non-number, or <= 0
     - zero [configs.*] tables
     - configs.<name>.<role> value: bool, non-string, empty, or whitespace-only string
+    - copy_exclude: not a list, or an element that is bool, non-string, or blank
     - tasks tree with no non-empty input.md
     """
     toml_path = set_root / "benchmark.toml"
@@ -151,6 +181,23 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
             role_overrides[role] = value
         configs[cfg_name] = role_overrides
 
+    # copy_exclude — optional; replaces DEFAULT_COPY_EXCLUDE. An explicit empty list is
+    # honoured (it still leaves _MANDATORY_COPY_EXCLUDE in force), so `is None` rather
+    # than falsiness decides whether the default applies.
+    exclude_raw = data.get("copy_exclude")
+    if exclude_raw is None:
+        copy_exclude = DEFAULT_COPY_EXCLUDE
+    else:
+        if not isinstance(exclude_raw, list):
+            raise ValueError(f"copy_exclude must be a list of strings, got {exclude_raw!r}.")
+        for item in exclude_raw:
+            if isinstance(item, bool) or not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    f"copy_exclude entries must be non-empty strings "
+                    f"(bool, non-string and blank values rejected), got {item!r}."
+                )
+        copy_exclude = tuple(exclude_raw)
+
     # task_ids — enumerate non-empty input.md files; at least one required
     tasks_dir = set_root / "tasks"
     task_ids: list[str] = []
@@ -172,6 +219,7 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
         budget_usd=budget,
         configs=configs,
         task_ids=tuple(sorted(task_ids)),
+        copy_exclude=copy_exclude,
     )
 
 
@@ -183,7 +231,7 @@ def load_benchmark_set(set_root: Path) -> BenchmarkSet:
 class BenchmarkRecord(TypedDict):
     """One result record written to results.jsonl.
 
-    schema_version = 2. Fields are deterministic; never fabricate values:
+    schema_version = 3. Fields are deterministic; never fabricate values:
     claude_cost_usd is None when only Codex-role phases ran.
 
     v1 → v2 (#172): rescue_count became nullable and its meaning changed. A v1
@@ -191,9 +239,13 @@ class BenchmarkRecord(TypedDict):
     that the engine never writes — a fabricated zero, not a measurement. The
     version bump is what lets a reader tell the two apart; without it a stored 0
     is ambiguous and aggregation silently treats it as measured.
+
+    v2 → v3 (#185): host_mutated added. A v1/v2 record predates the check, so its
+    absence means "not checked", not "clean" — the same distinction v2 drew for
+    rescue_count. Only an explicit True excludes a record from aggregation.
     """
 
-    schema_version: int  # 1 = pre-#172 (rescue_count fabricated as 0); 2 = current
+    schema_version: int  # 1 = pre-#172 (rescue_count fabricated as 0); 2 = pre-#185; 3 = current
     config: str  # [configs.<name>] key from benchmark.toml
     task: str  # task id (subdir name under tasks/)
     repetition: int  # 1-indexed
@@ -208,6 +260,11 @@ class BenchmarkRecord(TypedDict):
     scope_creep_count: int  # floor-trip count
     wall_clock_sec: float
     claude_cost_usd: float | None  # None when only Codex-role phases ran
+    # True = this run changed an opted-in host path (see copy_exclude), so it was
+    # measured in — and left behind — a different environment than its siblings;
+    # the sweep is order-dependent from here on. None = not measured (the run never
+    # got far enough to attribute a change), which is NOT the same as False (#185).
+    host_mutated: bool | None
     started_at: str  # ISO-8601 UTC string
     finished_at: str  # ISO-8601 UTC string
 
@@ -336,6 +393,31 @@ def extract_metrics(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _opted_in_host_paths(real_repo: Path, copy_exclude: tuple[str, ...]) -> list[Path]:
+    """Real-repo directories the set removed from DEFAULT_COPY_EXCLUDE.
+
+    Derived from config — the names are whatever the operator dropped — so the engine
+    needs no stack knowledge to identify which host resources a set opted into
+    snapshotting. Glob patterns are skipped: they name file classes, not a resource
+    whose mutation would carry across runs.
+    """
+    names = [n for n in DEFAULT_COPY_EXCLUDE if n not in copy_exclude and "*" not in n]
+    return [real_repo / n for n in names if (real_repo / n).is_dir()]
+
+
+def _fingerprint_paths(paths: list[Path]) -> dict[str, tuple[int, int]]:
+    """size + mtime_ns per entry, for detecting mutation of an opted-in host path."""
+    out: dict[str, tuple[int, int]] = {}
+    for root in paths:
+        for p in root.rglob("*"):
+            try:
+                st = p.lstat()
+            except OSError:  # raced or unreadable — absence is itself a difference
+                continue
+            out[str(p)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
 def _repo_root() -> Path:
     """Real repo root. benchmark.py lives at <repo>/.redteam/workflows/benchmark.py."""
     return Path(__file__).resolve().parents[2]
@@ -452,12 +534,31 @@ def run_one(
     7. Read state.json from the snapshot; call extract_metrics; build record.
     8. TemporaryDirectory context manager auto-deletes the snapshot on exit.
 
+    Bound on that isolation (#185): the snapshot isolates the *repo*, not the
+    *toolchain*. A set that opts its virtualenv into the copy (see copy_exclude)
+    gets a venv whose bin/activate and console-script shebangs still hold the
+    ORIGINAL absolute prefix, so verification executes the host's interpreter and
+    tools, not the snapshot's. Measured, not assumed — see
+    test_copied_virtualenv_still_resolves_to_the_original_prefix. Making the copy
+    relocatable is unreliable (upstream removed `virtualenv --relocatable`), and
+    provisioning a fresh environment inside the snapshot needs a stack-specific
+    install command the engine must not encode. The toolchain is therefore shared
+    across every run of a sweep. It is constant — and so cannot confound a
+    between-config comparison — ONLY for tasks that do not mutate it; a task that
+    installs, upgrades or removes a package changes the environment later configs
+    are measured in, making results order-dependent (#185 review IR-002). That
+    cannot be prevented generically, so it is detected instead: an opted-in host
+    path is fingerprinted around the run and a mutation is reported loudly.
+
     wall_clock_sec is measured via time.monotonic() around the subprocess call, NOT
     re-derived from telemetry sums (which miss non-worker phases like plan_review).
     started_at / finished_at are ISO-8601 UTC strings.
     """
     real_repo = _repo_root()
     real_config = tomllib.loads((real_repo / ".redteam" / "config.toml").read_text(encoding="utf-8"))
+    # The set owns the overridable half of the snapshot exclusions, so it is read here
+    # rather than threaded through run_benchmark's injectable run_one seam.
+    copy_exclude = load_benchmark_set(set_root).copy_exclude
 
     started_at = _utc_now_iso()
     t_start = time.monotonic()
@@ -465,20 +566,12 @@ def run_one(
     with tempfile.TemporaryDirectory(dir=workspace) as td:
         tempcopy = Path(td) / "repo"
 
-        # Step 1: snapshot harness tree (exclude .git, venv, existing batches, results)
+        # Step 1: snapshot harness tree. Mandatory exclusions are unioned in last so a
+        # set's copy_exclude cannot drop .git / batches / results (#185).
         shutil.copytree(
             str(real_repo),
             str(tempcopy),
-            ignore=shutil.ignore_patterns(
-                ".git",
-                "venv",
-                ".venv",
-                "__pycache__",
-                "batches",
-                "results",
-                "results.jsonl",
-                "*.egg-info",
-            ),
+            ignore=shutil.ignore_patterns(*copy_exclude, *_MANDATORY_COPY_EXCLUDE),
         )
 
         # Step 2: git init on main, no origin remote
@@ -521,6 +614,15 @@ def run_one(
         driver_text = _BENCH_DRIVER_TEMPLATE.format(batch_dir_repr=repr(str(batch_dir)))
         driver_path.write_text(driver_text, encoding="utf-8")
 
+        # An opted-in host path (a virtualenv, typically) is shared by every run of a
+        # sweep and is NOT protected by the tempcopy, so a task that installs, upgrades
+        # or removes a package mutates the environment later configs are measured in.
+        # That contamination is order-dependent and would otherwise be invisible in the
+        # records; the engine cannot prevent it generically, but it can refuse to be
+        # silent about it (#185 review IR-002).
+        host_paths = _opted_in_host_paths(real_repo, copy_exclude)
+        host_before = _fingerprint_paths(host_paths)
+
         # Step 6: run driver subprocess (cwd=tempcopy so repo_root() resolves correctly)
         subprocess.run(
             [sys.executable, "-u", str(driver_path)],
@@ -534,6 +636,20 @@ def run_one(
         t_end = time.monotonic()
         finished_at = _utc_now_iso()
         wall_clock_sec = t_end - t_start
+
+        host_after = _fingerprint_paths(host_paths)
+        host_mutated = host_after != host_before
+        if host_mutated:
+            changed = len(set(host_before.items()) ^ set(host_after.items()))
+            print(
+                f"benchmark: WARNING — {config_name}/{task_id}/rep={repetition} mutated "
+                f"{changed} entr{'y' if changed == 1 else 'ies'} under an opted-in host path "
+                f"({', '.join(str(p) for p in host_paths)}). That path is shared by every run "
+                f"of this sweep and is not covered by the tempcopy, so later configs were "
+                f"measured in a different environment and these results are order-dependent. "
+                f"Treat the comparison as contaminated.",
+                file=sys.stderr,
+            )
 
         # Step 7: read state.json and extract metrics
         state_path = task_dir_in_batch / "state.json"
@@ -553,7 +669,7 @@ def run_one(
             }
 
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "config": config_name,
             "task": task_id,
             "repetition": repetition,
@@ -564,6 +680,7 @@ def run_one(
             "scope_creep_count": metrics["scope_creep_count"],
             "wall_clock_sec": wall_clock_sec,  # monotonic-measured; NOT telemetry sum
             "claude_cost_usd": metrics["claude_cost_usd"],
+            "host_mutated": host_mutated,
             "started_at": started_at,
             "finished_at": finished_at,
         }
@@ -591,6 +708,8 @@ def run_benchmark(
     Returns:
       0   — normal completion (including after run_one errors that are caught + continued)
       3   — budget abort (a pending dispatch would exceed set.budget_usd)
+      4   — contamination abort (a run mutated an opted-in host path, so the
+            environment later configs would be measured in has changed; #185)
     """
     bset = load_benchmark_set(set_root)
     results_path = set_root / "results.jsonl"
@@ -667,7 +786,7 @@ def run_benchmark(
         except Exception:
             now = _utc_now_iso()
             record = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "config": cfg,
                 "task": tid,
                 "repetition": rep,
@@ -678,6 +797,7 @@ def run_benchmark(
                 "scope_creep_count": 0,
                 "wall_clock_sec": 0.0,
                 "claude_cost_usd": None,
+                "host_mutated": None,  # unmeasured: run_one raised before it could report
                 "started_at": now,
                 "finished_at": now,
             }
@@ -685,6 +805,21 @@ def run_benchmark(
         # Append immediately so Ctrl-C between runs still resumes cleanly
         append_record(results_path, record)
         this_inv_records.append(record)
+
+        # Fail closed on contamination (#185 review IR-001). The record is already
+        # durably marked, but continuing would spend real money measuring every
+        # later config in an environment the earlier one changed, and the resulting
+        # ranking would encode dispatch order. Stopping here also keeps the damage
+        # to one config rather than letting it spread across the sweep.
+        if record.get("host_mutated"):
+            print(
+                f"benchmark: aborting after {cfg}/{tid}/rep={rep}: it mutated an opted-in "
+                f"host path, so every later run would be measured in a different environment. "
+                f"The record is marked host_mutated and excluded from reports. Restore the "
+                f"environment before resuming.",
+                file=sys.stderr,
+            )
+            return 4
 
     return 0
 
@@ -716,13 +851,22 @@ def build_report(config_names: list[str], records: list[dict]) -> str:
             by_config[cfg].append(r)
 
     def _cells(name: str) -> dict[str, str]:
-        recs = by_config[name]
+        # A contaminated run was measured in an environment one of its siblings
+        # changed, so comparing it against them measures dispatch order (#185).
+        # Excluded from every metric rather than silently averaged in, and surfaced
+        # in the sample cell so the exclusion is visible instead of a quiet shrink.
+        # Only an explicit True excludes: a pre-v3 record has no host_mutated key,
+        # and "not checked" must not read as "clean".
+        contaminated = sum(1 for r in by_config[name] if r.get("host_mutated") is True)
+        recs = [r for r in by_config[name] if r.get("host_mutated") is not True]
         total = len(recs)
         done_count = sum(1 for r in recs if r.get("outcome") == "done")
         deferred_count = sum(1 for r in recs if r.get("outcome") == "deferred")
         error_count = sum(1 for r in recs if r.get("outcome") == "error")
 
         sample = f"{total} (done={done_count}, deferred={deferred_count}, error={error_count})"
+        if contaminated:
+            sample += f" +{contaminated} contaminated, excluded"
         if total == 0:
             return {
                 "sample_size": sample,
