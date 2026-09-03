@@ -7,6 +7,18 @@ releases may include behavior changes; breaking changes are called out).
 
 ## [Unreleased]
 
+### Changed
+- **Default worker models moved to the current generation**: `models.planner`
+  `claude-opus-4-7` → `claude-opus-5`, `models.implementer` `claude-sonnet-4-6` →
+  `claude-sonnet-5`, in both the engine defaults (`ModelsConfig`) and this repo's
+  dogfood `config.toml` — a checked-in test asserts the two stay in sync. The
+  previous defaults had gone stale relative to the models actually in use.
+  Role→provider resolution is unchanged (`claude-*` still resolves to the Claude
+  worker adapter), so the cross-provider adversarial pairing guard is unaffected.
+  Note this only moves *new* tasks: a task's `state.json` pins its models at
+  creation and is authoritative thereafter (IR-006), so existing resumable tasks
+  keep their old pin — see #188.
+
 ## [0.9.1] - 2026-08-28
 
 A small release cut for one reason: **0.9.0's headline feature could not run.**

@@ -28,7 +28,7 @@ base_branch = "main"
 # Role → model. The reviewer/rescue keys are provider identifiers resolved to
 # adapters ("codex" → CodexReviewerAdapter, "claude" → ClaudeReviewerAdapter).
 # The worker side ("planner"/"implementer") resolves the same way.
-planner = "claude-opus-4-7"
-implementer = "claude-sonnet-4-6"
+planner = "claude-opus-5"
+implementer = "claude-sonnet-5"
 reviewer = "codex"
 rescue = "codex"

@@ -28,8 +28,8 @@ def test_defaults_are_generic_placeholders(tmp_path: Path) -> None:
     must not carry any one project's fingerprints (no ascendy `app/`/`ascendy`)."""
     cfg = load_config(tmp_path)
     # models = sensible current model defaults
-    assert cfg.models.planner == "claude-opus-4-7"
-    assert cfg.models.implementer == "claude-sonnet-4-6"
+    assert cfg.models.planner == "claude-opus-5"
+    assert cfg.models.implementer == "claude-sonnet-5"
     assert cfg.models.reviewer == "codex"
     assert cfg.models.rescue == "codex"
     # project = generic placeholders
@@ -86,7 +86,7 @@ def test_partial_toml_keeps_other_defaults(tmp_path: Path) -> None:
     (tmp_path / ".redteam" / "config.toml").write_text('[models]\nreviewer = "claude-opus-4-8"\n')
     cfg = load_config(tmp_path)
     assert cfg.models.reviewer == "claude-opus-4-8"
-    assert cfg.models.planner == "claude-opus-4-7"  # default kept
+    assert cfg.models.planner == "claude-opus-5"  # default kept
     assert cfg.project.source_dirs == ("src/",)  # default kept
 
 
