@@ -93,8 +93,8 @@ def test_default_model_for_role_reads_config_defaults(monkeypatch, tmp_path):
     """No config.toml → ModelsConfig defaults (the former DEFAULT_MODELS values)."""
     base = _load_base_module()
     monkeypatch.setattr(base, "repo_root", lambda: tmp_path)
-    assert base.default_model_for_role("planner") == "claude-opus-4-7"
-    assert base.default_model_for_role("implementer") == "claude-sonnet-4-6"
+    assert base.default_model_for_role("planner") == "claude-opus-5"
+    assert base.default_model_for_role("implementer") == "claude-sonnet-5"
     assert base.default_model_for_role("reviewer") == "codex"
     assert base.default_model_for_role("rescue") == "codex"
 
@@ -108,7 +108,7 @@ def test_default_model_for_role_honors_config_override(monkeypatch, tmp_path):
     assert base.default_model_for_role("planner") == "gpt-5"
     assert base.default_model_for_role("reviewer") == "claude-opus-4-8"
     # unspecified keys keep their defaults
-    assert base.default_model_for_role("implementer") == "claude-sonnet-4-6"
+    assert base.default_model_for_role("implementer") == "claude-sonnet-5"
 
 
 def test_claude_model_for_role_falls_back_to_config(monkeypatch, tmp_path):
@@ -116,7 +116,7 @@ def test_claude_model_for_role_falls_back_to_config(monkeypatch, tmp_path):
     owner still maps to None (not a valid `claude --model`)."""
     base = _load_base_module()
     monkeypatch.setattr(base, "repo_root", lambda: tmp_path)
-    assert base.claude_model_for_role({}, "implementer") == "claude-sonnet-4-6"
+    assert base.claude_model_for_role({}, "implementer") == "claude-sonnet-5"
     assert base.claude_model_for_role({}, "reviewer") is None
 
 

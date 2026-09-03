@@ -80,8 +80,8 @@ class ProjectConfig:
 class ModelsConfig:
     """Role → model. Resolved to adapters by the registry (step 3)."""
 
-    planner: str = "claude-opus-4-7"
-    implementer: str = "claude-sonnet-4-6"
+    planner: str = "claude-opus-5"
+    implementer: str = "claude-sonnet-5"
     reviewer: str = "codex"
     rescue: str = "codex"
     # Fallback reviewer when the primary reviewer fails on INFRA (missing CLI,
